@@ -1,0 +1,166 @@
+name: build
+
+# Build + test the Rust rewrite against the dev-branch eBPF contract.
+#
+# Two jobs:
+#   test    — host (Linux) `cargo test --lib`; platform-independent contract
+#             unit tests. Runs on every push/PR.
+#   android — cross-compile the eBPF objects (clang) + the Android arm64
+#             binary (NDK clang + libbpf-rs). Produces the actual on-device
+#             artifact. Verifies the eBPF C compiles and CO-RE BTF generates.
+#
+# This mirrors what `build_env.sh` + `Makefile` do for the Go project, but
+# driven by the Rust `build.rs`.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Retry transient crate-download / network failures (e.g. HTTP2 framing
+  # errors against crates.io). Cargo retries up to N times with backoff.
+  CARGO_NET_RETRY: "5"
+  CARGO_HTTP_MULTIPLEXING: "false"
+
+jobs:
+  # ---- host test (contract unit tests + the libbpf-rs host build) ----------
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (libelf for libbpf-sys to link against)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libelf-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.toml') }}
+
+      - name: cargo test --lib
+        run: cargo test --lib
+
+      - name: cargo test (integration contracts)
+        run: cargo test --test contracts
+
+      - name: cargo fmt --check (informational; cannot run locally during Phase 0)
+        # Kept as a check but non-blocking: formatting will be normalized in a
+        # dedicated `cargo fmt` pass once a green compile is confirmed.
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (warnings allowed during Phase 0-3 transition)
+        # TODO(phase-4): tighten to `cargo clippy --all-targets -- -D warnings`
+        # once the dev-branch rewrite is complete and all master-era code is
+        # replaced. For now warnings are informational (legacy code still
+        # present alongside the new contract layer).
+        run: cargo clippy --all-targets
+
+  # ---- Android cross-build (eBPF + arm64 binary) -------------------------
+  android:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (clang, libelf, libbpf-dev)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libelf-dev libbpf-dev
+
+      - name: Install Rust toolchain + Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-android-${{ hashFiles('Cargo.toml') }}
+
+      - name: Fetch libbpf source (for -I libbpf/src)
+        run: |
+          git clone --depth 1 https://github.com/libbpf/libbpf libbpf
+
+      - name: Compile the eBPF objects (stack.o, syscall.o, perf_mmap.o)
+        # Dry-run the build.rs logic explicitly so failures surface here
+        # rather than buried in the cargo build below.
+        run: |
+          mkdir -p ebpf/bpf
+          clang -D__TARGET_ARCH_arm64 -D__MODULE_STACK \
+            --target=bpf -c -nostdlibinc -no-canonical-prefixes -O2 -g \
+            -Ilibbpf/src -Iebpf \
+            ebpf/stack.c -o ebpf/bpf/stack.o
+          clang -D__TARGET_ARCH_arm64 -D__MODULE_SYSCALL \
+            --target=bpf -c -nostdlibinc -no-canonical-prefixes -O2 -g \
+            -Ilibbpf/src -Iebpf \
+            ebpf/syscall.c -o ebpf/bpf/syscall.o
+          clang -D__TARGET_ARCH_arm64 \
+            --target=bpf -c -nostdlibinc -no-canonical-prefixes -O2 -g \
+            -Ilibbpf/src -Iebpf \
+            ebpf/perf_mmap.c -o ebpf/bpf/perf_mmap.o
+          ls -la ebpf/bpf/
+
+      - name: Fetch bpftool + reference BTFs, generate min BTF
+        run: |
+          wget -q -O /tmp/bpf.tgz \
+            https://github.com/libbpf/bpftool/releases/download/v7.2.0-snapshot.0/bpftool-v7.2.0-snapshot.0-amd64.tar.gz
+          mkdir -p assets && tar -xzf /tmp/bpf.tgz -C assets && chmod +x assets/bpftool
+          wget -q -O /tmp/a.txz \
+            https://github.com/SeeFlowerX/BTFHubForAndroid/raw/master/common-android12-5.10/a12-5.10-arm64.btf.tar.xz
+          tar -xJf /tmp/a.txz -C assets
+          wget -q -O /tmp/r.txz \
+            https://github.com/SeeFlowerX/BTFHubForAndroid/raw/master/rock5b/rock5b-5.10-f9d1b1529-arm64.btf.tar.xz
+          tar -xJf /tmp/r.txz -C assets
+          assets/bpftool gen min_core_btf \
+            assets/rock5b-5.10-f9d1b1529-arm64.btf assets/rock5b-5.10-arm64_min.btf \
+            ebpf/bpf/stack.o ebpf/bpf/syscall.o
+          assets/bpftool gen min_core_btf \
+            assets/a12-5.10-arm64.btf assets/a12-5.10-arm64_min.btf \
+            ebpf/bpf/stack.o ebpf/bpf/syscall.o
+
+      - name: Set up NDK linker
+        run: |
+          mkdir -p ~/.cargo
+          cat > ~/.cargo/config.toml <<'EOF'
+          [target.aarch64-linux-android]
+          linker = "aarch64-linux-android29-clang"
+          ar = "aarch64-linux-android-ar"
+          EOF
+
+      - name: Install NDK
+        uses: nttld/setup-ndk@v1
+        id: setup_ndk
+        with:
+          ndk-version: r25b
+          add-to-path: false
+
+      - name: Add NDK to PATH
+        run: echo "${{ steps.setup_ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Cross-compile the Android arm64 binary (with embedded eBPF)
+        env:
+          BINDGEN_EXTRA_CLANG_ARGS: "-I${{ steps.setup_ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
+        run: |
+          cargo build --release --features embedded_bpf --target aarch64-linux-android
+
+      - name: Upload the Android binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: stackplz-arm64
+          path: target/aarch64-linux-android/release/stackplz

@@ -1,0 +1,20 @@
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Built eBPF bytecode (produced by build.rs from ebpf/*.c). The vendored
+# libbpf headers shipped under ebpf/bpf/*.h ARE tracked; only the compiled
+# *.o artifacts are ignored.
+/ebpf/bpf/*.o
+
+# libbpf source tree fetched by build_env.sh (for -I libbpf/src).
+/libbpf/
+
+# Build-time tools and BTF fetched by build_env.sh.
+/assets/bpftool
+/assets/bpftool-*
+/assets/*.btf
+/assets/*_min.btf
+
+# Final binary output
+/bin/

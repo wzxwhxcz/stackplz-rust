@@ -1,0 +1,62 @@
+[package]
+name = "stackplz"
+version = "0.1.0"
+edition = "2021"
+description = "eBPF-based stack tracing tool (Rust rewrite of SeeFlowerX/stackplz)"
+license = "MIT"
+build = "build.rs"
+
+[lib]
+name = "stackplz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stackplz"
+path = "src/main.rs"
+
+[features]
+default = []
+# Embed the compiled ebpf/*.o bytecode. Requires the .o files to exist
+# (built via build.rs from the AOSP headers + clang). Off by default so the
+# skeleton compiles on platforms without clang/the ebpf sources built.
+embedded_bpf = []
+# Pass -DDEBUG_PRINT to the eBPF compile (mirrors Makefile DEBUG=1).
+debug_print = []
+
+[dependencies]
+# CLI parsing (replacement for spf13/cobra)
+clap = { version = "4", features = ["derive"] }
+# Error handling
+anyhow = "1"
+thiserror = "1"
+# Serialization (config.json)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# gzip decompression (/proc/config.gz)
+flate2 = "1"
+# Regex (kernel config parsing)
+regex = "1"
+# Random symbol name generation (offset-only hooks)
+rand = "0.8"
+# Dynamic loading of libstackplz.so (replaces cgo dlopen)
+libloading = "0.8"
+# ELF parsing for uprobe symbol -> offset resolution
+object = { version = "0.32", default-features = false, features = ["read"] }
+# Casting repr(C) filter structs to bytes for the BPF map update.
+# `derive` so we can `#[derive(Pod, Zeroable)]` on the filter structs.
+bytemuck = { version = "1", features = ["derive"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# eBPF core (replacement for cilium/ebpf + ehids/ebpfmanager)
+libbpf-rs = "0.23"
+# POSIX API (sysconf, signals)
+libc = "0.2"
+# NOTE: libbpf-sys (pulled by libbpf-rs) builds vendored libbpf but links the
+# SYSTEM libelf. CI must `apt-get install -y libelf-dev` (see build.yml).
+# Vendoring libelf (vendored-libelf feature) requires `autopoint` from gettext
+# and is fragile, so we deliberately do NOT enable it.
+
+[profile.release]
+# Match Makefile `-ldflags "-w -s"` (strip symbols)
+strip = true
+lto = true

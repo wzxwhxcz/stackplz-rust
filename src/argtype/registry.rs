@@ -160,6 +160,10 @@ pub fn register_pre(name: &str, type_index: u32, parent_index: u32) -> u32 {
     new_p.name = name.to_string();
     new_p.type_index = type_index;
     new_p.parent_index = parent_index;
+    // Aliases belong only to the canonical type, not derivatives. Without this,
+    // get_arg_type_by_name would find clones (e.g. buffer_x2) when looking up
+    // "buf" instead of the original BUFFER type.
+    new_p.alias_names.clear();
     reg.insert(type_index, new_p);
     type_index
 }
@@ -258,11 +262,20 @@ pub fn is_registered(type_index: u32) -> bool {
 mod tests {
     use super::*;
     use super::super::consts::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Generate a unique test index in the 100000+ range to avoid collisions
+    /// with init_argtypes (0-57 + dynamic ~58+) or other parallel test runs.
+    static TEST_IDX: AtomicU32 = AtomicU32::new(100_000);
+    fn next_test_idx() -> u32 {
+        TEST_IDX.fetch_add(1, Ordering::SeqCst)
+    }
 
     #[test]
     fn register_and_get() {
-        register("test_num", TYPE_INT, 9999, 4);
-        let at = get_arg_type(9999);
+        let idx = next_test_idx();
+        register("test_num", TYPE_INT, idx, 4);
+        let at = get_arg_type(idx);
         assert_eq!(at.name, "test_num");
         assert_eq!(at.base_type, TYPE_INT);
         assert_eq!(at.size, 4);
@@ -270,44 +283,49 @@ mod tests {
 
     #[test]
     fn register_pre_clones_parent() {
-        register("parent", TYPE_STRUCT, 8001, 8);
-        with_type(8001, |at| at.add_op(0));
-        register_pre("child", 8002, 8001);
-        let child = get_arg_type(8002);
-        assert_eq!(child.name, "child");
-        assert_eq!(child.parent_index, 8001);
-        assert_eq!(child.op_list, vec![0]); // inherited from parent
+        let parent = next_test_idx();
+        let child = next_test_idx();
+        register("parent", TYPE_STRUCT, parent, 8);
+        with_type(parent, |at| at.add_op(0));
+        register_pre("child", child, parent);
+        let c = get_arg_type(child);
+        assert_eq!(c.name, "child");
+        assert_eq!(c.parent_index, parent);
+        assert_eq!(c.op_list, vec![0]); // inherited from parent
     }
 
     #[test]
     fn register_new_assigns_dynamic_index() {
-        register("base", TYPE_INT, 7001, 4);
-        let idx = register_new("dyn_int", 7001);
+        let base = next_test_idx();
+        register("base", TYPE_INT, base, 4);
+        let idx = register_new("dyn_int", base);
         assert!(idx > CONST_ARGTYPE_END);
         let at = get_arg_type(idx);
         assert_eq!(at.name, "dyn_int");
-        assert_eq!(at.parent_index, 7001);
+        assert_eq!(at.parent_index, base);
     }
 
     #[test]
     fn with_type_mutates_in_place() {
-        register("mutable", TYPE_STRUCT, 6001, 0);
-        with_type(6001, |at| {
+        let idx = next_test_idx();
+        register("mutable", TYPE_STRUCT, idx, 0);
+        with_type(idx, |at| {
             at.size = 42;
             at.add_op(5);
             at.add_op(10);
         });
-        let at = get_arg_type(6001);
+        let at = get_arg_type(idx);
         assert_eq!(at.size, 42);
         assert_eq!(at.op_list, vec![5, 10]);
     }
 
     #[test]
     fn alias_lookup_works() {
-        register("base_type", TYPE_BUFFER, 5001, 0);
+        let idx = next_test_idx();
+        register("base_type", TYPE_BUFFER, idx, 0);
         register_alias("bt", "base_type");
         let at = get_arg_type_by_name("bt");
-        assert_eq!(at.type_index, 5001);
+        assert_eq!(at.type_index, idx);
     }
 
     #[test]

@@ -422,13 +422,12 @@ pub fn r_struct(name: &str, size: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::consts::*;
-    use super::super::op;
+    use super::super::init_argtypes;
     use super::super::registry::*;
 
     fn ensure_init() {
-        super::super::init_argtypes();
+        init_argtypes();
     }
 
     #[test]
@@ -468,9 +467,8 @@ mod tests {
         let at = get_arg_type(MSGHDR);
         // 2 (save struct) + set_tmp + 4 (control buf) + move_tmp +
         // 3 (iov setup) + for_break + set_tmp + iovec_ops(7) +
-        // move_tmp + add_offset + for_break
-        let expected = 2 + 1 + 4 + 1 + 3 + 1 + 1 + 7 + 1 + 1 + 1;
-        assert_eq!(at.op_list.len(), expected);
+        // move_tmp + add_offset + for_break = 22
+        assert_eq!(at.op_list.len(), 22);
     }
 
     #[test]

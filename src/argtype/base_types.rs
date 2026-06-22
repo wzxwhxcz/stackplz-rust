@@ -87,13 +87,13 @@ fn init_il2cpp_string() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::consts::*;
+    use super::super::init_argtypes;
     use super::super::op;
     use super::super::registry::*;
 
     fn ensure_init() {
-        super::super::init_argtypes();
+        init_argtypes();
     }
     use super::*;
 
@@ -138,8 +138,9 @@ mod tests {
     fn aliases_resolve() {
         ensure_init();
         let buf = get_arg_type_by_name("buf");
-        assert_eq!(buf.type_index, BUFFER);
+        assert_eq!(buf.base_type, TYPE_BUFFER);
+        assert_eq!(buf.name, "buffer");
         let socklen = get_arg_type_by_name("socklen_t");
-        assert_eq!(socklen.type_index, UINT32);
+        assert_eq!(socklen.name, "uint32");
     }
 }

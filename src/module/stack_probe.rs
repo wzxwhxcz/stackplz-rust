@@ -98,7 +98,7 @@ impl StackProbeModule {
             let _link = prog.attach_uprobe(false, -1, library, attach_offset as usize)?;
             attached += 1;
             logger.println(&format!(
-                "{NAME}\tattached {prog_name} to {} at offset 0x{attach_offset:x}"
+                "{NAME}\tattached {prog_name} to {library} at offset 0x{attach_offset:x}"
             ));
         }
 

@@ -154,7 +154,8 @@ mod tests {
 
     #[test]
     fn parse_stack_subcommand_defaults() {
-        let cli = Cli::try_parse_from(["stackplz", "--uid", "10245", "stack", "--symbol", "open"]).unwrap();
+        let cli = Cli::try_parse_from(["stackplz", "--uid", "10245", "stack", "--symbol", "open"])
+            .unwrap();
         assert_eq!(cli.global.uid, 10245);
         match cli.command {
             Some(Command::Stack(s)) => {
@@ -179,7 +180,8 @@ mod tests {
 
     #[test]
     fn parse_syscall_nr_value() {
-        let cli = Cli::try_parse_from(["stackplz", "--name", "com.x", "syscall", "--nr", "63"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["stackplz", "--name", "com.x", "syscall", "--nr", "63"]).unwrap();
         match cli.command {
             Some(Command::Syscall(s)) => assert_eq!(s.nr, 63),
             _ => panic!("expected syscall subcommand"),
@@ -198,7 +200,8 @@ mod tests {
 
     #[test]
     fn no_tids_flag() {
-        let cli = Cli::try_parse_from(["stackplz", "--uid", "1", "--no-tids", "100,200", "stack"]).unwrap();
+        let cli = Cli::try_parse_from(["stackplz", "--uid", "1", "--no-tids", "100,200", "stack"])
+            .unwrap();
         assert_eq!(cli.global.no_tids, "100,200");
     }
 }

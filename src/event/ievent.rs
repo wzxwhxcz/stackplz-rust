@@ -21,7 +21,12 @@ pub struct LibArg {
 // elements), so provide one manually.
 impl Default for LibArg {
     fn default() -> Self {
-        Self { abi: 0, regs: [0; super::REG_COUNT], stack_size: 0, dyn_size: 0 }
+        Self {
+            abi: 0,
+            regs: [0; super::REG_COUNT],
+            stack_size: 0,
+            dyn_size: 0,
+        }
     }
 }
 // SAFETY: repr(C) of u64 fields + [u64; 33]; all fields are u64-aligned with no
@@ -85,7 +90,13 @@ impl UnwindBuf {
         let stack_size = read_u64(buf, pos)? as usize;
         let data = read_bytes(buf, pos, stack_size)?;
         let dyn_size = read_u64(buf, pos)?;
-        Ok(UnwindBuf { abi, regs, stack_size: stack_size as u64, data, dyn_size })
+        Ok(UnwindBuf {
+            abi,
+            regs,
+            stack_size: stack_size as u64,
+            data,
+            dyn_size,
+        })
     }
 }
 
@@ -99,7 +110,10 @@ pub struct RegsBuf {
 
 impl Default for RegsBuf {
     fn default() -> Self {
-        Self { abi: 0, regs: [0; super::REG_COUNT] }
+        Self {
+            abi: 0,
+            regs: [0; super::REG_COUNT],
+        }
     }
 }
 

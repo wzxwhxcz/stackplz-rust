@@ -81,7 +81,9 @@ pub struct StrBuf {
 // 32 elements), so provide it manually.
 impl Default for StrBuf {
     fn default() -> Self {
-        Self { str_val: [0; MAX_STRCMP_LEN] }
+        Self {
+            str_val: [0; MAX_STRCMP_LEN],
+        }
     }
 }
 // SAFETY: repr(C) over a single byte array — no padding holes, every bit
@@ -177,7 +179,12 @@ pub struct CtxRegs {
 
 impl Default for CtxRegs {
     fn default() -> Self {
-        Self { regs: [0; CTX_REGS_LEN], sp: 0, pc: 0, flag: 0 }
+        Self {
+            regs: [0; CTX_REGS_LEN],
+            sp: 0,
+            pc: 0,
+            flag: 0,
+        }
     }
 }
 
@@ -203,7 +210,12 @@ unsafe impl<const N: usize> bytemuck::Zeroable for PointArgs<N> {}
 
 impl<const N: usize> Default for PointArgs<N> {
     fn default() -> Self {
-        Self { enter_key: 0, signal: 0, op_count: 0, op_key_list: [0; N] }
+        Self {
+            enter_key: 0,
+            signal: 0,
+            op_count: 0,
+            op_key_list: [0; N],
+        }
     }
 }
 
@@ -225,7 +237,9 @@ unsafe impl bytemuck::Zeroable for BufT {}
 
 impl Default for BufT {
     fn default() -> Self {
-        Self { buf: [0; MAX_PERCPU_BUFSIZE] }
+        Self {
+            buf: [0; MAX_PERCPU_BUFSIZE],
+        }
     }
 }
 

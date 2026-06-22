@@ -143,12 +143,20 @@ impl<'a> ArgsCursor<'a> {
             let sz = self.read_i32()?;
             if (sz as u32) == STRARR_MAGIC_LEN {
                 // Truncated element: the kernel writes the magic and stops.
-                elems.push(StrArrElem { size: sz, bytes: &[], truncated: true });
+                elems.push(StrArrElem {
+                    size: sz,
+                    bytes: &[],
+                    truncated: true,
+                });
                 break;
             }
             let n = if sz < 0 { 0 } else { sz as usize };
             let bytes = self.read_bytes(n)?;
-            elems.push(StrArrElem { size: sz, bytes, truncated: false });
+            elems.push(StrArrElem {
+                size: sz,
+                bytes,
+                truncated: false,
+            });
         }
         Ok((index, elems))
     }
@@ -156,7 +164,11 @@ impl<'a> ArgsCursor<'a> {
     // ---- LE primitives ----------------------------------------------------
 
     fn read_u8(&mut self) -> Result<u8> {
-        let b = self.buf.get(self.pos).copied().ok_or_else(|| anyhow!("args underflow: u8 at {}", self.pos))?;
+        let b = self
+            .buf
+            .get(self.pos)
+            .copied()
+            .ok_or_else(|| anyhow!("args underflow: u8 at {}", self.pos))?;
         self.pos += 1;
         Ok(b)
     }

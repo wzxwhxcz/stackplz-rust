@@ -68,7 +68,8 @@ mod tests {
 
     #[test]
     fn parse_sample_config_json() {
-        let json = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.json")).unwrap();
+        let json =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.json")).unwrap();
         let cfg: HookConfig = serde_json::from_str(&json).unwrap();
         assert!(!cfg.library_dirs.is_empty());
         assert_eq!(cfg.libs.len(), 2);

@@ -3,11 +3,9 @@
 //!
 //! These are platform-independent (no libbpf-rs) and run on any host.
 
-use stackplz::config::sconfig::parse_tid_blacklist;
-use stackplz::config::{
-    ProbeConfig, SConfig, StackFilter, SyscallFilter, MAX_TID_BLACKLIST_COUNT,
-};
 use stackplz::config::hook_json::{hex2int, HookConfig};
+use stackplz::config::sconfig::parse_tid_blacklist;
+use stackplz::config::{ProbeConfig, SConfig, StackFilter, SyscallFilter, MAX_TID_BLACKLIST_COUNT};
 use stackplz::event::context::{b2s_trim, regs_to_json};
 use stackplz::event::{ContextEvent, LibArg, UnwindBuf};
 
@@ -119,7 +117,8 @@ fn probe_config_needs_symbol_xor_offset() {
 
 #[test]
 fn parse_shipped_config_json() {
-    let json = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.json")).unwrap();
+    let json =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.json")).unwrap();
     let cfg: HookConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(cfg.libs.len(), 2);
     assert_eq!(cfg.libs[0].library, "bionic/libc.so");
@@ -195,8 +194,8 @@ fn b2s_trim_matches_go_b2strim() {
 
 use stackplz::contract::{
     decode_perf_record, ArgFilter, ArgFilterType, ArgsCursor, BufT, CommonFilter, ConfigEntry,
-    CtxRegs, EventContext, EventId, MAX_EVENT_SIZE, MAX_OP_COUNT_STACK, MAX_OP_COUNT_SYSCALL,
-    OpCode, PerfRecord, StackPointArgs, STRARR_MAGIC_LEN, SyscallPointArgs,
+    CtxRegs, EventContext, EventId, OpCode, PerfRecord, StackPointArgs, SyscallPointArgs,
+    MAX_EVENT_SIZE, MAX_OP_COUNT_STACK, MAX_OP_COUNT_SYSCALL, STRARR_MAGIC_LEN,
 };
 
 // ---- dev #[repr(C)] struct sizes (mirror ebpf/types.h) --------------------

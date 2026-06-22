@@ -8,11 +8,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 /// Run the `syscall` subcommand. Mirrors `syscallCommandFunc`.
-pub fn run(
-    global: &mut GlobalConfig,
-    target: &mut TargetConfig,
-    args: SyscallArgs,
-) -> Result<()> {
+pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: SyscallArgs) -> Result<()> {
     // `syscall` subcommand uses the `syscall_` log prefix.
     let logger = Arc::new(crate::logger::Logger::new("syscall_", true));
     if !global.logger_file.is_empty() {

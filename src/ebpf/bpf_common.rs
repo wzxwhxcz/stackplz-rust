@@ -51,7 +51,11 @@ pub fn resolve_symbol_offset(elf_bytes: &[u8], symbol: &str) -> Result<u64> {
     let obj = object::File::parse(elf_bytes)
         .map_err(|e| anyhow::anyhow!("failed to parse ELF: {}", e))?;
     for sym in obj.symbols().chain(obj.dynamic_symbols()) {
-        if sym.name_bytes().map(|n| n == symbol.as_bytes()).unwrap_or(false) {
+        if sym
+            .name_bytes()
+            .map(|n| n == symbol.as_bytes())
+            .unwrap_or(false)
+        {
             return Ok(sym.address());
         }
     }
@@ -80,9 +84,7 @@ pub mod linux {
     //!   4. expose the `*_events` perf-event-array map to the reader loop
 
     use anyhow::{anyhow, Result};
-    use libbpf_rs::{
-        Map, MapFlags, Object, ObjectBuilder,
-    };
+    use libbpf_rs::{Map, MapFlags, Object, ObjectBuilder};
 
     /// Open an embedded eBPF object from memory (no temp file needed).
     /// Mirrors `bpfManager.InitWithOptions(bytes.NewReader(byteBuf), ...)`.

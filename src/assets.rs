@@ -17,23 +17,49 @@ struct EmbeddedLib {
 /// The full list of bundled preload libs. Mirrors the 9 files in
 /// `assets/preload_libs/`.
 const PRELOAD_LIBS: &[EmbeddedLib] = &[
-    EmbeddedLib { name: "ld-android.so", bytes: include_bytes!("../assets/preload_libs/ld-android.so") },
-    EmbeddedLib { name: "libbase.so", bytes: include_bytes!("../assets/preload_libs/libbase.so") },
-    EmbeddedLib { name: "libc++.so", bytes: include_bytes!("../assets/preload_libs/libc++.so") },
-    EmbeddedLib { name: "libdl.so", bytes: include_bytes!("../assets/preload_libs/libdl.so") },
-    EmbeddedLib { name: "liblog.so", bytes: include_bytes!("../assets/preload_libs/liblog.so") },
-    EmbeddedLib { name: "liblzma.so", bytes: include_bytes!("../assets/preload_libs/liblzma.so") },
-    EmbeddedLib { name: "libm.so", bytes: include_bytes!("../assets/preload_libs/libm.so") },
-    EmbeddedLib { name: "libstackplz.so", bytes: include_bytes!("../assets/preload_libs/libstackplz.so") },
-    EmbeddedLib { name: "libunwindstack.so", bytes: include_bytes!("../assets/preload_libs/libunwindstack.so") },
+    EmbeddedLib {
+        name: "ld-android.so",
+        bytes: include_bytes!("../assets/preload_libs/ld-android.so"),
+    },
+    EmbeddedLib {
+        name: "libbase.so",
+        bytes: include_bytes!("../assets/preload_libs/libbase.so"),
+    },
+    EmbeddedLib {
+        name: "libc++.so",
+        bytes: include_bytes!("../assets/preload_libs/libc++.so"),
+    },
+    EmbeddedLib {
+        name: "libdl.so",
+        bytes: include_bytes!("../assets/preload_libs/libdl.so"),
+    },
+    EmbeddedLib {
+        name: "liblog.so",
+        bytes: include_bytes!("../assets/preload_libs/liblog.so"),
+    },
+    EmbeddedLib {
+        name: "liblzma.so",
+        bytes: include_bytes!("../assets/preload_libs/liblzma.so"),
+    },
+    EmbeddedLib {
+        name: "libm.so",
+        bytes: include_bytes!("../assets/preload_libs/libm.so"),
+    },
+    EmbeddedLib {
+        name: "libstackplz.so",
+        bytes: include_bytes!("../assets/preload_libs/libstackplz.so"),
+    },
+    EmbeddedLib {
+        name: "libunwindstack.so",
+        bytes: include_bytes!("../assets/preload_libs/libunwindstack.so"),
+    },
 ];
 
 /// Extract all embedded preload libs to `<exec_dir>/preload_libs/`.
 /// Mirrors `assets.RestoreAssets(ExecPath, "preload_libs")`.
 pub fn restore_assets(exec_dir: &str, subdir: &str) -> Result<()> {
     let dir = PathBuf::from(exec_dir).join(subdir);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| anyhow!("create {} failed: {}", dir.display(), e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| anyhow!("create {} failed: {}", dir.display(), e))?;
     for lib in PRELOAD_LIBS {
         let target = dir.join(lib.name);
         std::fs::write(&target, lib.bytes)
@@ -48,7 +74,11 @@ mod tests {
 
     #[test]
     fn all_nine_libs_embedded() {
-        assert_eq!(PRELOAD_LIBS.len(), 9, "expected 9 preload libs to match the Go tree");
+        assert_eq!(
+            PRELOAD_LIBS.len(),
+            9,
+            "expected 9 preload libs to match the Go tree"
+        );
         let names: Vec<&str> = PRELOAD_LIBS.iter().map(|l| l.name).collect();
         assert!(names.contains(&"libstackplz.so"));
         assert!(names.contains(&"libunwindstack.so"));

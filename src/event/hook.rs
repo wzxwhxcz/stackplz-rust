@@ -41,14 +41,26 @@ impl HookDataEvent {
             // Resolve the named register value via /proc/<pid>/maps.
             let reg_idx = reg_name_to_index(&self.probe.sconfig.reg_name);
             if let Some(idx) = reg_idx {
-                if let Some(regs) = self.ctx.unwind.as_ref().map(|u| &u.regs).or_else(|| self.ctx.regs_only.as_ref().map(|r| &r.regs)) {
+                if let Some(regs) = self
+                    .ctx
+                    .unwind
+                    .as_ref()
+                    .map(|u| &u.regs)
+                    .or_else(|| self.ctx.regs_only.as_ref().map(|r| &r.regs))
+                {
                     let value = regs[idx];
                     match parse_reg(self.ctx.pid, value) {
                         Ok(info) => {
-                            out.push_str(&format!(", Reg {} Info:\n{}", self.probe.sconfig.reg_name, info));
+                            out.push_str(&format!(
+                                ", Reg {} Info:\n{}",
+                                self.probe.sconfig.reg_name, info
+                            ));
                         }
                         Err(e) => {
-                            out.push_str(&format!(", Reg {} Info:\n<resolve failed: {}>", self.probe.sconfig.reg_name, e));
+                            out.push_str(&format!(
+                                ", Reg {} Info:\n<resolve failed: {}>",
+                                self.probe.sconfig.reg_name, e
+                            ));
                         }
                     }
                 }
@@ -114,7 +126,11 @@ mod tests {
             symbol: "x".into(),
             offset: 0,
         };
-        let e = HookDataEvent { ctx: ctx(), probe, stack_info: String::new() };
+        let e = HookDataEvent {
+            ctx: ctx(),
+            probe,
+            stack_info: String::new(),
+        };
         assert_eq!(e.render(), "[1|2|app]");
     }
 

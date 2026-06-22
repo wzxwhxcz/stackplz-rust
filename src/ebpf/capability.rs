@@ -10,7 +10,11 @@ use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::io::Read;
 
-const REQUIRED_CONFIGS: &[&str] = &["CONFIG_BPF", "CONFIG_UPROBES", "CONFIG_ARCH_SUPPORTS_UPROBES"];
+const REQUIRED_CONFIGS: &[&str] = &[
+    "CONFIG_BPF",
+    "CONFIG_UPROBES",
+    "CONFIG_ARCH_SUPPORTS_UPROBES",
+];
 
 /// Read `/proc/config.gz` (or a known fallback path) and return the kernel
 /// config as a `CONFIG_*` -> value map. Mirrors `GetSystemConfig`.
@@ -47,9 +51,16 @@ pub fn parse_config(text: &str) -> HashMap<String, String> {
 pub fn is_enable_bpf() -> Result<()> {
     let config = get_system_config()?;
     for key in REQUIRED_CONFIGS {
-        let v = config.get(*key).cloned().unwrap_or_else(|| "not set".into());
+        let v = config
+            .get(*key)
+            .cloned()
+            .unwrap_or_else(|| "not set".into());
         if v != "y" {
-            return Err(anyhow!("{} is not enabled ({}), please check kernel config", key, v));
+            return Err(anyhow!(
+                "{} is not enabled ({}), please check kernel config",
+                key,
+                v
+            ));
         }
     }
     Ok(())
@@ -87,7 +98,10 @@ CONFIG_FOO=\"bar\"
         assert_eq!(m.get("CONFIG_BPF").map(|s| s.as_str()), Some("y"));
         assert_eq!(m.get("CONFIG_UPROBES").map(|s| s.as_str()), Some("y"));
         assert_eq!(m.get("CONFIG_FOO").map(|s| s.as_str()), Some("bar"));
-        assert_eq!(m.get("CONFIG_DEBUG_INFO_BTF").map(|s| s.as_str()), Some("n"));
+        assert_eq!(
+            m.get("CONFIG_DEBUG_INFO_BTF").map(|s| s.as_str()),
+            Some("n")
+        );
         assert!(!m.contains_key("# comment"));
     }
 

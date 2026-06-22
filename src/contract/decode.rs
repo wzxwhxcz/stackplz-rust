@@ -133,12 +133,8 @@ pub fn decode_perf_record(raw: &[u8]) -> Result<PerfRecord<'_>> {
     let context: EventContext = *bytemuck::from_bytes(&raw[..EVENT_CONTEXT_SIZE]);
     let args_blob = &raw[EVENT_CONTEXT_SIZE..];
 
-    let eventid = EventId::from_u32(context.eventid).ok_or_else(|| {
-        anyhow!(
-            "unknown event id {} (not 456/457/458)",
-            context.eventid
-        )
-    })?;
+    let eventid = EventId::from_u32(context.eventid)
+        .ok_or_else(|| anyhow!("unknown event id {} (not 456/457/458)", context.eventid))?;
 
     Ok(match eventid {
         EventId::SyscallEnter => {
@@ -147,12 +143,23 @@ pub fn decode_perf_record(raw: &[u8]) -> Result<PerfRecord<'_>> {
             let lr = read_raw_u64(&mut c, 1)?;
             let sp = read_raw_u64(&mut c, 2)?;
             let pc = read_raw_u64(&mut c, 3)?;
-            PerfRecord::SyscallEnter(SyscallEnterEvent { context, sysno, lr, sp, pc, args: c })
+            PerfRecord::SyscallEnter(SyscallEnterEvent {
+                context,
+                sysno,
+                lr,
+                sp,
+                pc,
+                args: c,
+            })
         }
         EventId::SyscallExit => {
             let mut c = ArgsCursor::new(args_blob);
             let sysno = read_raw_u32(&mut c, 0)?;
-            PerfRecord::SyscallExit(SyscallExitEvent { context, sysno, args: c })
+            PerfRecord::SyscallExit(SyscallExitEvent {
+                context,
+                sysno,
+                args: c,
+            })
         }
         EventId::UprobeEnter => {
             let mut c = ArgsCursor::new(args_blob);
@@ -160,7 +167,14 @@ pub fn decode_perf_record(raw: &[u8]) -> Result<PerfRecord<'_>> {
             let lr = read_raw_u64(&mut c, 1)?;
             let sp = read_raw_u64(&mut c, 2)?;
             let pc = read_raw_u64(&mut c, 3)?;
-            PerfRecord::UprobeEnter(UprobeEnterEvent { context, point_key, lr, sp, pc, args: c })
+            PerfRecord::UprobeEnter(UprobeEnterEvent {
+                context,
+                point_key,
+                lr,
+                sp,
+                pc,
+                args: c,
+            })
         }
     })
 }
@@ -264,7 +278,7 @@ mod tests {
         let ctx = header(457, "myproc");
         let mut args = Vec::new();
         args.extend_from_slice(&raw_u32(0, 221)); // sysno (execve)
-        // (return value would be appended by argtype layer at save_index)
+                                                  // (return value would be appended by argtype layer at save_index)
         let raw = raw_buf(&ctx, &args);
         let rec = decode_perf_record(&raw).unwrap();
         match rec {

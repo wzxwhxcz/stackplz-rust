@@ -48,7 +48,11 @@ impl Logger {
         // Reproduce the (buggy) Go logic: if the file doesn't exist, os.Remove
         // is a no-op; either way we then truncate via create.
         let _ = std::fs::remove_file(&p);
-        let f = OpenOptions::new().create(true).write(true).truncate(true).open(&p)?;
+        let f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&p)?;
         let mut g = self.inner.lock().unwrap();
         g.file = Some(f);
         g.show_terminal = !quiet;

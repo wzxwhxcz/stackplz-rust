@@ -48,7 +48,15 @@ impl ContextEvent {
             c
         };
 
-        let mut evt = ContextEvent { sample_size, pid, tid, timestamp_ns, comm, unwind: None, regs_only: None };
+        let mut evt = ContextEvent {
+            sample_size,
+            pid,
+            tid,
+            timestamp_ns,
+            comm,
+            unwind: None,
+            regs_only: None,
+        };
 
         if unwind_stack {
             evt.unwind = Some(UnwindBuf::parse(raw, pos)?);
@@ -69,7 +77,11 @@ impl ContextEvent {
     /// `ContextEvent.GetStackTrace()` register formatting
     /// (`event_context.go`). Keys: x0..x29, lr, sp, pc.
     pub fn regs_json(&self) -> Option<String> {
-        let regs = self.unwind.as_ref().map(|u| &u.regs).or_else(|| self.regs_only.as_ref().map(|r| &r.regs))?;
+        let regs = self
+            .unwind
+            .as_ref()
+            .map(|u| &u.regs)
+            .or_else(|| self.regs_only.as_ref().map(|r| &r.regs))?;
         Some(regs_to_json(regs))
     }
 }
@@ -77,7 +89,11 @@ impl ContextEvent {
 /// Trim trailing NULs and spaces from a byte slice, returning a UTF-8 string.
 /// Mirrors `util.B2STrim`.
 pub fn b2s_trim(bytes: &[u8]) -> String {
-    let end = bytes.iter().rposition(|&b| b != 0 && b != b' ').map(|i| i + 1).unwrap_or(0);
+    let end = bytes
+        .iter()
+        .rposition(|&b| b != 0 && b != b' ')
+        .map(|i| i + 1)
+        .unwrap_or(0);
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 

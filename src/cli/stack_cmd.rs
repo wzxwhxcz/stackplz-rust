@@ -10,11 +10,7 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
 /// Run the `stack` subcommand. Mirrors `stackCommandFunc`.
-pub fn run(
-    global: &mut GlobalConfig,
-    target: &mut TargetConfig,
-    args: StackArgs,
-) -> Result<()> {
+pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: StackArgs) -> Result<()> {
     let stack_cfg = StackConfig::from(&args);
     let logger = Arc::new(crate::logger::Logger::new("", true));
 
@@ -54,7 +50,11 @@ pub fn run(
 
     for mut probe in probes {
         probe.sconfig.debug = global.debug;
-        logger.println(&format!("{}\thook info:{}", MODULE_NAME_STACK, probe.info()));
+        logger.println(&format!(
+            "{}\thook info:{}",
+            MODULE_NAME_STACK,
+            probe.info()
+        ));
 
         let mod_logger = logger.clone();
         let mod_lib_path = lib_path.clone();
@@ -101,7 +101,9 @@ fn parse_config(
     let mut hook_cfg: HookConfig = serde_json::from_str(&content)?;
 
     // Merge library_dirs from the file with the target's discovered dirs.
-    hook_cfg.library_dirs.extend(target.library_dirs.iter().cloned());
+    hook_cfg
+        .library_dirs
+        .extend(target.library_dirs.iter().cloned());
 
     for lib_hook in &hook_cfg.libs {
         if lib_hook.disable {

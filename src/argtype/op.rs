@@ -89,7 +89,9 @@ struct OpManager {
 
 impl OpManager {
     fn new() -> Self {
-        Self { op_list: Vec::new() }
+        Self {
+            op_list: Vec::new(),
+        }
     }
 
     fn count(&self) -> u32 {
@@ -468,10 +470,7 @@ mod tests {
         assert_eq!(opc_skip(), 0);
         assert_eq!(opc_save_ptr_string16(), 33);
         let n = count();
-        assert!(
-            n >= 34,
-            "expected at least 34 registered ops, got {n}"
-        );
+        assert!(n >= 34, "expected at least 34 registered ops, got {n}");
     }
 
     #[test]

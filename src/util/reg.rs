@@ -60,7 +60,12 @@ fn parse_maps_line(line: &str) -> Option<MapSegment> {
     let start = u64::from_str_radix(start_s.trim(), 16).ok()?;
     let end = u64::from_str_radix(end_s.trim(), 16).ok()?;
     let offset = u64::from_str_radix(offset.trim(), 16).ok()?;
-    Some(MapSegment { start, end, offset, path })
+    Some(MapSegment {
+        start,
+        end,
+        offset,
+        path,
+    })
 }
 
 #[cfg(test)]
@@ -69,10 +74,9 @@ mod tests {
 
     #[test]
     fn parse_simple_maps_line() {
-        let seg = parse_maps_line(
-            "7e8a000000-7e8a010000 r-xp 00000000 fe:00 1234  /apex/.../libc.so",
-        )
-        .unwrap();
+        let seg =
+            parse_maps_line("7e8a000000-7e8a010000 r-xp 00000000 fe:00 1234  /apex/.../libc.so")
+                .unwrap();
         assert_eq!(seg.start, 0x7e8a000000);
         assert_eq!(seg.end, 0x7e8a010000);
         assert_eq!(seg.offset, 0);
@@ -81,10 +85,9 @@ mod tests {
 
     #[test]
     fn parse_maps_line_with_offset() {
-        let seg = parse_maps_line(
-            "7e8a010000-7e8a020000 r--p 00010000 fe:00 1234  /data/app/libfoo.so",
-        )
-        .unwrap();
+        let seg =
+            parse_maps_line("7e8a010000-7e8a020000 r--p 00010000 fe:00 1234  /data/app/libfoo.so")
+                .unwrap();
         assert_eq!(seg.offset, 0x00010000);
     }
 

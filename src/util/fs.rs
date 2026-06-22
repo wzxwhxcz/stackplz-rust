@@ -82,7 +82,10 @@ mod tests {
         std::fs::create_dir_all(&b).unwrap();
         std::fs::write(a.join("libsame.so"), b"").unwrap();
         std::fs::write(b.join("libsame.so"), b"").unwrap();
-        let dirs = [a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()];
+        let dirs = [
+            a.to_string_lossy().into_owned(),
+            b.to_string_lossy().into_owned(),
+        ];
         let r = find_lib("libsame.so", &dirs);
         assert!(r.is_err(), "expected ambiguity error, got {:?}", r);
         // cleanup so re-runs are clean

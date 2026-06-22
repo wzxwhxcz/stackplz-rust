@@ -58,9 +58,8 @@ fn load_unwinder(lib_path: &str) -> Result<Unwinder> {
     let static_lib: &'static Library = Box::leak(boxed_lib);
     // `static_lib` is `&'static Library`, so `get` returns `Symbol<'static, _>`
     // directly — no separate borrow step needed.
-    let get_stack: Symbol<'static, GetStackFn> =
-        unsafe { static_lib.get(b"get_stack\0") }
-            .map_err(|e| anyhow!("dlsym get_stack failed: {}", e))?;
+    let get_stack: Symbol<'static, GetStackFn> = unsafe { static_lib.get(b"get_stack\0") }
+        .map_err(|e| anyhow!("dlsym get_stack failed: {}", e))?;
     Ok(Unwinder { get_stack })
 }
 

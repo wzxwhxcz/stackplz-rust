@@ -16,13 +16,10 @@ use anyhow::{anyhow, bail, Result};
 
 /// The persistent pre-run. Runs before any subcommand's `Run`.
 /// Mirrors `persistentPreRunEFunc`.
-pub fn persistent_pre_run(
-    global: &mut GlobalConfig,
-    target: &mut TargetConfig,
-) -> Result<()> {
+pub fn persistent_pre_run(global: &mut GlobalConfig, target: &mut TargetConfig) -> Result<()> {
     // 1. Executable directory.
-    let exe = std::env::current_exe()
-        .map_err(|e| anyhow!("please build as executable binary, {}", e))?;
+    let exe =
+        std::env::current_exe().map_err(|e| anyhow!("please build as executable binary, {}", e))?;
     let exec_dir = exe
         .parent()
         .ok_or_else(|| anyhow!("cannot resolve executable directory"))?

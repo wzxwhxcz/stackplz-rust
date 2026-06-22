@@ -37,9 +37,7 @@ pub use decode::{
     decode_perf_record, PerfRecord, SyscallEnterEvent, SyscallExitEvent, UprobeEnterEvent,
     EVENT_CONTEXT_SIZE,
 };
-pub use enums::{
-    ArgFilterType, ArgType, Arm64Reg, BufIdx, EventId, OpCode, PointFlag, TraceGroup,
-};
+pub use enums::{ArgFilterType, ArgType, Arm64Reg, BufIdx, EventId, OpCode, PointFlag, TraceGroup};
 pub use types::{
     ArgFilter, BufT, CommonFilter, ConfigEntry, CtxRegs, EventContext, OpConfig, OpCtx, PointArgs,
     StackPointArgs, StrBuf, SyscallPointArgs, ThreadName,

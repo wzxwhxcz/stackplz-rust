@@ -96,10 +96,7 @@ impl ProbeConfig {
     /// Mirrors `ProbeConfig.Info()` (`config_hook.go`).
     pub fn info(&self) -> String {
         if self.offset != 0 && !self.lib_name.is_empty() {
-            format!(
-                "{} {}+0x{:x}",
-                self.lib_name, self.symbol, self.offset
-            )
+            format!("{} {}+0x{:x}", self.lib_name, self.symbol, self.offset)
         } else if self.offset != 0 {
             format!("0x{:x}", self.offset)
         } else {

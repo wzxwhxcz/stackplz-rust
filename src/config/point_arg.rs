@@ -6,7 +6,7 @@
 //! what type to interpret it as, and optional filter rules.
 
 use crate::argtype::{
-    self, consts::*, get_arg_type, add_read_save_reg, opc_add_reg, opc_filter_buffer,
+    self, add_read_save_reg, consts::*, get_arg_type, opc_add_reg, opc_filter_buffer,
     opc_filter_string, opc_filter_value, opc_move_reg_value, opc_sub_reg, save_struct,
 };
 
@@ -137,10 +137,7 @@ impl PointArg {
         }
 
         // Filter ops (for non-string, non-buffer scalar types).
-        if self.type_index != STRING
-            && self.type_index != STD_STRING
-            && !self.is_buffer()
-        {
+        if self.type_index != STRING && self.type_index != STD_STRING && !self.is_buffer() {
             for &v in &self.filter_index_list {
                 let op = argtype::get_op(opc_filter_value());
                 op_list.push(op.new_value(u64::from(v)));

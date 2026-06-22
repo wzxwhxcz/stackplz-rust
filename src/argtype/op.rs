@@ -400,6 +400,35 @@ pub fn build_read_ptr_addr(offset: u64) -> u32 {
     })
 }
 
+/// Convenience: `OPC_SET_READ_LEN.NewValue(size).NewPostCode(OP_SAVE_STRUCT)`.
+/// This is the common "read `size` bytes and save as struct" op chain used by
+/// every struct-type registration.
+pub fn set_read_len_save_struct(size: u64) -> u32 {
+    let op = get_op(opc_set_read_len());
+    let idx = op.new_value(size);
+    let op2 = get_op(idx);
+    op2.new_post_code(OpCode::SaveStruct)
+}
+
+/// Convenience: `OPC_SET_READ_LEN.NewValue(size)`. Just the read-length part
+/// without the save.
+pub fn set_read_len(size: u64) -> u32 {
+    let op = get_op(opc_set_read_len());
+    op.new_value(size)
+}
+
+/// Convenience: `OPC_SET_BREAK_COUNT.NewValue(count)`.
+pub fn set_break_count(count: u64) -> u32 {
+    let op = get_op(opc_set_break_count());
+    op.new_value(count)
+}
+
+/// Convenience: `OPC_ADD_OFFSET.NewValue(offset)`.
+pub fn add_offset(offset: u64) -> u32 {
+    let op = get_op(opc_add_offset());
+    op.new_value(offset)
+}
+
 // ---------------------------------------------------------------------------
 // OpArgType — Go's `type OpArgType struct` + RAT + RSAT
 // ---------------------------------------------------------------------------

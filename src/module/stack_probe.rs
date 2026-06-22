@@ -57,7 +57,7 @@ impl StackProbeModule {
         #[cfg(not(feature = "embedded_bpf"))]
         let obj_bytes = bpf_common::STACK_OBJ;
 
-        let mut obj = bpf_common::linux::open_object(obj_bytes)?;
+        let obj = bpf_common::linux::open_object(obj_bytes)?;
         logger.println(&format!("{NAME}\teBPF object loaded"));
 
         // 2. Write op_list map.
@@ -82,7 +82,7 @@ impl StackProbeModule {
         for (i, point) in self.hook_points.iter().enumerate() {
             let prog_name = format!("probe_stack_{i}");
             let prog = obj
-                .prog(&prog_name)
+                .prog_mut(&prog_name)
                 .ok_or_else(|| anyhow!("program {prog_name} not found in BPF object"))?;
 
             // Resolve the attach offset.

@@ -6,9 +6,8 @@
 
 use super::point_arg::*;
 use crate::argtype::{
-    self, add_read_move_reg, consts::*, get_op, opc_add_offset, opc_add_reg,
-    opc_move_pointer_value, opc_read_pointer, opc_save_addr, opc_sub_offset, opc_sub_reg,
-    r_num_array,
+    self, add_read_move_reg, consts::*, opc_add_offset, opc_add_reg, opc_move_pointer_value,
+    opc_read_pointer, opc_save_addr, opc_sub_offset, opc_sub_reg, r_num_array,
 };
 use anyhow::{anyhow, Result};
 

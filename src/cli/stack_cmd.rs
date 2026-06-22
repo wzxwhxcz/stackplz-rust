@@ -27,10 +27,8 @@ pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: StackArgs
     if !stack_cfg.hook_points.is_empty() {
         // -w/--point mode: parse hook point strings into UprobeArgs.
         let library = find_lib(&stack_cfg.library, &target.library_dirs)?;
-        let points = crate::config::point_parser::parse_hook_point(
-            &stack_cfg.hook_points,
-            &library,
-        )?;
+        let points =
+            crate::config::point_parser::parse_hook_point(&stack_cfg.hook_points, &library)?;
         for point in &points {
             let mut p = ProbeConfig {
                 sconfig: SConfig {

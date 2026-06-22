@@ -6,8 +6,8 @@
 //! what type to interpret it as, and optional filter rules.
 
 use crate::argtype::{
-    self, add_read_save_reg, consts::*, get_arg_type, opc_add_reg, opc_filter_buffer,
-    opc_filter_string, opc_filter_value, opc_move_reg_value, opc_sub_reg, save_struct,
+    self, add_read_save_reg, consts::*, get_arg_type, opc_filter_buffer, opc_filter_string,
+    opc_filter_value, opc_move_reg_value,
 };
 
 /// Point type constants — from `user/config/config_const.go`.

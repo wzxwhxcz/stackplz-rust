@@ -1,6 +1,6 @@
-//! ArgType registry — faithful port of `user/argtype/iargtype.go`.
+//! ArgType registry �?faithful port of `user/argtype/iargtype.go`.
 //!
-//! The registry maps type indices → [`ArgType`] instances. Types are registered
+//! The registry maps type indices �?[`ArgType`] instances. Types are registered
 //! during initialization ([`init_base_types`] + [`super::complex_types::pre_register`])
 //! and dynamically during `-w` parsing ([`register_new`]).
 //!
@@ -8,7 +8,7 @@
 //!
 //! Go uses an interface (`IArgType`) with embedded structs (`ARG_NUM`,
 //! `ARG_PTR`, `ARG_BUFFER`, `ARG_STRUCT`, `ARG_ARRAY`). We use a single flat
-//! struct with optional fields — simpler, avoids trait objects, and Clone works
+//! struct with optional fields �?simpler, avoids trait objects, and Clone works
 //! trivially (needed by `register_pre`).
 //!
 //! Go mutates the `ArgType` via the returned pointer after registration
@@ -40,7 +40,7 @@ pub struct ArgType {
     /// Alternate names (e.g. "buf" for "buffer").
     pub alias_names: Vec<String>,
 
-    // ---- ARG_NUM extensions (format output — Phase 3) ----
+    // ---- ARG_NUM extensions (format output �?Phase 3) ----
     pub format_type: u32,
 
     // ---- ARG_PTR extensions ----
@@ -79,12 +79,12 @@ impl ArgType {
         }
     }
 
-    /// `AddOp(op_index)` — append an op index to the op list.
+    /// `AddOp(op_index)` �?append an op index to the op list.
     pub fn add_op(&mut self, op_index: u32) {
         self.op_list.push(op_index);
     }
 
-    /// `AddOpList(p)` — append all ops from another type.
+    /// `AddOpList(p)` �?append all ops from another type.
     pub fn add_op_list_from(&mut self, other: &ArgType) {
         self.op_list.extend_from_slice(&other.op_list);
     }
@@ -116,21 +116,29 @@ fn next_type_counter() -> &'static Mutex<u32> {
 
 /// Allocate the next dynamic type index.
 pub fn next_type_index() -> u32 {
-    let mut c = next_type_counter().lock().unwrap();
+    let mut c = next_type_counter()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     *c += 1;
     *c
 }
 
-/// The global registry: `type_index → ArgType`.
+/// The global registry: `type_index �?ArgType`.
 fn registry() -> &'static Mutex<HashMap<u32, ArgType>> {
     static REG: OnceLock<Mutex<HashMap<u32, ArgType>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// `Register(name, base, index, size)` — register a base type with a fixed
+/// Lock the registry, recovering from poison (a prior panic leaves the data
+/// intact, so we can safely continue �?important for parallel tests).
+fn lock_reg() -> std::sync::MutexGuard<'static, HashMap<u32, ArgType>> {
+    registry().lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// `Register(name, base, index, size)` �?register a base type with a fixed
 /// index. Panics on duplicate index (matches Go).
 pub fn register(name: &str, base_type: u32, type_index: u32, size: u32) -> u32 {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = lock_reg();
     if reg.contains_key(&type_index) {
         panic!(
             "duplicate register for ArgType index={type_index} (existing: {})",
@@ -142,10 +150,10 @@ pub fn register(name: &str, base_type: u32, type_index: u32, size: u32) -> u32 {
     type_index
 }
 
-/// `RegisterPre(name, type_index, parent_index)` — clone the parent and assign
+/// `RegisterPre(name, type_index, parent_index)` �?clone the parent and assign
 /// a new type_index/name/parent_index. Returns the new type_index.
 pub fn register_pre(name: &str, type_index: u32, parent_index: u32) -> u32 {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = lock_reg();
     if reg.contains_key(&type_index) {
         panic!(
             "duplicate register for ArgType index={type_index} (existing: {})",
@@ -168,25 +176,25 @@ pub fn register_pre(name: &str, type_index: u32, parent_index: u32) -> u32 {
     type_index
 }
 
-/// `RegisterNew(name, parent_index)` — dynamically register a new type by
+/// `RegisterNew(name, parent_index)` �?dynamically register a new type by
 /// cloning the parent and assigning the next available type index.
 pub fn register_new(name: &str, parent_index: u32) -> u32 {
     let idx = next_type_index();
     register_pre(name, idx, parent_index)
 }
 
-/// `GetArgType(type_index)` — clone the ArgType at the given index. Panics if
+/// `GetArgType(type_index)` �?clone the ArgType at the given index. Panics if
 /// not found (matches Go).
 pub fn get_arg_type(type_index: u32) -> ArgType {
-    let reg = registry().lock().unwrap();
+    let reg = lock_reg();
     reg.get(&type_index)
         .cloned()
         .unwrap_or_else(|| panic!("GetArgType for type_index:{type_index} failed"))
 }
 
-/// `GetArgTypeByName(name)` — find by name or alias. Panics if not found.
+/// `GetArgTypeByName(name)` �?find by name or alias. Panics if not found.
 pub fn get_arg_type_by_name(name: &str) -> ArgType {
-    let reg = registry().lock().unwrap();
+    let reg = lock_reg();
     for at in reg.values() {
         if at.name == name || at.has_alias_name(name) {
             return at.clone();
@@ -197,15 +205,15 @@ pub fn get_arg_type_by_name(name: &str) -> ArgType {
 
 /// Try to find by name, returning `None` instead of panicking.
 pub fn try_get_arg_type_by_name(name: &str) -> Option<ArgType> {
-    let reg = registry().lock().unwrap();
+    let reg = lock_reg();
     reg.values()
         .find(|at| at.name == name || at.has_alias_name(name))
         .cloned()
 }
 
-/// `RegisterAlias(alias_name, name)` — add an alias to an existing type.
+/// `RegisterAlias(alias_name, name)` �?add an alias to an existing type.
 pub fn register_alias(alias_name: &str, name: &str) {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = lock_reg();
     // Find the type by name.
     let type_index = reg
         .values()
@@ -215,10 +223,10 @@ pub fn register_alias(alias_name: &str, name: &str) {
     reg.get_mut(&type_index).unwrap().add_alias(alias_name);
 }
 
-/// `RegisterAliasType(type_index, alias_type_index)` — make `type_index` point
+/// `RegisterAliasType(type_index, alias_type_index)` �?make `type_index` point
 /// to the same ArgType as `alias_type_index`.
 pub fn register_alias_type(type_index: u32, alias_type_index: u32) {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = lock_reg();
     if reg.contains_key(&type_index) {
         panic!(
             "duplicate register for ArgType index={type_index} (existing: {})",
@@ -232,16 +240,16 @@ pub fn register_alias_type(type_index: u32, alias_type_index: u32) {
     reg.insert(type_index, alias);
 }
 
-/// `UpdateArgType(p)` — replace the ArgType at its type_index.
+/// `UpdateArgType(p)` �?replace the ArgType at its type_index.
 pub fn update_arg_type(at: ArgType) {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = lock_reg();
     reg.insert(at.type_index, at);
 }
 
 /// Mutate the ArgType at `type_index` under the registry lock. This is the
 /// primary way to configure a type after registration (add ops, set size, etc.).
 pub fn with_type<F: FnOnce(&mut ArgType)>(type_index: u32, f: F) {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = lock_reg();
     let at = reg
         .get_mut(&type_index)
         .unwrap_or_else(|| panic!("with_type: index {type_index} not found"));
@@ -250,12 +258,12 @@ pub fn with_type<F: FnOnce(&mut ArgType)>(type_index: u32, f: F) {
 
 /// Get the total number of registered types.
 pub fn registry_count() -> usize {
-    registry().lock().unwrap().len()
+    lock_reg().len()
 }
 
 /// Check if a type index is registered.
 pub fn is_registered(type_index: u32) -> bool {
-    registry().lock().unwrap().contains_key(&type_index)
+    lock_reg().contains_key(&type_index)
 }
 
 #[cfg(test)]

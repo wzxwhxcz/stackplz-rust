@@ -126,6 +126,10 @@ pub struct StackArgs {
     /// hook config file
     #[arg(long, default_value = "")]
     pub config: String,
+
+    /// hook point config, e.g. strstr+0x0[str,str] write[int,buf:128,int]
+    #[arg(short = 'w', long = "point")]
+    pub point: Vec<String>,
 }
 
 /// `syscall` subcommand flags. Mirrors `syscall_config` in `syscall.go:33-36`.
@@ -203,5 +207,28 @@ mod tests {
         let cli = Cli::try_parse_from(["stackplz", "--uid", "1", "--no-tids", "100,200", "stack"])
             .unwrap();
         assert_eq!(cli.global.no_tids, "100,200");
+    }
+
+    #[test]
+    fn parse_point_flag() {
+        let cli = Cli::try_parse_from([
+            "stackplz",
+            "--uid",
+            "1",
+            "stack",
+            "-w",
+            "write[int,buf:128,int]",
+            "-w",
+            "read[str]",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Stack(s)) => {
+                assert_eq!(s.point.len(), 2);
+                assert_eq!(s.point[0], "write[int,buf:128,int]");
+                assert_eq!(s.point[1], "read[str]");
+            }
+            _ => panic!("expected stack subcommand"),
+        }
     }
 }

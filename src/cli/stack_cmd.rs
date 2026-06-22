@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 /// Run the `stack` subcommand. Mirrors `stackCommandFunc`.
 pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: StackArgs) -> Result<()> {
+    // Initialize the argtype subsystem before any type-related operations.
+    crate::argtype::init_argtypes();
+
     let stack_cfg = StackConfig::from(&args);
     let logger = Arc::new(crate::logger::Logger::new("", true));
 
@@ -21,7 +24,41 @@ pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: StackArgs
 
     // Build the probe list.
     let mut probes: Vec<ProbeConfig> = Vec::new();
-    if !stack_cfg.config.is_empty() {
+    if !stack_cfg.hook_points.is_empty() {
+        // -w/--point mode: parse hook point strings into UprobeArgs.
+        let library = find_lib(&stack_cfg.library, &target.library_dirs)?;
+        let points = crate::config::point_parser::parse_hook_point(
+            &stack_cfg.hook_points,
+            &library,
+        )?;
+        for point in &points {
+            let mut p = ProbeConfig {
+                sconfig: SConfig {
+                    unwind_stack: stack_cfg.unwind_stack,
+                    show_regs: stack_cfg.show_regs,
+                    reg_name: stack_cfg.reg_name.clone(),
+                    uid: target.uid,
+                    pid: target.pid,
+                    tid_blacklist: target.tid_blacklist,
+                    tid_blacklist_mask: target.tid_blacklist_mask,
+                    ..Default::default()
+                },
+                lib_name: String::new(),
+                library: library.clone(),
+                symbol: point.symbol.clone(),
+                offset: point.offset,
+            };
+            p.check()?;
+            probes.push(p);
+        }
+        if global.debug {
+            logger.println(&format!(
+                "{}\tparsed {} hook points from -w flags",
+                MODULE_NAME_STACK,
+                points.len()
+            ));
+        }
+    } else if !stack_cfg.config.is_empty() {
         parse_config(&logger, global, target, &stack_cfg, &mut probes)?;
     } else {
         let library = find_lib(&stack_cfg.library, &target.library_dirs)?;

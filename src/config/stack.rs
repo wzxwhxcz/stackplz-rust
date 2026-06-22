@@ -15,6 +15,8 @@ pub struct StackConfig {
     pub offset: u64,
     pub reg_name: String,
     pub config: String,
+    /// `-w/--point` hook configs, e.g. `write[int,buf:128,int]`.
+    pub hook_points: Vec<String>,
 }
 
 impl StackConfig {
@@ -27,6 +29,7 @@ impl StackConfig {
             offset: args.offset,
             reg_name: args.reg.clone(),
             config: args.config.clone(),
+            hook_points: args.point.clone(),
         }
     }
 }

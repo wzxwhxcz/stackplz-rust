@@ -460,10 +460,18 @@ mod tests {
 
     #[test]
     fn singletons_register_34_ops_with_stable_indices() {
-        // First call triggers lazy init. Indices must match Go's var order.
+        // The 34 singletons get fixed indices 0..33 at registration time.
+        // These indices are the contract — `op_key_list` stores them and the
+        // kernel VM looks them up in `op_list`. count() grows beyond 34 as
+        // other tests/calls register more ops (matches Go's OPM.Count()
+        // monotonically growing during runtime); that is expected, not a bug.
         assert_eq!(opc_skip(), 0);
         assert_eq!(opc_save_ptr_string16(), 33);
-        assert_eq!(count(), 34);
+        let n = count();
+        assert!(
+            n >= 34,
+            "expected at least 34 registered ops, got {n}"
+        );
     }
 
     #[test]

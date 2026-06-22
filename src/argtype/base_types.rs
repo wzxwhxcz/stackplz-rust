@@ -94,8 +94,7 @@ mod tests {
 
     fn ensure_init() {
         init_argtypes();
-    }
-    use super::*;
+    }    use super::*;
 
     #[test]
     fn base_types_have_correct_sizes() {

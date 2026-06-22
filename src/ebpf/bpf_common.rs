@@ -113,6 +113,81 @@ pub mod linux {
         obj.map(name)
             .ok_or_else(|| anyhow!("cannot find map: {}", name))
     }
+
+    /// Write a key/value pair into a HASH/ARRAY map by name.
+    /// Mirrors Go's `bpf_map.Update(&key, value, ebpf.UpdateAny)`.
+    pub fn write_map<K: bytemuck::Pod, V: bytemuck::Pod>(
+        obj: &Object,
+        map_name: &str,
+        key: &K,
+        value: &V,
+    ) -> Result<()> {
+        let map = obj
+            .map(map_name)
+            .ok_or_else(|| anyhow!("cannot find map: {map_name}"))?;
+        let key_bytes = bytemuck::bytes_of(key);
+        let val_bytes = bytemuck::bytes_of(value);
+        map.update(key_bytes, val_bytes, MapFlags::ANY)?;
+        Ok(())
+    }
+
+    /// Write a map entry with raw byte key/value (for maps with non-Pod shapes).
+    pub fn write_map_raw(
+        obj: &Object,
+        map_name: &str,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<()> {
+        let map = obj
+            .map(map_name)
+            .ok_or_else(|| anyhow!("cannot find map: {map_name}"))?;
+        map.update(key, value, MapFlags::ANY)?;
+        Ok(())
+    }
+
+    /// Write the entire `op_list` map from the argtype subsystem.
+    /// Mirrors Go's `update_op_list()` in `stack.go:341-357`.
+    pub fn write_op_list(obj: &Object) -> Result<()> {
+        let map = obj
+            .map("op_list")
+            .ok_or_else(|| anyhow!("cannot find op_list map"))?;
+        for (op_key, op_config) in crate::argtype::get_all_op_list() {
+            let key_bytes = op_key.to_ne_bytes();
+            let val_bytes = bytemuck::bytes_of(&op_config);
+            map.update(&key_bytes, val_bytes, MapFlags::ANY)?;
+        }
+        Ok(())
+    }
+
+    /// Write the `uprobe_point_args` map from a list of `(index, point_args)`.
+    /// Each point's op_list is flattened into the `op_key_list` array.
+    /// Mirrors Go's `update_stack_config()` in `stack.go:359-379`.
+    pub fn write_uprobe_point_args(
+        obj: &Object,
+        points: &[crate::config::UprobeArgs],
+    ) -> Result<()> {
+        use crate::contract::types::StackPointArgs;
+        let map = obj
+            .map("uprobe_point_args")
+            .ok_or_else(|| anyhow!("cannot find uprobe_point_args map"))?;
+        for point in points {
+            let key = point.index.to_ne_bytes();
+            // Build the point_args_t value from the point's config.
+            let (enter_key, signal, _op_count, op_key_list) = point.get_config();
+            let mut value = StackPointArgs::default();
+            value.enter_key = enter_key;
+            value.signal = signal;
+            value.op_count = op_key_list.len().min(value.op_key_list.len()) as u32;
+            for (i, &op_key) in op_key_list.iter().enumerate() {
+                if i < value.op_key_list.len() {
+                    value.op_key_list[i] = op_key;
+                }
+            }
+            let val_bytes = bytemuck::bytes_of(&value);
+            map.update(&key, val_bytes, MapFlags::ANY)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

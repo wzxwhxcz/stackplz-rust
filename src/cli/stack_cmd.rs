@@ -23,41 +23,48 @@ pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: StackArgs
     }
 
     // Build the probe list.
-    let mut probes: Vec<ProbeConfig> = Vec::new();
+    // Each probe may carry parsed hook points (from -w mode).
+    let mut probes: Vec<(ProbeConfig, Vec<crate::config::UprobeArgs>)> = Vec::new();
     if !stack_cfg.hook_points.is_empty() {
         // -w/--point mode: parse hook point strings into UprobeArgs.
         let library = find_lib(&stack_cfg.library, &target.library_dirs)?;
         let points =
             crate::config::point_parser::parse_hook_point(&stack_cfg.hook_points, &library)?;
-        for point in &points {
-            let mut p = ProbeConfig {
-                sconfig: SConfig {
-                    unwind_stack: stack_cfg.unwind_stack,
-                    show_regs: stack_cfg.show_regs,
-                    reg_name: stack_cfg.reg_name.clone(),
-                    uid: target.uid,
-                    pid: target.pid,
-                    tid_blacklist: target.tid_blacklist,
-                    tid_blacklist_mask: target.tid_blacklist_mask,
-                    ..Default::default()
-                },
-                lib_name: String::new(),
-                library: library.clone(),
-                symbol: point.symbol.clone(),
-                offset: point.offset,
-            };
-            p.check()?;
-            probes.push(p);
-        }
+        // In -w mode, all points share one library, so we create one probe.
+        let mut p = ProbeConfig {
+            sconfig: SConfig {
+                unwind_stack: stack_cfg.unwind_stack,
+                show_regs: stack_cfg.show_regs,
+                reg_name: stack_cfg.reg_name.clone(),
+                uid: target.uid,
+                pid: target.pid,
+                tid_blacklist: target.tid_blacklist,
+                tid_blacklist_mask: target.tid_blacklist_mask,
+                ..Default::default()
+            },
+            lib_name: String::new(),
+            library: library.clone(),
+            symbol: String::new(),
+            offset: 0,
+        };
+        p.check()?;
+        probes.push((p, points));
         if global.debug {
             logger.println(&format!(
                 "{}\tparsed {} hook points from -w flags",
                 MODULE_NAME_STACK,
-                points.len()
+                probes[0].1.len()
             ));
         }
     } else if !stack_cfg.config.is_empty() {
-        parse_config(&logger, global, target, &stack_cfg, &mut probes)?;
+        let cfg_probes = {
+            let mut tmp = Vec::new();
+            parse_config(&logger, global, target, &stack_cfg, &mut tmp)?;
+            tmp
+        };
+        for p in cfg_probes {
+            probes.push((p, Vec::new()));
+        }
     } else {
         let library = find_lib(&stack_cfg.library, &target.library_dirs)?;
         let mut p = ProbeConfig {
@@ -77,13 +84,13 @@ pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: StackArgs
             offset: stack_cfg.offset,
         };
         p.check()?;
-        probes.push(p);
+        probes.push((p, Vec::new()));
     }
 
     let lib_path = format!("{}/preload_libs", global.exec_path);
     let mut run_count = 0u32;
 
-    for mut probe in probes {
+    for (mut probe, hook_points) in probes {
         probe.sconfig.debug = global.debug;
         logger.println(&format!(
             "{}\thook info:{}",
@@ -96,7 +103,8 @@ pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: StackArgs
         let handle = std::thread::Builder::new()
             .name(format!("stack-{}", probe.info()))
             .spawn(move || {
-                let module = StackProbeModule::new(probe, mod_lib_path);
+                let module =
+                    StackProbeModule::new(probe, mod_lib_path).with_hook_points(hook_points);
                 if let Err(e) = module.run(mod_logger) {
                     eprintln!("{} module error: {}", MODULE_NAME_STACK, e);
                 }

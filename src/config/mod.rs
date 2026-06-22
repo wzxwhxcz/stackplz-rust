@@ -9,6 +9,8 @@
 
 pub mod global;
 pub mod hook_json;
+pub mod point_arg;
+pub mod point_parser;
 pub mod sconfig;
 pub mod stack;
 pub mod syscall;
@@ -16,6 +18,8 @@ pub mod target;
 
 pub use global::GlobalConfig;
 pub use hook_json::{BaseHookConfig, HookConfig, LibHookConfig};
+pub use point_arg::{PointArg, UprobeArgs, EBPF_SYS_ENTER, EBPF_UPROBE_ENTER};
+pub use point_parser::{parse_arg_type, parse_hook_point};
 pub use sconfig::{SConfig, StackFilter, SyscallFilter, MAX_TID_BLACKLIST_COUNT};
 pub use stack::{ProbeConfig, StackConfig};
 pub use syscall::SyscallConfig;

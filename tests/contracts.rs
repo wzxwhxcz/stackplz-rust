@@ -232,7 +232,10 @@ fn dev_point_args_sizes_match_module_defines() {
     assert_eq!(MAX_OP_COUNT_STACK, 64);
     assert_eq!(MAX_OP_COUNT_SYSCALL, 256);
     // sizeof = 12 + 4*N.
-    assert_eq!(std::mem::size_of::<StackPointArgs>(), 12 + 4 * MAX_OP_COUNT_STACK);
+    assert_eq!(
+        std::mem::size_of::<StackPointArgs>(),
+        12 + 4 * MAX_OP_COUNT_STACK
+    );
     assert_eq!(
         std::mem::size_of::<SyscallPointArgs>(),
         12 + 4 * MAX_OP_COUNT_SYSCALL

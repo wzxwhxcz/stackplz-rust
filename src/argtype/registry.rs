@@ -268,8 +268,8 @@ pub fn is_registered(type_index: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::consts::*;
+    use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Generate a unique test index in the 100000+ range to avoid collisions

@@ -19,7 +19,7 @@ pub mod registry;
 
 // Re-export op helpers.
 pub use op::{
-    add_op, add_offset, add_read_move_reg, add_read_save_reg, build_read_ptr_addr,
+    add_offset, add_op, add_read_move_reg, add_read_save_reg, build_read_ptr_addr,
     build_read_ptr_break_count, build_read_ptr_len, build_read_reg_break_count, build_read_reg_len,
     count, get_all_op_list, get_op, get_op_info, rat, rsat, save_struct, set_break_count,
     set_read_len, set_read_len_save_struct, OpArgType, OpConfig,
@@ -34,7 +34,7 @@ pub use registry::{
 
 // Re-export complex type builders (for Phase 2 -w parser).
 pub use complex_types::{
-    new_num_format, r_array, r_buffer_len, r_buffer_reg, r_num_hex, r_num_array, r_pointer,
+    new_num_format, r_array, r_buffer_len, r_buffer_reg, r_num_array, r_num_hex, r_pointer,
     r_struct, register_alias_types,
 };
 

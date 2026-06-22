@@ -422,8 +422,8 @@ pub fn r_struct(name: &str, size: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::init_argtypes;
+    use super::*;
 
     fn ensure_init() {
         init_argtypes();

@@ -6,7 +6,7 @@
 //!      `CONFIG_ARCH_SUPPORTS_UPROBES`). Fatal on failure.
 //!   2. `cli::start()` — parse args, run persistent pre-run, dispatch.
 
-use stackplz::{cli, ebpf};
+use stackplz::cli;
 
 fn main() {
     // On non-Linux hosts (e.g. Windows dev), the BPF capability check can't
@@ -14,7 +14,7 @@ fn main() {
     // device build (Linux/Android) always performs the check.
     #[cfg(target_os = "linux")]
     {
-        if let Err(e) = ebpf::is_enable_bpf() {
+        if let Err(e) = stackplz::ebpf::is_enable_bpf() {
             eprintln!("BPF capability check failed: {}", e);
             std::process::exit(1);
         }

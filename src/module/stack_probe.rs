@@ -73,7 +73,7 @@ impl StackProbeModule {
         if self.probe.sconfig.uid != 0 {
             bpf_common::linux::write_common_list(
                 &obj,
-                &[self.probe.sconfig.uid],
+                &[self.probe.sconfig.uid as u32],
                 crate::contract::consts::UID_WHITELIST_START,
             )?;
             logger.println(&format!(
@@ -86,7 +86,7 @@ impl StackProbeModule {
         if self.probe.sconfig.pid != 0 {
             bpf_common::linux::write_common_list(
                 &obj,
-                &[self.probe.sconfig.pid],
+                &[self.probe.sconfig.pid as u32],
                 crate::contract::consts::PID_WHITELIST_START,
             )?;
         }

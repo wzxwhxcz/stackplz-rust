@@ -52,6 +52,54 @@ impl StackProbeModule {
             crate::argtype::count()
         ));
 
+        // 2b. Write base_config (stackplz's own PID for self-filtering).
+        let self_pid = std::process::id();
+        bpf_common::linux::write_base_config(&obj, self_pid)?;
+        logger.println(&format!("{NAME}\tbase_config written (pid={self_pid})"));
+
+        // 2c. Write common_filter (trace_mode=ALL, uid_group covers all).
+        use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
+        let _ = TRACE_COMMON;
+        bpf_common::linux::write_common_filter(
+            &obj,
+            false,         // is_32bit
+            TRACE_ALL,     // trace all syscalls
+            0xFF,          // trace_uid_group: all groups
+            0,             // signal (none)
+            0,             // tsignal (none)
+        )?;
+
+        // 2d. Write uid whitelist (the target uid).
+        if self.probe.sconfig.uid != 0 {
+            bpf_common::linux::write_common_list(
+                &obj,
+                &[self.probe.sconfig.uid],
+                crate::contract::consts::UID_WHITELIST_START,
+            )?;
+            logger.println(&format!(
+                "{NAME}\tuid whitelist: {}",
+                self.probe.sconfig.uid
+            ));
+        }
+
+        // 2e. Write pid whitelist if specified.
+        if self.probe.sconfig.pid != 0 {
+            bpf_common::linux::write_common_list(
+                &obj,
+                &[self.probe.sconfig.pid],
+                crate::contract::consts::PID_WHITELIST_START,
+            )?;
+        }
+
+        // 2f. Write tid blacklist if specified.
+        if self.probe.sconfig.tid_blacklist_mask != 0 {
+            bpf_common::linux::write_common_list(
+                &obj,
+                &self.probe.sconfig.tid_blacklist,
+                crate::contract::consts::TID_BLACKLIST_START,
+            )?;
+        }
+
         // 3. Write uprobe_point_args map.
         if !self.hook_points.is_empty() {
             bpf_common::linux::write_uprobe_point_args(&obj, &self.hook_points)?;

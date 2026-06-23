@@ -183,6 +183,58 @@ pub mod linux {
         }
         Ok(())
     }
+
+    /// Write the `base_config` map (key 0). Contains stackplz's own PID
+    /// (for self-filtering) and whether a thread whitelist is active.
+    /// Mirrors Go's `update_base_config()` in `stack.go:207-213`.
+    pub fn write_base_config(obj: &Object, stackplz_pid: u32) -> Result<()> {
+        use crate::contract::types::ConfigEntry;
+        let config = ConfigEntry {
+            stackplz_pid,
+            thread_whitelist: 0,
+        };
+        write_map(obj, "base_config", &0u32, &config)
+    }
+
+    /// Write the `common_filter` map (key 0). Controls trace mode, uid-group
+    /// bitmask, and kill signals.
+    /// Mirrors Go's `update_common_filter()` (the final `common_filter` write
+    /// part) in `stack.go:245-259`.
+    pub fn write_common_filter(
+        obj: &Object,
+        is_32bit: bool,
+        trace_mode: u32,
+        trace_uid_group: u32,
+        signal: u32,
+        tsignal: u32,
+    ) -> Result<()> {
+        use crate::contract::types::CommonFilter;
+        let filter = CommonFilter {
+            is_32bit: if is_32bit { 1 } else { 0 },
+            trace_mode,
+            trace_uid_group,
+            signal,
+            tsignal,
+        };
+        write_map(obj, "common_filter", &0u32, &filter)
+    }
+
+    /// Write a list of u32 values into `common_list` with a base offset.
+    /// Each item `v` is stored at key `v + offset` → value `v + offset`.
+    /// Used for uid/pid/tid white+blacklists.
+    /// Mirrors Go's `update_common_list()` in `stack.go:215-235`.
+    pub fn write_common_list(obj: &Object, items: &[u32], offset: u32) -> Result<()> {
+        let map = obj
+            .map("common_list")
+            .ok_or_else(|| anyhow!("cannot find common_list map"))?;
+        for &v in items {
+            let key = v + offset;
+            let key_bytes = key.to_ne_bytes();
+            let val_bytes = key.to_ne_bytes();
+            map.update(&key_bytes, &val_bytes, MapFlags::ANY)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

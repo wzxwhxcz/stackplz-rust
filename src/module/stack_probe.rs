@@ -62,11 +62,11 @@ impl StackProbeModule {
         let _ = TRACE_COMMON;
         bpf_common::linux::write_common_filter(
             &obj,
-            false,         // is_32bit
-            TRACE_ALL,     // trace all syscalls
-            0xFF,          // trace_uid_group: all groups
-            0,             // signal (none)
-            0,             // tsignal (none)
+            false,    // is_32bit
+            TRACE_ALL, // trace all syscalls
+            0xFF,     // trace_uid_group: all groups
+            0,        // signal (none)
+            0,        // tsignal (none)
         )?;
 
         // 2d. Write uid whitelist (the target uid).

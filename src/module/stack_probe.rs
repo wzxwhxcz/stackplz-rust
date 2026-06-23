@@ -60,14 +60,7 @@ impl StackProbeModule {
         // 2c. Write common_filter (trace_mode=ALL, uid_group covers all).
         use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
         let _ = TRACE_COMMON;
-        bpf_common::linux::write_common_filter(
-            &obj,
-            false,    // is_32bit
-            TRACE_ALL, // trace all syscalls
-            0xFF,     // trace_uid_group: all groups
-            0,        // signal (none)
-            0,        // tsignal (none)
-        )?;
+        bpf_common::linux::write_common_filter(&obj, false, TRACE_ALL, 0xFF, 0, 0)?;
 
         // 2d. Write uid whitelist (the target uid).
         if self.probe.sconfig.uid != 0 {

@@ -132,12 +132,7 @@ pub mod linux {
     }
 
     /// Write a map entry with raw byte key/value (for maps with non-Pod shapes).
-    pub fn write_map_raw(
-        obj: &Object,
-        map_name: &str,
-        key: &[u8],
-        value: &[u8],
-    ) -> Result<()> {
+    pub fn write_map_raw(obj: &Object, map_name: &str, key: &[u8], value: &[u8]) -> Result<()> {
         let map = obj
             .map(map_name)
             .ok_or_else(|| anyhow!("cannot find map: {map_name}"))?;

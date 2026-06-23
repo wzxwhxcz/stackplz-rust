@@ -89,8 +89,7 @@ impl StackProbeModule {
             let attach_offset = if !point.symbol.is_empty() {
                 // Symbol-based: resolve via ELF.
                 let elf_bytes = std::fs::read(library)?;
-                bpf_common::resolve_symbol_offset(&elf_bytes, &point.symbol)?
-                    + point.offset
+                bpf_common::resolve_symbol_offset(&elf_bytes, &point.symbol)? + point.offset
             } else {
                 point.offset
             };

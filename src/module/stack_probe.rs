@@ -162,8 +162,14 @@ fn render_uprobe_event(raw: &[u8], hook_points: &[UprobeArgs]) -> Result<String>
                 let _ = idx;
                 if reg_bytes.len() >= 9 {
                     let addr = u64::from_le_bytes([
-                        reg_bytes[1], reg_bytes[2], reg_bytes[3], reg_bytes[4],
-                        reg_bytes[5], reg_bytes[6], reg_bytes[7], reg_bytes[8],
+                        reg_bytes[1],
+                        reg_bytes[2],
+                        reg_bytes[3],
+                        reg_bytes[4],
+                        reg_bytes[5],
+                        reg_bytes[6],
+                        reg_bytes[7],
+                        reg_bytes[8],
                     ]);
                     arg_parts.push(format!("{}=0x{addr:x}", pa.name));
                 }

@@ -115,7 +115,7 @@ impl StackProbeModule {
             .build()?;
 
         loop {
-            pb.poll(100)?;
+            pb.poll(std::time::Duration::from_millis(100))?;
         }
     }
 

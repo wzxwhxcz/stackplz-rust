@@ -14,7 +14,11 @@ use crate::argtype::consts::*;
 pub fn format_num(value: u64, format_type: u32, is_signed: bool, byte_size: u32) -> String {
     // Mask to the effective byte size.
     let masked = mask_to_size(value, byte_size);
-    let signed_val = if is_signed { sign_extend(masked, byte_size) as i64 } else { 0 };
+    let signed_val = if is_signed {
+        sign_extend(masked, byte_size) as i64
+    } else {
+        0
+    };
 
     match format_type {
         FORMAT_NUM | FORMAT_DEC => {
@@ -85,7 +89,13 @@ pub fn format_buffer_hexdump(data: &[u8], _color: bool) -> String {
         let hex: String = chunk.iter().map(|b| format!("{b:02x} ")).collect();
         let ascii: String = chunk
             .iter()
-            .map(|&b| if (32..=126).contains(&b) { b as char } else { '.' })
+            .map(|&b| {
+                if (32..=126).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         lines.push(format!("  {hex:<48} {ascii}"));
     }

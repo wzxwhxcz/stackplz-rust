@@ -270,7 +270,9 @@ fn render_uprobe_event(raw: &[u8], hook_points: &[UprobeArgs]) -> Result<String>
                         _ => {
                             // String/buffer/struct: try to read the payload
                             // ([u8 index][u32 len][bytes...]).
-                            if let Ok((_, payload_bytes)) = cursor.next_length_prefixed() {
+                            if let Ok((_, _, payload_bytes)) =
+                                cursor.next_length_prefixed()
+                            {
                                 crate::argtype::render::render_arg_value(
                                     at.base_type,
                                     at.size,

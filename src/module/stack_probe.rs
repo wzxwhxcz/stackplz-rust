@@ -164,7 +164,7 @@ impl StackProbeModule {
             .map("events")
             .ok_or_else(|| anyhow!("cannot find events map"))?;
 
-        let mut pb = libbpf_rs::PerfBufferBuilder::new(events_map)
+        let pb = libbpf_rs::PerfBufferBuilder::new(events_map)
             .pages(256)
             .sample_cb(move |_cpu: i32, data: &[u8]| {
                 let rendered = render_uprobe_event(data, &hook_points);

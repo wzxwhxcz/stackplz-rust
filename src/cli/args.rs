@@ -151,6 +151,18 @@ pub struct GlobalArgs {
     /// perf cache buffer size, default 8M
     #[arg(short = 'b', long, default_value_t = 8)]
     pub buffer: u32,
+
+    /// send signal when hit uprobe hook, e.g. SIGSTOP/SIGABRT/SIGTRAP/...
+    #[arg(long, default_value = "")]
+    pub kill: String,
+
+    /// send signal to thread when hit uprobe hook
+    #[arg(long, default_value = "")]
+    pub tkill: String,
+
+    /// auto resume when use --kill SIGSTOP
+    #[arg(long, default_value_t = false)]
+    pub auto: bool,
 }
 
 #[derive(Debug, Subcommand)]

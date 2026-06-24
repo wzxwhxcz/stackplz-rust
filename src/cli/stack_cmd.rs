@@ -109,11 +109,15 @@ pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: StackArgs
 
         let mod_logger = logger.clone();
         let mod_lib_path = lib_path.clone();
+        let kill = crate::module::stack_probe::parse_signal_name(&global.kill_signal);
+        let tkill = crate::module::stack_probe::parse_signal_name(&global.tkill_signal);
+        let auto_resume = global.auto_resume;
         let handle = std::thread::Builder::new()
             .name(format!("stack-{}", probe.info()))
             .spawn(move || {
-                let module =
-                    StackProbeModule::new(probe, mod_lib_path).with_hook_points(hook_points);
+                let module = StackProbeModule::new(probe, mod_lib_path)
+                    .with_hook_points(hook_points)
+                    .with_signals(kill, tkill, auto_resume);
                 if let Err(e) = module.run(mod_logger) {
                     eprintln!("{} module error: {}", MODULE_NAME_STACK, e);
                 }

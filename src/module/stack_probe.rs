@@ -17,6 +17,12 @@ pub struct StackProbeModule {
     pub lib_path: String,
     /// Parsed hook points (from `-w`). Empty for `--symbol`/`--config` mode.
     pub hook_points: Vec<UprobeArgs>,
+    /// Signal to send on uprobe hit (from --kill), 0 = none.
+    pub kill_signal: u32,
+    /// Signal to send to thread on uprobe hit (from --tkill), 0 = none.
+    pub tkill_signal: u32,
+    /// Auto-resume after SIGSTOP (from --auto).
+    pub auto_resume: bool,
 }
 
 impl StackProbeModule {
@@ -25,11 +31,21 @@ impl StackProbeModule {
             probe,
             lib_path,
             hook_points: Vec::new(),
+            kill_signal: 0,
+            tkill_signal: 0,
+            auto_resume: false,
         }
     }
 
     pub fn with_hook_points(mut self, points: Vec<UprobeArgs>) -> Self {
         self.hook_points = points;
+        self
+    }
+
+    pub fn with_signals(mut self, kill: u32, tkill: u32, auto_resume: bool) -> Self {
+        self.kill_signal = kill;
+        self.tkill_signal = tkill;
+        self.auto_resume = auto_resume;
         self
     }
 
@@ -60,7 +76,14 @@ impl StackProbeModule {
         // 2c. Write common_filter (trace_mode=ALL, uid_group covers all).
         use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
         let _ = TRACE_COMMON;
-        bpf_common::linux::write_common_filter(&obj, false, TRACE_ALL, 0xFF, 0, 0)?;
+        bpf_common::linux::write_common_filter(
+            &obj,
+            false,
+            TRACE_ALL,
+            0xFF,
+            self.kill_signal,
+            self.tkill_signal,
+        )?;
 
         // 2d. Write uid whitelist (the target uid).
         if self.probe.sconfig.uid != 0 {
@@ -228,5 +251,53 @@ fn render_uprobe_event(raw: &[u8], hook_points: &[UprobeArgs]) -> Result<String>
             ))
         }
         _ => Ok(format!("non-uprobe event ({} bytes)", raw.len())),
+    }
+}
+
+/// Parse a signal name (e.g. "SIGSTOP", "SIGABRT") to its numeric value.
+/// Returns 0 for empty/unrecognized strings.
+/// Mirrors Go's `util.ParseSignal(name)` usage.
+pub fn parse_signal_name(name: &str) -> u32 {
+    if name.is_empty() {
+        return 0;
+    }
+    let upper = name.to_uppercase();
+    let upper = upper.strip_prefix("SIG").unwrap_or(&upper);
+    match upper {
+        "STOP" => 19,
+        "ABRT" => 6,
+        "TRAP" => 5,
+        "KILL" => 9,
+        "INT" => 2,
+        "TERM" => 15,
+        "CONT" => 18,
+        "USR1" => 10,
+        "USR2" => 12,
+        "SEGV" => 11,
+        "BUS" => 7,
+        "FPE" => 8,
+        "ALRM" => 14,
+        "HUP" => 1,
+        "PIPE" => 13,
+        _ => {
+            // Try parsing as a raw number.
+            name.parse::<u32>().unwrap_or(0)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_signal_names() {
+        assert_eq!(parse_signal_name("SIGSTOP"), 19);
+        assert_eq!(parse_signal_name("SIGABRT"), 6);
+        assert_eq!(parse_signal_name("SIGTRAP"), 5);
+        assert_eq!(parse_signal_name("sigstop"), 19); // case-insensitive
+        assert_eq!(parse_signal_name(""), 0);
+        assert_eq!(parse_signal_name("SIGUNKNOWN"), 0);
+        assert_eq!(parse_signal_name("42"), 42); // raw number
     }
 }

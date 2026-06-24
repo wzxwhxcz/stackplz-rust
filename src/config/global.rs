@@ -40,6 +40,10 @@ pub struct GlobalConfig {
     pub library: String,
     // Perf buffer size in MB.
     pub buffer: u32,
+    // Signal flags.
+    pub kill_signal: String,
+    pub tkill_signal: String,
+    pub auto_resume: bool,
 }
 
 impl GlobalConfig {
@@ -73,6 +77,9 @@ impl GlobalConfig {
             btf: args.btf,
             library: args.library.clone(),
             buffer: args.buffer,
+            kill_signal: args.kill.clone(),
+            tkill_signal: args.tkill.clone(),
+            auto_resume: args.auto,
         }
     }
 }

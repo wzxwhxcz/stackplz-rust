@@ -16,6 +16,7 @@ pub mod complex_types;
 pub mod consts;
 pub mod op;
 pub mod registry;
+pub mod render;
 
 // Re-export op helpers.
 pub use op::{

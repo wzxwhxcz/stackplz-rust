@@ -2,117 +2,153 @@
 
 Rust 重构版 [SeeFlowerX/stackplz](https://github.com/SeeFlowerX/stackplz) —— 一款基于 eBPF 的 Android 堆栈追踪工具。
 
-**目标**：底层用 Rust 重写，所有用户可见行为与内核契约与原 Go 项目**逐字对齐**（CLI、配置文件、eBPF 程序、事件解码格式、栈回溯输出）。
+同步自上游 **dev 分支**（`d4bf8cd`），底层用 Rust 重写，eBPF C 源码原样复用。
 
 ## 与原项目的对照
 
 | 维度 | 原 Go 项目 | 本 Rust 版 |
 |------|-----------|-----------|
-| CLI 框架 | `spf13/cobra` | `clap` v4 derive（开启 `infer_long_args` 复刻 cobra 前缀匹配） |
-| eBPF 加载 | 魔改的 `cilium/ebpf` + `ehids/ebpfmanager` | `libbpf-rs` |
-| 栈回溯 | cgo `dlopen` 预编译 `libstackplz.so`（基于 Android `libunwindstack`） | `libloading` dlopen **同一批** `preload_libs/*.so`，行为 100% 一致 |
-| 资产嵌入 | `go-bindata` 生成 `assets` 包 | `include_bytes!`（`src/assets.rs`） |
+| CLI 框架 | `spf13/cobra` | `clap` v4 derive（`infer_long_args` 复刻 cobra 前缀匹配） |
+| eBPF 加载 | 魔改 `cilium/ebpf` + `ehids/ebpfmanager` | `libbpf-rs` 0.23 |
+| 栈回溯 | cgo `dlopen` 预编译 `libstackplz.so` | `libloading` dlopen 同一批 `preload_libs/*.so` |
+| 资产嵌入 | `go-bindata` | `include_bytes!` |
 | 配置 | `encoding/json` | `serde` / `serde_json` |
 | ELF 符号解析 | `ebpfmanager` 内部 | `object` crate |
-
-不变的内核契约（Rust 侧用 `#[repr(C)]` + 小端严格对齐，带单元测试断言字节布局）：
-
-- **`filter_map` 值**：`StackFilter` = 32 字节，`SyscallFilter` = 36 字节（多一个 `nr` 字段）
-- **perf 事件载荷**：`u32 sample_size → u32 pid → u32 tid → u64 ts → char[16] comm`，syscall 尾部多 `i64 NR`，可选 `UnwindBuf`（abi + regs[33] + stack_size + data + dyn_size）
-- **perf 采样参数**：`sample_regs_user = (1<<33)-1`、`sample_stack_user = 8192`
-- **eBPF C 源**：`ebpf/{stack,raw_syscalls}.c` + `common.h` **原样复制**，未做任何改动
+| eBPF C 源 | dev 分支 | **原样复制**（19 个文件，零改动） |
 
 ## 目录结构
 
 ```
 stackplz-rs/
 ├── Cargo.toml
-├── build.rs                # 用 clang 编译 ebpf/*.c -> ebpf/bpf/*.o
-├── build_env.sh            # 拉取 AOSP 头文件到 external/
-├── ebpf/                   # eBPF C 源（原样复制自上游）
-│   ├── common.h
-│   ├── stack.c
-│   └── raw_syscalls.c
-├── assets/preload_libs/    # 预编译 .so（原样复制自上游，9 个文件）
-├── config.json             # 示例配置（原样复制）
+├── build.rs                # clang 编译 ebpf/*.c -> ebpf/bpf/*.o（3 个对象）
+├── build_env.sh            # 拉取 libbpf 源码 + bpftool + BTF
+├── ebpf/                   # eBPF C 源（dev 分支原样复制）
+│   ├── stack.c             # uprobe handler（probe_stack_0..5）
+│   ├── syscall.c           # raw_tracepoint/sys_enter + sys_exit
+│   ├── perf_mmap.c         # perf_mmap 模块
+│   ├── types.h             # dev 契约结构体（op_config_t, point_args_t, ...）
+│   ├── maps.h              # BPF map 定义（op_list, uprobe_point_args, events, ...）
+│   ├── utils.h             # read_args() op VM 解释器
+│   └── common/             # buffer.h, consts.h, filtering.h, ...
+├── assets/preload_libs/    # 预编译 .so（9 个，含 libstackplz.so + libunwindstack.so）
 └── src/
-    ├── main.rs             # 入口：is_enable_bpf() -> cli::start()
-    ├── assets.rs           # include_bytes! 嵌入 .so + restore_assets（--prepare）
-    ├── logger.rs           # log.Ltime + MultiWriter 等价（stdout + file）
-    ├── cli/                # clap CLI（args.rs）+ root/stack_cmd/syscall_cmd handlers
-    ├── config/             # SConfig/GlobalConfig/TargetConfig/ProbeConfig/SyscallConfig + hook_json
-    ├── ebpf/               # capability.rs（/proc/config.gz）+ bpf_common.rs（libbpf-rs 胶水）
-    ├── event/              # ievent/context/hook/syscall_event + unwind_ffi（dlopen get_stack）
-    ├── module/             # stack_probe（uprobe）+ syscall_tracepoint（tracepoint）
-    └── util/               # hexdump + fs（FindLib/ReadMapsByPid）+ reg（ParseReg）
+    ├── main.rs             # 入口
+    ├── lib.rs              # 模块声明
+    ├── assets.rs           # include_bytes! 嵌入 .so
+    ├── logger.rs           # 日志（stdout + file）
+    ├── cli/                # clap CLI + 子命令 handler
+    │   ├── args.rs         # GlobalArgs + StackArgs + SyscallArgs
+    │   ├── root.rs         # persistent_pre_run（资产释放、目标解析）
+    │   ├── stack_cmd.rs    # stack 子命令（-w 解析 + 多模块分发）
+    │   └── syscall_cmd.rs  # syscall 子命令
+    ├── config/             # 配置层
+    │   ├── global.rs       # GlobalConfig（全部 dev 全局 flag）
+    │   ├── stack.rs        # StackConfig + ProbeConfig
+    │   ├── sconfig.rs      # SConfig + StackFilter + SyscallFilter
+    │   ├── point_arg.rs    # PointArg + UprobeArgs + GetOpList()
+    │   ├── point_parser.rs # -w 字符串解析器（ParseArgType + Parse_HookPoint）
+    │   └── hook_json.rs    # JSON 配置（master-era schema）
+    ├── contract/           # dev eBPF 契约层（平台无关，带 141 个单测）
+    │   ├── types.rs        # #[repr(C)] 结构体（56 个，字节布局断言）
+    │   ├── enums.rs        # EventId, OpCode(34), ArgType(40), ArgFilterType, ...
+    │   ├── consts.rs       # 常量 + common_list 偏移段
+    │   ├── args.rs         # ArgsCursor（TLV 读取器）
+    │   └── decode.rs       # decode_perf_record()（56B 头 + eventid 分派）
+    ├── argtype/            # 参数类型系统（Phase 1）
+    │   ├── op.rs           # OpManager + 34 个 op 单例 + dedup
+    │   ├── consts.rs       # 57 个类型索引常量 + 结构体大小/偏移
+    │   ├── registry.rs     # ArgType 注册表（Register/GetArgType/with_type）
+    │   ├── base_types.rs   # init_base_types（ptr/int/buffer/string/struct/array）
+    │   └── complex_types.rs# pre_register（25+ 扩展类型 + 动态构造器）
+    ├── ebpf/               # eBPF 胶水
+    │   ├── bpf_common.rs   # libbpf-rs 加载 + map 写入辅助
+    │   └── capability.rs   # /proc/config.gz 解析
+    ├── event/              # 事件解码（master-era，待迁移到 dev 契约）
+    │   ├── context.rs      # ContextEvent 解码
+    │   ├── ievent.rs       # LibArg + UnwindBuf + RegsBuf
+    │   ├── hook.rs         # HookDataEvent 渲染
+    │   ├── syscall_event.rs# SyscallDataEvent
+    │   └── unwind_ffi.rs   # dlopen libstackplz.so get_stack
+    ├── module/             # 运行时模块
+    │   ├── stack_probe.rs  # uprobe 运行时（load + map + attach + perf 轮询）
+    │   └── syscall_tracepoint.rs # syscall 运行时（stub，待实现）
+    └── util/               # 工具
+        ├── fs.rs           # find_lib + read_maps_by_pid
+        ├── reg.rs          # parse_reg + MapSegment
+        └── hexdump.rs      # hex dump
 ```
 
 ## 构建
 
-> **环境**：必须在 Linux/WSL 上构建，目标是 Android arm64。
+通过 GitHub Actions 自动构建（`.github/workflows/build.yml`）：
+- **test job**：`cargo test --lib` + `cargo test --test contracts` + clippy + fmt（141 个测试）
+- **android job**：clang 编 eBPF .o → bpftool gen BTF → NDK 交叉编译 arm64 → 上传二进制
 
-1. **拉取 AOSP 头文件**（只需一次）：
-   ```bash
-   ./build_env.sh
-   ```
-2. **安装 Rust Android target + libbpf**：
-   ```bash
-   rustup target add aarch64-linux-android
-   # libbpf-rs 需要 libbpf 1.x：用 NDK 的 clang，或系统安装 libbpf-dev
-   ```
-3. **配置 NDK linker**（`~/.cargo/config.toml`）：
-   ```toml
-   [target.aarch64-linux-android]
-   linker = "<NDK>/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang"
-   ```
-4. **编译**（嵌入 eBPF 字节码）：
-   ```bash
-   cargo build --release --target aarch64-linux-android --features embedded_bpf
-   ```
-5. 产物在 `target/aarch64-linux-android/release/stackplz`，推到手机 `/data/local/tmp`。
+手动构建：
+```bash
+./build_env.sh                    # 拉取 libbpf + bpftool + BTF
+cargo build --release --features embedded_bpf --target aarch64-linux-android
+```
 
 ## 使用
 
-与原项目完全一致：
-
 ```bash
-/data/local/tmp/stackplz stack --prepare          # 释放 preload_libs
-./stackplz --name com.lemon.lv --pid 11267 syscall --nr 63 --regs --stack
+# 释放 preload_libs
+./stackplz stack --prepare
+
+# -w hook uprobe（dev 核心功能）
+./stackplz --uid 10245 -l libc.so -w "write[int,buf:128,int]" stack --stack --regs
+./stackplz --name com.x --library libnative-lib.so -w "0x4B8A74[str:x22,str:x8]" stack
+
+# 符号 hook（master-era 兼容）
 ./stackplz --uid 10245 stack --symbol open --stack --regs
-./stackplz --name com.sfx.ebpf stack --library libnative-lib.so --symbol _Z5func1v --stack --regs
-./stackplz --name com.sfx.ebpf stack --config config.json
+
+# JSON 配置
+./stackplz --name com.x stack --config config.json
 ```
 
-## 当前状态
+### -w 语法
 
-- ✅ 完整 CLI 表面（所有 flag/默认值/语义与原版对齐，`--help` 已对齐）
-- ✅ 配置层（`config.json` 解析、`ProbeConfig::Check`、`filter_t` 字节布局单测）
-- ✅ 事件解码（公共头 + `UnwindBuf`/`RegsBuf`，小端，单测）
-- ✅ 栈回溯 FFI（`libloading` dlopen `libstackplz.so` 调 `get_stack`）
-- ✅ util（`FindLib` / `ParseReg` / hexdump）
-- ✅ 资产嵌入 + `--prepare` 释放
-- ✅ build.rs 编译 eBPF + NDK 交叉编译文档
-- ⚠️ **perf 采样攻关**：libbpf-rs 的 `PerfBufferBuilder` 高层 API 不暴露
-  `sample_regs_user` / `sample_stack_user`（原 Go 项目靠魔改 cilium 分支实现）。
-  集成到真机时需补一个裸 `perf_event_open` syscall 包装（约 200 行）来配置这两个
-  `perf_event_attr` 字段，否则只能采到事件头而采不到寄存器/栈快照。代码里已留好接入点
-  （`module/stack_probe.rs` 的 `run_perf_loop_stack` / `module/syscall_tracepoint.rs`）。
+```
+symbol[arg1,arg2,...]          基本形式
+write[int,buf:128,int]         多参数
+strstr+0x0[str,str]            符号 + 偏移
+0x5B950[*int:x20]              偏移 + 指针解引用 + 寄存器读取
+write[int]0x40                 exit point 克隆
+open[str]s                     绑定到 syscall
+```
+
+支持的参数类型：`int` `uint` `int8-64` `uint8-64` `str` `std` `str16` `il2cpp_string` `ptr` `buf` `buf:N` `buf:reg` `int_arr:N` `uint_arr:N` `*int`（指针） `intx`（hex） `timespec` `iovec` `stat` 等。
+
+## 移植进度
+
+| 模块 | 完成度 | 说明 |
+|------|--------|------|
+| eBPF C 源码 | ✅ 100% | 19 个文件原样复制 |
+| 契约层 | ✅ ~70% | dev 结构/枚举/常量/TLV/解码，141 个单测 |
+| op 管理器 (1a) | ✅ ~90% | 34 个 op 单例 + dedup + 构造器 |
+| argtype 注册表 (1b) | ✅ ~45% | 类型注册完整，值解析/渲染待移植 |
+| -w 解析器 (2) | ✅ ~80% | 全语法支持（14 个测试） |
+| uprobe 运行时 (3) | ✅ ~55% | load + map + attach + perf 轮询 + 事件渲染 |
+| BPF map 写入 (4) | ✅ ~80% | op_list/uprobe_point_args/base_config/common_filter/common_list |
+| dev CLI flags | ✅ ~60% | 25+ flag 已加，缺 -f/-s/-c/--dump/--parse/--brk* 等 |
+| syscall 运行时 | ❌ 5% | stub，返回 "not implemented" |
+| 参数值渲染 | ❌ 0% | config_struct.go (884行) 未移植 |
+| -f 过滤系统 | ❌ 10% | 只有 wire struct |
+| perf_mmap 模块 | ❌ 0% | |
+| brk 硬件断点 | ❌ 0% | |
+| event_processor | ❌ 0% | |
+| --rpc / --parse | ❌ 0% | |
+
+**总体功能完成度：约 35%**
 
 ## 测试
 
-平台无关的字节布局 / JSON / CLI 解析单测可在任何主机运行：
-
 ```bash
-cargo test --lib
+cargo test --lib          # 141 个单测
+cargo test --test contracts  # 33 个集成测试
 ```
-
-关键单测：
-- `config::sconfig` — `StackFilter`=32B / `SyscallFilter`=36B 字段偏移与字节值
-- `config::hook_json` — 解析 `config.json`、`hex2int`、serde 往返
-- `event::ievent` — `LibArg`=288B、`UnwindBuf`/`RegsBuf` 小端往返
-- `event::context` — 公共头解码、UUID 格式、regs JSON 键序
-- `cli::args` — clap 解析、前缀匹配、默认值
-- `assets` — 9 个 .so 全部嵌入且为 ELF
 
 ## 许可
 

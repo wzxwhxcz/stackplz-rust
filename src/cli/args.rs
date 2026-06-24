@@ -60,9 +60,25 @@ pub struct GlobalArgs {
     #[arg(short = 'p', long, default_value_t = 0)]
     pub pid: u64,
 
+    /// tid white list
+    #[arg(short = 't', long, default_value = "")]
+    pub tid: String,
+
     /// tid black list, max 5
     #[arg(long, default_value = "")]
     pub no_tids: String,
+
+    /// thread name white list
+    #[arg(long, default_value = "")]
+    pub tname: String,
+
+    /// thread name black list
+    #[arg(long, default_value = "")]
+    pub no_tname: String,
+
+    /// disable default thread name black list
+    #[arg(long, default_value_t = false)]
+    pub full_tname: bool,
 
     /// enable debug logging
     #[arg(short = 'd', long, default_value_t = false)]
@@ -73,8 +89,68 @@ pub struct GlobalArgs {
     pub out: String,
 
     /// use with --out, wont logging to terminal when used
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 'q', long, default_value_t = false)]
     pub quiet: bool,
+
+    /// enable color for log file
+    #[arg(long, default_value_t = false)]
+    pub color: bool,
+
+    /// log event as json format
+    #[arg(short = 'j', long, default_value_t = false)]
+    pub json: bool,
+
+    /// dump buffer as hex
+    #[arg(long, default_value_t = false)]
+    pub dumphex: bool,
+
+    /// show origin pc register value
+    #[arg(long, default_value_t = false)]
+    pub showpc: bool,
+
+    /// show event boot time info
+    #[arg(long, default_value_t = false)]
+    pub showtime: bool,
+
+    /// show process uid info
+    #[arg(long, default_value_t = false)]
+    pub showuid: bool,
+
+    /// enable unwindstack
+    #[arg(long, default_value_t = false)]
+    pub stack: bool,
+
+    /// show regs
+    #[arg(long, default_value_t = false)]
+    pub regs: bool,
+
+    /// try get pc and lr offset
+    #[arg(long, default_value_t = false)]
+    pub getoff: bool,
+
+    /// try parse java stack
+    #[arg(long, default_value_t = false)]
+    pub jstack: bool,
+
+    /// manual parse stack
+    #[arg(long, default_value_t = false)]
+    pub mstack: bool,
+
+    /// disable check for bpf
+    #[arg(long, default_value_t = false)]
+    pub nocheck: bool,
+
+    /// declare BTF enabled
+    #[arg(long, default_value_t = false)]
+    pub btf: bool,
+
+    /// lib name or lib full path, default is libc.so
+    #[arg(short = 'l', long, default_value = "libc.so")]
+    pub library: String,
+
+    /// perf cache buffer size, default 8M
+    #[arg(short = 'b', long, default_value_t = 8)]
+    pub buffer: u32,
 }
 
 #[derive(Debug, Subcommand)]
@@ -230,5 +306,44 @@ mod tests {
             }
             _ => panic!("expected stack subcommand"),
         }
+    }
+
+    #[test]
+    fn parse_global_flags() {
+        let cli = Cli::try_parse_from([
+            "stackplz",
+            "--uid",
+            "1",
+            "--json",
+            "--dumphex",
+            "--showpc",
+            "--showtime",
+            "--showuid",
+            "--color",
+            "--debug",
+            "stack",
+        ])
+        .unwrap();
+        assert!(cli.global.json);
+        assert!(cli.global.dumphex);
+        assert!(cli.global.showpc);
+        assert!(cli.global.showtime);
+        assert!(cli.global.showuid);
+        assert!(cli.global.color);
+        assert!(cli.global.debug);
+    }
+
+    #[test]
+    fn parse_library_flag() {
+        let cli = Cli::try_parse_from([
+            "stackplz",
+            "--uid",
+            "1",
+            "--library",
+            "libnative-lib.so",
+            "stack",
+        ])
+        .unwrap();
+        assert_eq!(cli.global.library, "libnative-lib.so");
     }
 }

@@ -28,9 +28,7 @@ pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: StackArgs
     if !stack_cfg.hook_points.is_empty() {
         // -w/--point mode: parse hook point strings into UprobeArgs.
         // Use the global --library flag as the library path.
-        let library = if stack_cfg.library
-            != "/apex/com.android.runtime/lib64/bionic/libc.so"
-        {
+        let library = if stack_cfg.library != "/apex/com.android.runtime/lib64/bionic/libc.so" {
             find_lib(&stack_cfg.library, &target.library_dirs)?
         } else {
             find_lib(&global.library, &target.library_dirs)?

@@ -27,9 +27,20 @@ pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: StackArgs
     let mut probes: Vec<(ProbeConfig, Vec<crate::config::UprobeArgs>)> = Vec::new();
     if !stack_cfg.hook_points.is_empty() {
         // -w/--point mode: parse hook point strings into UprobeArgs.
-        let library = find_lib(&stack_cfg.library, &target.library_dirs)?;
-        let points =
-            crate::config::point_parser::parse_hook_point(&stack_cfg.hook_points, &library)?;
+        // Use the global --library flag as the library path.
+        let library = if stack_cfg.library
+            != "/apex/com.android.runtime/lib64/bionic/libc.so"
+        {
+            find_lib(&stack_cfg.library, &target.library_dirs)?
+        } else {
+            find_lib(&global.library, &target.library_dirs)?
+        };
+        let points = crate::config::point_parser::parse_hook_point(
+            &stack_cfg.hook_points,
+            &library,
+            global.dumphex,
+            global.color,
+        )?;
         // In -w mode, all points share one library, so we create one probe.
         let mut p = ProbeConfig {
             sconfig: SConfig {

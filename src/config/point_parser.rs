@@ -280,7 +280,12 @@ fn compile_read_op(read_op_str: &str, point_arg: &mut PointArg) -> Result<()> {
 /// `Parse_HookPoint(configs)` — parse a list of `-w` strings into `UprobeArgs`.
 ///
 /// Mirrors `config_module.go:336-431`.
-pub fn parse_hook_point(configs: &[String], lib_path: &str) -> Result<Vec<UprobeArgs>> {
+pub fn parse_hook_point(
+    configs: &[String],
+    lib_path: &str,
+    dump_hex: bool,
+    color: bool,
+) -> Result<Vec<UprobeArgs>> {
     if lib_path.is_empty() {
         return Err(anyhow!("library is empty, plz set with -l/--lib"));
     }
@@ -358,7 +363,7 @@ pub fn parse_hook_point(configs: &[String], lib_path: &str) -> Result<Vec<Uprobe
             for (arg_index, arg_str) in args.split(',').enumerate() {
                 let arg_name = format!("arg_{arg_index}");
                 let mut pa = PointArg::new_uprobe(&arg_name, POINTER, arg_index as u32);
-                parse_arg_type(arg_str, &mut pa, false, false)?;
+                parse_arg_type(arg_str, &mut pa, dump_hex, color)?;
                 hook_point.point_args.push(pa);
             }
         }
@@ -444,7 +449,7 @@ mod tests {
     #[test]
     fn parse_simple_int_args() {
         ensure_init();
-        let points = parse_hook_point(&["write[int,int,int]".to_string()], "/lib/libc.so").unwrap();
+        let points = parse_hook_point(&["write[int,int,int]".to_string()], "/lib/libc.so", false, false).unwrap();
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].symbol, "write");
         assert_eq!(points[0].point_args.len(), 3);
@@ -456,7 +461,7 @@ mod tests {
     fn parse_buf_with_size() {
         ensure_init();
         let points =
-            parse_hook_point(&["write[int,buf:128,int]".to_string()], "/lib/libc.so").unwrap();
+            parse_hook_point(&["write[int,buf:128,int]".to_string()], "/lib/libc.so", false, false).unwrap();
         assert_eq!(points[0].point_args.len(), 3);
         // arg_0 = int
         assert_eq!(points[0].point_args[0].type_index, INT);
@@ -471,14 +476,14 @@ mod tests {
     #[test]
     fn parse_string_type() {
         ensure_init();
-        let points = parse_hook_point(&["open[str]".to_string()], "/lib/libc.so").unwrap();
+        let points = parse_hook_point(&["open[str]".to_string()], "/lib/libc.so", false, false).unwrap();
         assert_eq!(points[0].point_args[0].type_index, STRING);
     }
 
     #[test]
     fn parse_hex_offset_symbol() {
         ensure_init();
-        let points = parse_hook_point(&["0x5B950[int]".to_string()], "/lib/libc.so").unwrap();
+        let points = parse_hook_point(&["0x5B950[int]".to_string()], "/lib/libc.so", false, false).unwrap();
         assert_eq!(points[0].offset, 0x5B950);
         assert_eq!(points[0].symbol, "");
     }
@@ -487,7 +492,7 @@ mod tests {
     fn parse_symbol_with_offset() {
         ensure_init();
         let points =
-            parse_hook_point(&["strstr+0x10[str,str]".to_string()], "/lib/libc.so").unwrap();
+            parse_hook_point(&["strstr+0x10[str,str]".to_string()], "/lib/libc.so", false, false).unwrap();
         assert_eq!(points[0].symbol, "strstr");
         assert_eq!(points[0].offset, 0x10);
     }
@@ -495,7 +500,7 @@ mod tests {
     #[test]
     fn parse_pointer_prefix() {
         ensure_init();
-        let points = parse_hook_point(&["test[*int]".to_string()], "/lib/libc.so").unwrap();
+        let points = parse_hook_point(&["test[*int]".to_string()], "/lib/libc.so", false, false).unwrap();
         let pa = &points[0].point_args[0];
         // *int wraps INT in a pointer
         let at = crate::argtype::get_arg_type(pa.type_index);
@@ -506,7 +511,7 @@ mod tests {
     #[test]
     fn parse_hex_format_suffix() {
         ensure_init();
-        let points = parse_hook_point(&["test[intx]".to_string()], "/lib/libc.so").unwrap();
+        let points = parse_hook_point(&["test[intx]".to_string()], "/lib/libc.so", false, false).unwrap();
         let pa = &points[0].point_args[0];
         let at = crate::argtype::get_arg_type(pa.type_index);
         assert_eq!(at.format_type, FORMAT_HEX);
@@ -515,7 +520,7 @@ mod tests {
     #[test]
     fn parse_array_type() {
         ensure_init();
-        let points = parse_hook_point(&["test[int_arr:4]".to_string()], "/lib/libc.so").unwrap();
+        let points = parse_hook_point(&["test[int_arr:4]".to_string()], "/lib/libc.so", false, false).unwrap();
         let pa = &points[0].point_args[0];
         let at = crate::argtype::get_arg_type(pa.type_index);
         assert_eq!(at.array_len, 4);
@@ -524,7 +529,7 @@ mod tests {
     #[test]
     fn parse_struct_by_name() {
         ensure_init();
-        let points = parse_hook_point(&["test[timespec]".to_string()], "/lib/libc.so").unwrap();
+        let points = parse_hook_point(&["test[timespec]".to_string()], "/lib/libc.so", false, false).unwrap();
         let pa = &points[0].point_args[0];
         let at = crate::argtype::get_arg_type(pa.type_index);
         assert_eq!(at.size, SIZEOF_TIMESPEC);
@@ -533,7 +538,7 @@ mod tests {
     #[test]
     fn parse_with_read_op() {
         ensure_init();
-        let points = parse_hook_point(&["test[int:x1]".to_string()], "/lib/libc.so").unwrap();
+        let points = parse_hook_point(&["test[int:x1]".to_string()], "/lib/libc.so", false, false).unwrap();
         let pa = &points[0].point_args[0];
         // x1 read_op should generate extra_op_list ending with SAVE_ADDR
         assert!(!pa.extra_op_list.is_empty());
@@ -547,13 +552,13 @@ mod tests {
     fn parse_max_six_points() {
         ensure_init();
         let configs: Vec<String> = (0..7).map(|i| format!("sym{i}[int]")).collect();
-        let result = parse_hook_point(&configs, "/lib/libc.so");
+        let result = parse_hook_point(&configs, "/lib/libc.so", false, false);
         assert!(result.is_err());
     }
 
     #[test]
     fn empty_lib_errors() {
-        let result = parse_hook_point(&["test[int]".to_string()], "");
+        let result = parse_hook_point(&["test[int]".to_string()], "", false, false);
         assert!(result.is_err());
     }
 
@@ -561,7 +566,7 @@ mod tests {
     fn exit_point_cloning() {
         ensure_init();
         // `]0x40` suffix means exit_read with offset 0x40
-        let points = parse_hook_point(&["write[int]0x40".to_string()], "/lib/libc.so").unwrap();
+        let points = parse_hook_point(&["write[int]0x40".to_string()], "/lib/libc.so", false, false).unwrap();
         // Original + exit point = 2
         assert_eq!(points.len(), 2);
         assert_eq!(points[1].offset, 0x40);

@@ -281,7 +281,7 @@ fn render_uprobe_event(raw: &[u8], hook_points: &[UprobeArgs]) -> Result<String>
                                     at.type_index,
                                     at.size,
                                     at.format_type,
-                                    &payload_bytes,
+                                    payload_bytes,
                                     at.dump_hex,
                                 )
                             } else {

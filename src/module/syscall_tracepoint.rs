@@ -12,7 +12,13 @@ use anyhow::{bail, Result};
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
-use libbpf_rs::{MapCore, MapFlags, Object, ObjectBuilder, PerfBufferBuilder};
+use {
+    crate::contract::{THREAD_NAME_BLACKLIST, THREAD_NAME_WHITELIST},
+    anyhow::{anyhow, Context},
+    libbpf_rs::{MapCore, MapFlags, Object, ObjectBuilder, PerfBufferBuilder},
+    std::sync::atomic::{AtomicBool, Ordering},
+    std::time::Duration,
+};
 
 /// Module name. Mirrors `MODULE_NAME_SYSCALL` (`const.go`).
 pub const NAME: &str = super::MODULE_NAME_SYSCALL;

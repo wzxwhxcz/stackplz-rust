@@ -9,6 +9,9 @@ use crate::logger::Logger;
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+use libbpf_rs::MapCore;
+
 /// Module name. Mirrors `MODULE_NAME_STACK`.
 pub const NAME: &str = super::MODULE_NAME_STACK;
 
@@ -166,7 +169,7 @@ impl StackProbeModule {
             .find(|m| m.name() == "events")
             .ok_or_else(|| anyhow!("cannot find events map"))?;
 
-        let pb = libbpf_rs::PerfBufferBuilder::new(events_map)
+        let pb = libbpf_rs::PerfBufferBuilder::new(&events_map)
             .pages(256)
             .sample_cb(move |_cpu: i32, data: &[u8]| {
                 let rendered = render_uprobe_event(data, &hook_points);

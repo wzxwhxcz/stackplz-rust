@@ -84,7 +84,7 @@ pub mod linux {
     //!   4. expose the `*_events` perf-event-array map to the reader loop
 
     use anyhow::{anyhow, Result};
-    use libbpf_rs::{Map, MapFlags, Object, ObjectBuilder};
+    use libbpf_rs::{Map, MapCore, MapFlags, Object, ObjectBuilder};
 
     /// Open an embedded eBPF object from memory (no temp file needed).
     /// Mirrors `bpfManager.InitWithOptions(bytes.NewReader(byteBuf), ...)`.
@@ -114,6 +114,7 @@ pub mod linux {
         obj.maps()
             .find(|m| m.name() == name)
             .ok_or_else(|| anyhow!("cannot find map: {}", name))
+            .map(|m| m as &'a Map<'a>)
     }
 
     /// Write a key/value pair into a HASH/ARRAY map by name.

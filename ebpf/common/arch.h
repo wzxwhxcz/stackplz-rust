@@ -5,10 +5,7 @@
 #include "bpf_tracing.h"
 #include "common/common.h"
 
-#if defined(__TARGET_ARCH_x86)
-    #define PT_REGS_PARM6(ctx) ((ctx)->r9)
-#elif defined(__TARGET_ARCH_arm64)
-    #define PT_REGS_PARM6(x) ((x)->regs[5])
-#endif
+// PT_REGS_PARM6 is now provided by libbpf's bpf_tracing.h for all architectures
+// No need to redefine it here
 
 #endif

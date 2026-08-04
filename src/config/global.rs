@@ -44,6 +44,15 @@ pub struct GlobalConfig {
     pub kill_signal: String,
     pub tkill_signal: String,
     pub auto_resume: bool,
+    // Dump/Parse flags.
+    pub dump_file: String,
+    pub parse_file: String,
+    // Advanced filter flags.
+    pub no_uid: String,
+    pub no_pid: String,
+    pub sdk_int: u32,
+    // Misc flags.
+    pub dumpret: bool,
 }
 
 impl GlobalConfig {
@@ -80,6 +89,12 @@ impl GlobalConfig {
             kill_signal: args.kill.clone(),
             tkill_signal: args.tkill.clone(),
             auto_resume: args.auto,
+            dump_file: args.dump.clone(),
+            parse_file: args.parse.clone(),
+            no_uid: args.no_uid.clone(),
+            no_pid: args.no_pid.clone(),
+            sdk_int: args.sdk_int,
+            dumpret: args.dumpret,
         }
     }
 }

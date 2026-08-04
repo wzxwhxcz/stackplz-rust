@@ -163,6 +163,30 @@ pub struct GlobalArgs {
     /// auto resume when use --kill SIGSTOP
     #[arg(long, default_value_t = false)]
     pub auto: bool,
+
+    /// dump perf events to binary file for later replay
+    #[arg(long, default_value = "")]
+    pub dump: String,
+
+    /// parse and replay dumped perf events from file
+    #[arg(long, default_value = "")]
+    pub parse: String,
+
+    /// UID blacklist, comma separated
+    #[arg(long, default_value = "")]
+    pub no_uid: String,
+
+    /// PID blacklist, comma separated
+    #[arg(long, default_value = "")]
+    pub no_pid: String,
+
+    /// SDK version filter
+    #[arg(long, default_value_t = 0)]
+    pub sdk_int: u32,
+
+    /// dump return address
+    #[arg(long, default_value_t = false)]
+    pub dumpret: bool,
 }
 
 #[derive(Debug, Subcommand)]

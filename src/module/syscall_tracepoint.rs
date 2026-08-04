@@ -43,14 +43,14 @@ impl SyscallTracepointModule {
     pub fn run(self, logger: Arc<Logger>) -> Result<()> {
         logger.println(&format!("{}: starting syscall runtime", NAME));
 
-        // Load eBPF object
-        let bpf_path = format!("{}/syscall.o", self.lib_path);
-        logger.println(&format!("{}: loading {}", NAME, bpf_path));
+        // Load eBPF object from embedded bytecode
+        logger.println(&format!("{}: loading embedded syscall.o", NAME));
 
+        let obj_bytes = crate::ebpf::bpf_common::SYSCALL_OBJ;
         let mut obj_builder = ObjectBuilder::default();
         obj_builder.debug(self.conf.debug);
         let open_obj = obj_builder
-            .open_file(&bpf_path)
+            .open_memory("syscall.o", obj_bytes)
             .context("failed to open syscall.o")?;
 
         let mut obj = open_obj.load().context("failed to load syscall.o")?;

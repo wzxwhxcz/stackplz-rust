@@ -41,11 +41,11 @@ impl SyscallTracepointModule {
 
     #[cfg(target_os = "linux")]
     pub fn run(self, logger: Arc<Logger>) -> Result<()> {
-        logger.info(&format!("{}: starting syscall runtime", NAME));
+        logger.println(&format!("{}: starting syscall runtime", NAME));
 
         // Load eBPF object
         let bpf_path = format!("{}/syscall.o", self.lib_path);
-        logger.debug(&format!("{}: loading {}", NAME, bpf_path));
+        logger.println(&format!("{}: loading {}", NAME, bpf_path));
         
         let mut obj_builder = ObjectBuilder::default();
         obj_builder.debug(self.conf.debug);
@@ -56,15 +56,15 @@ impl SyscallTracepointModule {
         let mut obj = open_obj.load().context("failed to load syscall.o")?;
 
         // Attach raw tracepoints
-        logger.debug(&format!("{}: attaching raw tracepoints", NAME));
+        logger.println(&format!("{}: attaching raw tracepoints", NAME));
         self.attach_tracepoints(&mut obj)?;
 
         // Update all BPF maps
-        logger.debug(&format!("{}: updating BPF maps", NAME));
+        logger.println(&format!("{}: updating BPF maps", NAME));
         self.update_all_maps(&mut obj, &logger)?;
 
         // Set up perf event polling
-        logger.info(&format!("{}: starting event polling", NAME));
+        logger.println(&format!("{}: starting event polling", NAME));
         self.poll_events(&mut obj, logger)?;
 
         Ok(())
@@ -135,7 +135,7 @@ impl SyscallTracepointModule {
         map.update(&key.to_ne_bytes(), &value, MapFlags::ANY)
             .context("failed to update base_config")?;
         
-        logger.debug("updated base_config");
+        logger.println("updated base_config");
         Ok(())
     }
 
@@ -193,7 +193,7 @@ impl SyscallTracepointModule {
         map.update(&key.to_ne_bytes(), &value, MapFlags::ANY)
             .context("failed to update common_filter")?;
         
-        logger.debug("updated common_filter");
+        logger.println("updated common_filter");
         Ok(())
     }
 
@@ -218,7 +218,7 @@ impl SyscallTracepointModule {
                 .with_context(|| format!("failed to update common_list for {}", name))?;
         }
         
-        logger.debug(&format!("updated {} ({} items)", name, items.len()));
+        logger.println(&format!("updated {} ({} items)", name, items.len()));
         Ok(())
     }
 
@@ -237,7 +237,7 @@ impl SyscallTracepointModule {
                 .context("failed to update child_parent_map")?;
         }
         
-        logger.debug("updated child_parent_map");
+        logger.println("updated child_parent_map");
         Ok(())
     }
 
@@ -260,7 +260,7 @@ impl SyscallTracepointModule {
             self.add_thread_filter(map, name, THREAD_NAME_WHITELIST)?;
         }
         
-        logger.debug("updated thread_filter");
+        logger.println("updated thread_filter");
         Ok(())
     }
 
@@ -285,7 +285,7 @@ impl SyscallTracepointModule {
     #[cfg(target_os = "linux")]
     fn update_arg_filter(&self, _obj: &mut Object, logger: &Logger) -> Result<()> {
         // TODO: implement filter parser in Phase 4
-        logger.debug("arg_filter update skipped (Phase 4)");
+        logger.println("arg_filter update skipped (Phase 4)");
         Ok(())
     }
 
@@ -327,7 +327,7 @@ impl SyscallTracepointModule {
                 .with_context(|| format!("Failed to update sysenter_point_args for syscall {}", syscall_nr))?;
         }
         
-        logger.debug(&format!("sysenter_point_args updated: {} entries", syscall_points.len()));
+        logger.println(&format!("sysenter_point_args updated: {} entries", syscall_points.len()));
         Ok(())
     }
 
@@ -367,7 +367,7 @@ impl SyscallTracepointModule {
                 .with_context(|| format!("Failed to update sysexit_point_args for syscall {}", syscall_nr))?;
         }
         
-        logger.debug(&format!("sysexit_point_args updated: {} entries", syscall_points.len()));
+        logger.println(&format!("sysexit_point_args updated: {} entries", syscall_points.len()));
         Ok(())
     }
 
@@ -397,7 +397,7 @@ impl SyscallTracepointModule {
                 .with_context(|| format!("Failed to update op_list for key {}", op_key))?;
         }
         
-        logger.debug(&format!("op_list updated: {} entries", op_configs.len()));
+        logger.println(&format!("op_list updated: {} entries", op_configs.len()));
         Ok(())
     }
 
@@ -413,12 +413,12 @@ impl SyscallTracepointModule {
         .context("failed to set Ctrl-C handler")?;
 
         let handle_event = move |_cpu: i32, data: &[u8]| {
-            match crate::contract::decode_event(data) {
+            match crate::contract::decode_perf_record(data) {
                 Ok(decoded) => {
-                    logger.log(&decoded);
+                    logger.println(&decoded);
                 }
                 Err(e) => {
-                    logger.error(&format!("decode error: {}", e));
+                    logger.println(&format!("decode error: {}", e));
                 }
             }
         };
@@ -433,16 +433,16 @@ impl SyscallTracepointModule {
             .build()
             .context("failed to build perf buffer")?;
 
-        logger.info(&format!("{}: polling events (Ctrl-C to stop)", NAME));
+        logger.println(&format!("{}: polling events (Ctrl-C to stop)", NAME));
 
         while running.load(Ordering::SeqCst) {
             if let Err(e) = perf.poll(Duration::from_millis(100)) {
-                logger.error(&format!("poll error: {}", e));
+                logger.println(&format!("poll error: {}", e));
                 break;
             }
         }
 
-        logger.info(&format!("{}: shutting down", NAME));
+        logger.println(&format!("{}: shutting down", NAME));
         Ok(())
     }
 }

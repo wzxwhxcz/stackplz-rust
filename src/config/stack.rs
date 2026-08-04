@@ -79,9 +79,7 @@ impl ProbeConfig {
             use rand::distr::{Distribution, Uniform};
             let between = Uniform::new_inclusive(b'a', b'z').unwrap();
             let mut rng = rand::rng();
-            let chars: String = (0..8)
-                .map(|_| between.sample(&mut rng) as char)
-                .collect();
+            let chars: String = (0..8).map(|_| between.sample(&mut rng) as char).collect();
             self.symbol = chars;
         }
         Ok(())

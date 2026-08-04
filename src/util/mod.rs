@@ -11,4 +11,3 @@ pub use hexdump::{
     hex_dump, pretty_byte_slice, COLOR_BLUE, COLOR_GREEN, COLOR_RED, COLOR_RESET, COLOR_YELLOW,
 };
 pub use reg::parse_reg;
-

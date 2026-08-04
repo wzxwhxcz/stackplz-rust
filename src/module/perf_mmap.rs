@@ -54,16 +54,22 @@ impl PerfMmapModule {
 
         // Open perf_event for PERF_RECORD_MMAP2
         let perf_fd = self.open_perf_event()?;
-        
-        logger.println(&format!("{}: opened perf_event (simplified stub implementation)", NAME));
-        logger.println(&format!("{}: TODO: implement full mmap ring buffer reading", NAME));
-        
+
+        logger.println(&format!(
+            "{}: opened perf_event (simplified stub implementation)",
+            NAME
+        ));
+        logger.println(&format!(
+            "{}: TODO: implement full mmap ring buffer reading",
+            NAME
+        ));
+
         // TODO: Full implementation would:
         // 1. mmap() the perf_event fd to get ring buffer
         // 2. Parse perf_event_header from ring buffer
         // 3. Handle PERF_RECORD_MMAP2 events
         // 4. Update symbol resolution tables
-        
+
         // For now, just keep the fd open
         std::mem::forget(perf_fd);
 
@@ -74,7 +80,7 @@ impl PerfMmapModule {
     #[cfg(target_os = "linux")]
     fn open_perf_event(&self) -> Result<std::fs::File> {
         use std::os::unix::io::FromRawFd;
-        
+
         // perf_event_attr structure (128 bytes, simplified version)
         #[repr(C)]
         struct PerfEventAttr {
@@ -87,7 +93,7 @@ impl PerfMmapModule {
             flags: u64, // bitfield containing disabled, mmap2, task, etc.
             _padding: [u8; 80],
         }
-        
+
         let attr = PerfEventAttr {
             type_: PERF_TYPE_SOFTWARE,
             size: 128,
@@ -118,14 +124,20 @@ impl PerfMmapModule {
         };
 
         if fd < 0 {
-            bail!("perf_event_open failed: {}", std::io::Error::last_os_error());
+            bail!(
+                "perf_event_open failed: {}",
+                std::io::Error::last_os_error()
+            );
         }
 
         // Enable the event
         unsafe {
             if libc::ioctl(fd as i32, PERF_EVENT_IOC_ENABLE as _, 0) < 0 {
                 libc::close(fd as i32);
-                bail!("PERF_EVENT_IOC_ENABLE failed: {}", std::io::Error::last_os_error());
+                bail!(
+                    "PERF_EVENT_IOC_ENABLE failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
         }
 
@@ -139,14 +151,15 @@ impl PerfMmapModule {
         }
 
         // Parse the fixed-size header
-        let event: &Mmap2Event = unsafe {
-            &*(data.as_ptr() as *const Mmap2Event)
-        };
+        let event: &Mmap2Event = unsafe { &*(data.as_ptr() as *const Mmap2Event) };
 
         // Extract filename (variable-length null-terminated string after header)
         let filename_offset = std::mem::size_of::<Mmap2Event>();
         let filename_bytes = &data[filename_offset..];
-        let filename_end = filename_bytes.iter().position(|&b| b == 0).unwrap_or(filename_bytes.len());
+        let filename_end = filename_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(filename_bytes.len());
         let filename = String::from_utf8_lossy(&filename_bytes[..filename_end]);
 
         // Filter: only interested in .so files (dynamic libraries)

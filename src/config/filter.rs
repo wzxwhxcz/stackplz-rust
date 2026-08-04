@@ -1,11 +1,11 @@
 //! Argument filter parser and helper
-//! 
+//!
 //! This module implements the filter parsing logic from config_filter.go,
 //! supporting various filter types: equal, greater, less, whitelist, blacklist, etc.
 
+use crate::contract::MAX_STRCMP_LEN;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
-use crate::contract::MAX_STRCMP_LEN;
 
 // Filter type constants (matching Go's IOTA enum)
 pub const UNKNOWN_FILTER: u32 = 0;
@@ -50,8 +50,9 @@ impl ArgFilter {
     /// Convert to eBPF filter format
     pub fn to_ebpf_value(&self) -> EArgFilter {
         let mut str_val = [0u8; MAX_STRCMP_LEN];
-        str_val[..MAX_STRCMP_LEN.min(256)].copy_from_slice(&self.str_val[..MAX_STRCMP_LEN.min(256)]);
-        
+        str_val[..MAX_STRCMP_LEN.min(256)]
+            .copy_from_slice(&self.str_val[..MAX_STRCMP_LEN.min(256)]);
+
         EArgFilter {
             filter_type: self.filter_type,
             str_val,
@@ -95,13 +96,14 @@ impl FilterHelper {
 
     /// Get filter index by filter string
     pub fn get_filter_index(&self, filter: &str) -> Option<u32> {
-        self.filters.iter()
+        self.filters
+            .iter()
             .find(|f| f.filter_str == filter)
             .map(|f| f.filter_index)
     }
 
     /// Add a filter and return its index
-    /// 
+    ///
     /// Filter format: "type:value"
     /// Supported types:
     /// - addr:IP        - IPv4 address filter
@@ -126,7 +128,10 @@ impl FilterHelper {
         // Parse filter string
         let parts: Vec<&str> = filter.splitn(2, ':').collect();
         if parts.len() != 2 {
-            return Err(format!("AddFilter failed, invalid filter format: {}", filter));
+            return Err(format!(
+                "AddFilter failed, invalid filter format: {}",
+                filter
+            ));
         }
 
         let filter_type_str = parts[0];
@@ -148,15 +153,24 @@ impl FilterHelper {
                 let ipv4 = Ipv4Addr::from_str(value_str)
                     .map_err(|e| format!("Failed to parse IPv4 address: {}", e))?;
                 let octets = ipv4.octets();
-                
+
                 // Convert to big-endian u32, then swap to little-endian with shift
                 let big_endian_u32 = u32::from_be_bytes(octets);
                 arg_filter.str_len = 0; // No shift for full IP
                 arg_filter.num_val = big_endian_u32 as u64;
-                
+
                 // Convert big-endian to little-endian representation
                 let be_bytes = big_endian_u32.to_be_bytes();
-                let le_u64 = u64::from_le_bytes([be_bytes[0], be_bytes[1], be_bytes[2], be_bytes[3], 0, 0, 0, 0]);
+                let le_u64 = u64::from_le_bytes([
+                    be_bytes[0],
+                    be_bytes[1],
+                    be_bytes[2],
+                    be_bytes[3],
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
                 arg_filter.num_val = le_u64 >> arg_filter.str_len;
             }
             "bx" | "bufhex" => {
@@ -164,14 +178,14 @@ impl FilterHelper {
                 arg_filter.filter_type = WHITELIST_FILTER;
                 let hex_bytes = hex::decode(value_str)
                     .map_err(|e| format!("Failed to decode hex string: {}", e))?;
-                
+
                 if hex_bytes.len() > 8 {
                     return Err("Hex string is too long, max bytes length is 8".to_string());
                 }
-                
+
                 arg_filter.str_len = ((8 - hex_bytes.len()) * 8) as u32;
                 arg_filter.num_val = parse_num(value_str)?;
-                
+
                 // Convert big-endian to little-endian with shift
                 let be_u64 = arg_filter.num_val.to_be_bytes();
                 arg_filter.num_val = u64::from_le_bytes(be_u64) >> arg_filter.str_len;
@@ -207,7 +221,10 @@ impl FilterHelper {
                 arg_filter.str_val[..bytes.len()].copy_from_slice(bytes);
             }
             _ => {
-                return Err(format!("AddFilter failed, unknown filter type: {}", filter_type_str));
+                return Err(format!(
+                    "AddFilter failed, unknown filter type: {}",
+                    filter_type_str
+                ));
             }
         }
 
@@ -215,7 +232,7 @@ impl FilterHelper {
         arg_filter.filter_index = (self.filters.len() + 1) as u32;
         let filter_index = arg_filter.filter_index;
         self.filters.push(arg_filter);
-        
+
         Ok(filter_index)
     }
 }
@@ -223,11 +240,9 @@ impl FilterHelper {
 /// Parse numeric string (supports decimal, hex with 0x prefix, octal with 0 prefix)
 fn parse_num(s: &str) -> Result<u64, String> {
     if s.starts_with("0x") || s.starts_with("0X") {
-        u64::from_str_radix(&s[2..], 16)
-            .map_err(|e| format!("Failed to parse hex number: {}", e))
+        u64::from_str_radix(&s[2..], 16).map_err(|e| format!("Failed to parse hex number: {}", e))
     } else if s.starts_with("0") && s.len() > 1 {
-        u64::from_str_radix(&s[1..], 8)
-            .map_err(|e| format!("Failed to parse octal number: {}", e))
+        u64::from_str_radix(&s[1..], 8).map_err(|e| format!("Failed to parse octal number: {}", e))
     } else {
         s.parse::<u64>()
             .map_err(|e| format!("Failed to parse decimal number: {}", e))
@@ -235,12 +250,10 @@ fn parse_num(s: &str) -> Result<u64, String> {
 }
 
 // Global filter helper instance
-use std::sync::Mutex;
 use once_cell::sync::Lazy;
+use std::sync::Mutex;
 
-static FILTER_HELPER: Lazy<Mutex<FilterHelper>> = Lazy::new(|| {
-    Mutex::new(FilterHelper::new())
-});
+static FILTER_HELPER: Lazy<Mutex<FilterHelper>> = Lazy::new(|| Mutex::new(FilterHelper::new()));
 
 /// Get filter index by filter string (global API)
 pub fn get_filter_index(filter: &str) -> Option<u32> {
@@ -259,7 +272,11 @@ pub fn get_filters() -> Vec<ArgFilter> {
 
 /// Get filter by name (global API)
 pub fn get_filter_by_name(name: &str) -> Option<ArgFilter> {
-    FILTER_HELPER.lock().unwrap().get_filter_by_name(name).cloned()
+    FILTER_HELPER
+        .lock()
+        .unwrap()
+        .get_filter_by_name(name)
+        .cloned()
 }
 
 #[cfg(test)]
@@ -271,7 +288,7 @@ mod tests {
         let mut helper = FilterHelper::new();
         let idx = helper.add_filter("eq:100").unwrap();
         assert_eq!(idx, 1);
-        
+
         let filter = &helper.get_filters()[0];
         assert_eq!(filter.filter_type, EQUAL_FILTER);
         assert_eq!(filter.num_val, 100);
@@ -282,7 +299,7 @@ mod tests {
         let mut helper = FilterHelper::new();
         let idx = helper.add_filter("eq:0x100").unwrap();
         assert_eq!(idx, 1);
-        
+
         let filter = &helper.get_filters()[0];
         assert_eq!(filter.filter_type, EQUAL_FILTER);
         assert_eq!(filter.num_val, 256);
@@ -293,7 +310,7 @@ mod tests {
         let mut helper = FilterHelper::new();
         let idx = helper.add_filter("w:hello").unwrap();
         assert_eq!(idx, 1);
-        
+
         let filter = &helper.get_filters()[0];
         assert_eq!(filter.filter_type, WHITELIST_FILTER);
         assert_eq!(filter.str_len, 5);
@@ -304,7 +321,7 @@ mod tests {
     fn test_filter_match() {
         let mut helper = FilterHelper::new();
         helper.add_filter("eq:100").unwrap();
-        
+
         let filter = &helper.get_filters()[0];
         assert!(filter.matches("f0"));
         assert!(!filter.matches("f1"));

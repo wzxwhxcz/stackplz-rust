@@ -14,7 +14,7 @@ pub mod perf_mmap;
 pub mod stack_probe;
 pub mod syscall_tracepoint;
 
-pub use brk::{BrkModule, BrkConfig, BrkType, BrkLen};
+pub use brk::{BrkConfig, BrkLen, BrkModule, BrkType};
 pub use perf_mmap::PerfMmapModule;
 pub use stack_probe::StackProbeModule;
 pub use syscall_tracepoint::SyscallTracepointModule;

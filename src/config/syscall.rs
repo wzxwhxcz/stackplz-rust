@@ -21,7 +21,7 @@ pub struct SyscallConfig {
     pub tid_blacklist: Vec<u32>,
     pub tname_whitelist: Vec<String>,
     pub tname_blacklist: Vec<String>,
-    
+
     // Syscall-specific config (mirrors SyscallConfig fields)
     pub sys_whitelist: Vec<u32>,
     pub sys_blacklist: Vec<u32>,
@@ -76,7 +76,11 @@ impl SyscallConfig {
         // stackplz_pid: current process ID
         bytes.extend_from_slice(&std::process::id().to_ne_bytes());
         // thread_whitelist: 1 if whitelist mode is enabled, 0 otherwise
-        let thread_whitelist: u32 = if !self.tname_whitelist.is_empty() { 1 } else { 0 };
+        let thread_whitelist: u32 = if !self.tname_whitelist.is_empty() {
+            1
+        } else {
+            0
+        };
         bytes.extend_from_slice(&thread_whitelist.to_ne_bytes());
         bytes
     }
@@ -94,30 +98,31 @@ impl SyscallConfig {
     /// ```
     pub fn to_common_filter_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(20);
-        
+
         // is_32bit: 0 for 64-bit (ARM64/x86_64)
         bytes.extend_from_slice(&0u32.to_ne_bytes());
-        
+
         // trace_mode: determines filter logic (whitelist vs blacklist)
         // 1 = whitelist mode, 2 = blacklist mode
-        let trace_mode: u32 = if !self.uid_whitelist.is_empty() 
-            || !self.pid_whitelist.is_empty() 
-            || !self.tid_whitelist.is_empty() {
+        let trace_mode: u32 = if !self.uid_whitelist.is_empty()
+            || !self.pid_whitelist.is_empty()
+            || !self.tid_whitelist.is_empty()
+        {
             1 // WHITELIST_FILTER
         } else {
             2 // BLACKLIST_FILTER
         };
         bytes.extend_from_slice(&trace_mode.to_ne_bytes());
-        
+
         // trace_uid_group: UID filtering flags (not used in current implementation)
         bytes.extend_from_slice(&0u32.to_ne_bytes());
-        
+
         // signal: signal number to send (0 = no signal)
         bytes.extend_from_slice(&0u32.to_ne_bytes());
-        
+
         // tsignal: target signal (0 = no target)
         bytes.extend_from_slice(&0u32.to_ne_bytes());
-        
+
         bytes
     }
 

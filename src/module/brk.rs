@@ -20,8 +20,8 @@ pub const NAME: &str = "BrkMod";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum BrkType {
-    Execute = 0,  // HW_BREAKPOINT_X
-    Write = 1,    // HW_BREAKPOINT_W
+    Execute = 0,   // HW_BREAKPOINT_X
+    Write = 1,     // HW_BREAKPOINT_W
     ReadWrite = 3, // HW_BREAKPOINT_RW
 }
 
@@ -89,8 +89,16 @@ impl BrkModule {
         logger.println(&format!("{}: attached to pid {}", NAME, self.conf.pid));
 
         // Set hardware breakpoint
-        self.set_hw_breakpoint(self.conf.pid, self.conf.addr, self.conf.brk_type, self.conf.brk_len)?;
-        logger.println(&format!("{}: hardware breakpoint set at 0x{:x}", NAME, self.conf.addr));
+        self.set_hw_breakpoint(
+            self.conf.pid,
+            self.conf.addr,
+            self.conf.brk_type,
+            self.conf.brk_len,
+        )?;
+        logger.println(&format!(
+            "{}: hardware breakpoint set at 0x{:x}",
+            NAME, self.conf.addr
+        ));
 
         // Continue execution
         self.ptrace_cont(self.conf.pid)?;
@@ -154,10 +162,16 @@ impl BrkModule {
     }
 
     #[cfg(target_os = "linux")]
-    fn set_hw_breakpoint(&self, pid: i32, _addr: u64, brk_type: BrkType, _brk_len: BrkLen) -> Result<()> {
+    fn set_hw_breakpoint(
+        &self,
+        pid: i32,
+        _addr: u64,
+        brk_type: BrkType,
+        _brk_len: BrkLen,
+    ) -> Result<()> {
         // On x86_64/arm64, hardware breakpoints use debug registers
         // This is a simplified implementation using perf_event_open with PERF_TYPE_BREAKPOINT
-        
+
         // perf_event_attr structure (128 bytes, see linux/perf_event.h)
         // We'll use a raw byte buffer since libc crate may not expose it
         #[repr(C)]
@@ -168,19 +182,19 @@ impl BrkModule {
             // ... many more fields, we'll zero them
             _padding: [u8; 112],
         }
-        
+
         let mut attr = PerfEventAttr {
             type_: 5, // PERF_TYPE_BREAKPOINT
             size: 128,
             config: 0,
             _padding: [0; 112],
         };
-        
+
         // Set breakpoint type
         let bp_type = match brk_type {
-            BrkType::Execute => 1,    // HW_BREAKPOINT_X
-            BrkType::Write => 2,      // HW_BREAKPOINT_W
-            BrkType::ReadWrite => 6,  // HW_BREAKPOINT_RW (2|4)
+            BrkType::Execute => 1,   // HW_BREAKPOINT_X
+            BrkType::Write => 2,     // HW_BREAKPOINT_W
+            BrkType::ReadWrite => 6, // HW_BREAKPOINT_RW (2|4)
         };
         attr.config = bp_type as u64;
 
@@ -196,14 +210,20 @@ impl BrkModule {
         };
 
         if fd < 0 {
-            bail!("perf_event_open for breakpoint failed: {}", std::io::Error::last_os_error());
+            bail!(
+                "perf_event_open for breakpoint failed: {}",
+                std::io::Error::last_os_error()
+            );
         }
 
         // Enable the breakpoint
         unsafe {
             if libc::ioctl(fd as i32, PERF_EVENT_IOC_ENABLE as _, 0) < 0 {
                 libc::close(fd as i32);
-                bail!("PERF_EVENT_IOC_ENABLE failed: {}", std::io::Error::last_os_error());
+                bail!(
+                    "PERF_EVENT_IOC_ENABLE failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
         }
 
@@ -236,7 +256,10 @@ impl BrkModule {
 
     #[cfg(not(target_os = "linux"))]
     pub fn run(&self, logger: Arc<Logger>) -> Result<()> {
-        logger.println(&format!("{}: hardware breakpoints not supported on non-Linux", NAME));
+        logger.println(&format!(
+            "{}: hardware breakpoints not supported on non-Linux",
+            NAME
+        ));
         bail!("hardware breakpoints require Linux");
     }
 }
@@ -265,7 +288,7 @@ mod tests {
         let conf = BrkConfig::new(1234, 0xdeadbeef)
             .with_type(BrkType::ReadWrite)
             .with_len(BrkLen::Len4);
-        
+
         assert_eq!(conf.pid, 1234);
         assert_eq!(conf.addr, 0xdeadbeef);
         assert_eq!(conf.brk_type, BrkType::ReadWrite);

@@ -6,7 +6,7 @@
 //! - Control breakpoint lifecycle
 
 use crate::logger::Logger;
-use crate::module::brk::{BrkConfig, BrkType, BrkLen};
+use crate::module::brk::{BrkConfig, BrkLen, BrkType};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,14 +19,19 @@ use std::sync::{Arc, Mutex};
 #[serde(tag = "cmd")]
 enum RpcCommand {
     #[serde(rename = "add_brk")]
-    AddBreakpoint { pid: i32, addr: u64, brk_type: String, brk_len: u32 },
-    
+    AddBreakpoint {
+        pid: i32,
+        addr: u64,
+        brk_type: String,
+        brk_len: u32,
+    },
+
     #[serde(rename = "del_brk")]
     DeleteBreakpoint { id: u32 },
-    
+
     #[serde(rename = "list_brk")]
     ListBreakpoints,
-    
+
     #[serde(rename = "ping")]
     Ping,
 }
@@ -101,9 +106,11 @@ impl RpcServer {
                     let logger = Arc::clone(&logger);
                     let breakpoints = Arc::clone(&self.breakpoints);
                     let next_id = Arc::clone(&self.next_id);
-                    
+
                     std::thread::spawn(move || {
-                        if let Err(e) = Self::handle_client(stream, logger.clone(), breakpoints, next_id) {
+                        if let Err(e) =
+                            Self::handle_client(stream, logger.clone(), breakpoints, next_id)
+                        {
                             logger.println(&format!("RpcServer: client error: {}", e));
                         }
                     });
@@ -159,11 +166,14 @@ impl RpcServer {
         next_id: &Arc<Mutex<u32>>,
     ) -> RpcResponse {
         match cmd {
-            RpcCommand::Ping => {
-                RpcResponse::success("pong".to_string())
-            }
+            RpcCommand::Ping => RpcResponse::success("pong".to_string()),
 
-            RpcCommand::AddBreakpoint { pid, addr, brk_type, brk_len } => {
+            RpcCommand::AddBreakpoint {
+                pid,
+                addr,
+                brk_type,
+                brk_len,
+            } => {
                 let brk_type_enum = match brk_type.as_str() {
                     "x" | "exec" => BrkType::Execute,
                     "w" | "write" => BrkType::Write,
@@ -191,7 +201,7 @@ impl RpcServer {
                 };
 
                 let entry = BreakpointEntry { id, config };
-                
+
                 breakpoints.lock().unwrap().insert(id, entry.clone());
 
                 logger.println(&format!(
@@ -217,15 +227,18 @@ impl RpcServer {
 
             RpcCommand::ListBreakpoints => {
                 let brks = breakpoints.lock().unwrap();
-                let list: Vec<_> = brks.iter().map(|(id, entry)| {
-                    serde_json::json!({
-                        "id": id,
-                        "pid": entry.config.pid,
-                        "addr": format!("0x{:x}", entry.config.addr),
-                        "type": format!("{:?}", entry.config.brk_type),
-                        "len": entry.config.brk_len as u32,
+                let list: Vec<_> = brks
+                    .iter()
+                    .map(|(id, entry)| {
+                        serde_json::json!({
+                            "id": id,
+                            "pid": entry.config.pid,
+                            "addr": format!("0x{:x}", entry.config.addr),
+                            "type": format!("{:?}", entry.config.brk_type),
+                            "len": entry.config.brk_len as u32,
+                        })
                     })
-                }).collect();
+                    .collect();
 
                 RpcResponse::success_with_data(
                     format!("{} active breakpoints", list.len()),

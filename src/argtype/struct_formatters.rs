@@ -1,5 +1,5 @@
 //! Struct formatters for complex argument types
-//! 
+//!
 //! This module provides Format implementations for all struct-based argument types,
 //! ported from Go's config_struct.go Format() methods.
 
@@ -64,8 +64,7 @@ impl ItTmerspec {
     pub fn format(&self) -> String {
         format!(
             "{{it_interval={{sec={}, nsec={}}}, it_value={{sec={}, nsec={}}}}}",
-            self.it_interval.sec, self.it_interval.nsec,
-            self.it_value.sec, self.it_value.nsec
+            self.it_interval.sec, self.it_interval.nsec, self.it_value.sec, self.it_value.nsec
         )
     }
 }
@@ -109,7 +108,9 @@ impl SigInfo {
     pub fn format(&self) -> String {
         format!(
             "{{si_signo=0x{:x}, si_errno=0x{:x}, si_code=0x{:x}, sifields=0x{:x}}}",
-            self.si_signo, self.si_errno, self.si_code,
+            self.si_signo,
+            self.si_errno,
+            self.si_code,
             // Show first 8 bytes of sifields as u64
             u64::from_ne_bytes(self.sifields[..8].try_into().unwrap_or([0; 8]))
         )
@@ -149,7 +150,10 @@ pub struct Pollfd {
 
 impl Pollfd {
     pub fn format(&self) -> String {
-        format!("(fd={}, events={}, revents={})", self.fd, self.events, self.revents)
+        format!(
+            "(fd={}, events={}, revents={})",
+            self.fd, self.events, self.revents
+        )
     }
 }
 
@@ -180,11 +184,12 @@ impl Iovec {
     pub fn format(&self) -> String {
         format!("{{base=0x{:x}, len=0x{:x}}}", self.base, self.buflen)
     }
-    
+
     pub fn format_with_buf(&self, buf: &[u8]) -> String {
         format!(
             "{{base=0x{:x}, len=0x{:x}, buf=({})}}",
-            self.base, self.buflen,
+            self.base,
+            self.buflen,
             pretty_byte_slice(buf)
         )
     }
@@ -358,9 +363,16 @@ pub struct PthreadAttrT {
 impl PthreadAttrT {
     pub fn format(&self) -> String {
         // Show first 16 bytes as hex
-        format!("{{_data=[{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} ...]}}", 
-            self._data[0], self._data[1], self._data[2], self._data[3],
-            self._data[4], self._data[5], self._data[6], self._data[7]
+        format!(
+            "{{_data=[{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} ...]}}",
+            self._data[0],
+            self._data[1],
+            self._data[2],
+            self._data[3],
+            self._data[4],
+            self._data[5],
+            self._data[6],
+            self._data[7]
         )
     }
 }
@@ -374,10 +386,10 @@ fn pretty_byte_slice(buf: &[u8]) -> String {
     if buf.is_empty() {
         return "[]".to_string();
     }
-    
+
     let len = buf.len().min(32);
     let mut result = String::new();
-    
+
     // Try to show as string if printable
     if buf.iter().all(|&b| b.is_ascii_graphic() || b == b' ') {
         result.push('"');
@@ -396,11 +408,11 @@ fn pretty_byte_slice(buf: &[u8]) -> String {
         }
         result.push_str("]");
     }
-    
+
     if buf.len() > 32 {
         result.push_str(&format!(" ...({} bytes total)", buf.len()));
     }
-    
+
     result
 }
 
@@ -410,13 +422,20 @@ mod tests {
 
     #[test]
     fn test_timespec_format() {
-        let ts = Timespec { sec: 1234567890, nsec: 123456789 };
+        let ts = Timespec {
+            sec: 1234567890,
+            nsec: 123456789,
+        };
         assert_eq!(ts.format(), "(sec=1234567890, nsec=123456789)");
     }
 
     #[test]
     fn test_pollfd_format() {
-        let pfd = Pollfd { fd: 3, events: 1, revents: 0 };
+        let pfd = Pollfd {
+            fd: 3,
+            events: 1,
+            revents: 0,
+        };
         assert_eq!(pfd.format(), "(fd=3, events=1, revents=0)");
     }
 

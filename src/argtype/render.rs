@@ -172,42 +172,49 @@ pub fn render_struct_by_type_index(type_index: u32, data: &[u8]) -> Option<Strin
     let read_u64 = |offset: usize| -> u64 {
         if offset + 8 <= data.len() {
             u64::from_le_bytes([
-                data[offset], data[offset+1], data[offset+2], data[offset+3],
-                data[offset+4], data[offset+5], data[offset+6], data[offset+7],
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
             ])
         } else {
             0
         }
     };
-    
+
     // Helper to read i64 at offset
-    let read_i64 = |offset: usize| -> i64 {
-        read_u64(offset) as i64
-    };
-    
+    let read_i64 = |offset: usize| -> i64 { read_u64(offset) as i64 };
+
     // Helper to read u32 at offset
     let read_u32 = |offset: usize| -> u32 {
         if offset + 4 <= data.len() {
-            u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]])
+            u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ])
         } else {
             0
         }
     };
-    
+
     // Helper to read i32 at offset
-    let read_i32 = |offset: usize| -> i32 {
-        read_u32(offset) as i32
-    };
-    
+    let read_i32 = |offset: usize| -> i32 { read_u32(offset) as i32 };
+
     // Helper to read u16 at offset
     let read_u16 = |offset: usize| -> u16 {
         if offset + 2 <= data.len() {
-            u16::from_le_bytes([data[offset], data[offset+1]])
+            u16::from_le_bytes([data[offset], data[offset + 1]])
         } else {
             0
         }
     };
-    
+
     match type_index {
         TIMESPEC => {
             if data.len() >= SIZEOF_TIMESPEC as usize {
@@ -290,8 +297,14 @@ pub fn render_struct_by_type_index(type_index: u32, data: &[u8]) -> Option<Strin
         RUSAGE => {
             if data.len() >= SIZEOF_RUSAGE as usize {
                 let ru = Rusage {
-                    utime: Timeval { sec: read_i64(0), usec: read_i64(8) },
-                    stime: Timeval { sec: read_i64(16), usec: read_i64(24) },
+                    utime: Timeval {
+                        sec: read_i64(0),
+                        usec: read_i64(8),
+                    },
+                    stime: Timeval {
+                        sec: read_i64(16),
+                        usec: read_i64(24),
+                    },
                     maxrss: read_i64(32),
                     ixrss: read_i64(40),
                     idrss: read_i64(48),
@@ -326,9 +339,18 @@ pub fn render_struct_by_type_index(type_index: u32, data: &[u8]) -> Option<Strin
                     size: read_i64(48),
                     blksize: read_i64(56),
                     blocks: read_i64(64),
-                    atim: Timespec { sec: read_i64(72), nsec: read_i64(80) },
-                    mtim: Timespec { sec: read_i64(88), nsec: read_i64(96) },
-                    ctim: Timespec { sec: read_i64(104), nsec: read_i64(112) },
+                    atim: Timespec {
+                        sec: read_i64(72),
+                        nsec: read_i64(80),
+                    },
+                    mtim: Timespec {
+                        sec: read_i64(88),
+                        nsec: read_i64(96),
+                    },
+                    ctim: Timespec {
+                        sec: read_i64(104),
+                        nsec: read_i64(112),
+                    },
                     _unused: [0; 3],
                 };
                 Some(st.format())
@@ -383,8 +405,14 @@ pub fn render_struct_by_type_index(type_index: u32, data: &[u8]) -> Option<Strin
         ITTMERSPEC => {
             if data.len() >= SIZEOF_ITTMERSPEC as usize {
                 let its = ItTmerspec {
-                    it_interval: Timespec { sec: read_i64(0), nsec: read_i64(8) },
-                    it_value: Timespec { sec: read_i64(16), nsec: read_i64(24) },
+                    it_interval: Timespec {
+                        sec: read_i64(0),
+                        nsec: read_i64(8),
+                    },
+                    it_value: Timespec {
+                        sec: read_i64(16),
+                        nsec: read_i64(24),
+                    },
                 };
                 Some(its.format())
             } else {

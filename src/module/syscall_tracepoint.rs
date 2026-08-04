@@ -49,7 +49,7 @@ impl SyscallTracepointModule {
         
         let mut obj_builder = ObjectBuilder::default();
         obj_builder.debug(self.conf.debug);
-        let mut open_obj = obj_builder
+        let open_obj = obj_builder
             .open_file(&bpf_path)
             .context("failed to open syscall.o")?;
         
@@ -302,7 +302,7 @@ impl SyscallTracepointModule {
         // this.conf.syscall_points will be populated with SyscallPoint structs.
         let syscall_points: Vec<(u32, Vec<u32>)> = Vec::new(); // (syscall_nr, op_list)
         
-        for (syscall_nr, enter_ops) in syscall_points {
+        for (syscall_nr, enter_ops) in &syscall_points {
             let mut point_args = SyscallPointArgs::default();
             point_args.enter_key = 0;
             point_args.signal = 0;
@@ -342,7 +342,7 @@ impl SyscallTracepointModule {
         // TODO Phase 4: Parse syscall points from config file.
         let syscall_points: Vec<(u32, Vec<u32>)> = Vec::new(); // (syscall_nr, op_list)
         
-        for (syscall_nr, exit_ops) in syscall_points {
+        for (syscall_nr, exit_ops) in &syscall_points {
             let mut point_args = SyscallPointArgs::default();
             point_args.enter_key = 0;
             point_args.signal = 0;
@@ -384,7 +384,7 @@ impl SyscallTracepointModule {
         // operation configs from registered argument types.
         let op_configs: Vec<(u32, OpConfig)> = Vec::new(); // (op_key, op_config)
         
-        for (op_key, op_config) in op_configs {
+        for (op_key, op_config) in &op_configs {
             let key = op_key.to_ne_bytes();
             let val = unsafe {
                 std::slice::from_raw_parts(
@@ -415,7 +415,7 @@ impl SyscallTracepointModule {
         let handle_event = move |_cpu: i32, data: &[u8]| {
             match crate::contract::decode_perf_record(data) {
                 Ok(decoded) => {
-                    logger.println(&decoded);
+                    logger.println(&format!("{:?}", decoded));
                 }
                 Err(e) => {
                     logger.println(&format!("decode error: {}", e));

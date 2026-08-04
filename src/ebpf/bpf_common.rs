@@ -110,7 +110,7 @@ pub mod linux {
     }
 
     /// Borrow the `*_events` PERF_EVENT_ARRAY map for the perf-reader loop.
-    pub fn events_map<'a>(obj: &'a Object, name: &str) -> Result<&'a Map<'a>> {
+    pub fn events_map<'a>(obj: &'a Object, name: &str) -> Result<Map<'a>> {
         obj.maps()
             .find(|m| m.name() == name)
             .ok_or_else(|| anyhow!("cannot find map: {}", name))

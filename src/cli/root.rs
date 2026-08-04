@@ -55,7 +55,8 @@ pub fn persistent_pre_run(global: &mut GlobalConfig, target: &mut TargetConfig) 
 
     // Parse arg filters (--filter flag)
     for filter_str in &global.filter {
-        add_filter(filter_str).map_err(|e| anyhow!("parse filter '{}' failed: {}", filter_str, e))?;
+        add_filter(filter_str)
+            .map_err(|e| anyhow!("parse filter '{}' failed: {}", filter_str, e))?;
     }
 
     // 5. Target resolution: exactly one of --name / --uid.

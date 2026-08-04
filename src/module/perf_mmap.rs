@@ -179,7 +179,8 @@ mod tests {
 
     #[test]
     fn mmap2_event_size() {
-        // Verify struct size matches kernel expectations
-        assert_eq!(std::mem::size_of::<Mmap2Event>(), 72);
+        // Verify struct size matches kernel PERF_RECORD_MMAP2 layout
+        // 4 + 4 + 8 + 8 + 8 + 4 + 4 + 8 + 8 + 4 + 4 = 64 bytes
+        assert_eq!(std::mem::size_of::<Mmap2Event>(), 64);
     }
 }

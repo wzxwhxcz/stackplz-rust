@@ -412,13 +412,14 @@ impl SyscallTracepointModule {
         })
         .context("failed to set Ctrl-C handler")?;
 
+        let logger_clone = Arc::clone(&logger);
         let handle_event = move |_cpu: i32, data: &[u8]| {
             match crate::contract::decode_perf_record(data) {
                 Ok(decoded) => {
-                    logger.println(&format!("{:?}", decoded));
+                    logger_clone.println(&format!("{:?}", decoded));
                 }
                 Err(e) => {
-                    logger.println(&format!("decode error: {}", e));
+                    logger_clone.println(&format!("decode error: {}", e));
                 }
             }
         };

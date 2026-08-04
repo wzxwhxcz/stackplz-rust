@@ -2,7 +2,7 @@
 //! (`cli/cmd/syscall.go:40-136`).
 
 use super::args::SyscallArgs;
-use crate::config::{GlobalConfig, SConfig, SyscallConfig, TargetConfig};
+use crate::config::{GlobalConfig, SyscallConfig, TargetConfig};
 use crate::module::{SyscallTracepointModule, MODULE_NAME_SYSCALL};
 use anyhow::Result;
 use std::sync::Arc;
@@ -20,19 +20,16 @@ pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: SyscallAr
     let mut run_count = 0u32;
 
     for sysno in sysno_configs {
-        let conf = SyscallConfig {
-            sconfig: SConfig {
-                unwind_stack: args.stack,
-                show_regs: args.regs,
-                uid: global.uid,
-                pid: global.pid,
-                tid_blacklist: target.tid_blacklist,
-                tid_blacklist_mask: target.tid_blacklist_mask,
-                ..Default::default()
-            },
-            config: args.config.clone(),
-            nr: sysno,
-        };
+        let mut conf = SyscallConfig::new();
+        conf.sconfig.unwind_stack = args.stack;
+        conf.sconfig.show_regs = args.regs;
+        conf.sconfig.uid = global.uid;
+        conf.sconfig.pid = global.pid;
+        conf.sconfig.tid_blacklist = target.tid_blacklist;
+        conf.sconfig.tid_blacklist_mask = target.tid_blacklist_mask;
+        conf.config = args.config.clone();
+        conf.nr = sysno;
+        conf.debug = global.debug;
 
         logger.println(&format!("{}\thook nr:{}", MODULE_NAME_SYSCALL, conf.nr));
 

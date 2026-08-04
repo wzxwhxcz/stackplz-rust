@@ -275,6 +275,7 @@ fn render_uprobe_event(raw: &[u8], hook_points: &[UprobeArgs]) -> Result<String>
                             {
                                 crate::argtype::render::render_arg_value(
                                     at.base_type,
+                                    at.type_index,
                                     at.size,
                                     at.format_type,
                                     &payload_bytes,

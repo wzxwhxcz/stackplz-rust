@@ -17,6 +17,7 @@ pub mod consts;
 pub mod op;
 pub mod registry;
 pub mod render;
+pub mod struct_formatters;
 
 // Re-export op helpers.
 pub use op::{

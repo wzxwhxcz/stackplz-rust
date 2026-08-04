@@ -8,6 +8,7 @@
 //! - Structs: `{sa_handler=0x1234, sa_flags=0x100}`
 
 use crate::argtype::consts::*;
+use crate::argtype::struct_formatters::*;
 
 /// Format a number value according to the format_type.
 /// Mirrors `ARG_INT::Parse` / `ARG_UINT::Parse` etc. in argtype_base.go.
@@ -164,12 +165,243 @@ fn sign_extend(value: u64, byte_size: u32) -> i64 {
     }
 }
 
+/// Render a struct value by type index.
+/// Returns formatted string if the type index is recognized, None otherwise.
+pub fn render_struct_by_type_index(type_index: u32, data: &[u8]) -> Option<String> {
+    // Helper to read u64 at offset
+    let read_u64 = |offset: usize| -> u64 {
+        if offset + 8 <= data.len() {
+            u64::from_le_bytes([
+                data[offset], data[offset+1], data[offset+2], data[offset+3],
+                data[offset+4], data[offset+5], data[offset+6], data[offset+7],
+            ])
+        } else {
+            0
+        }
+    };
+    
+    // Helper to read i64 at offset
+    let read_i64 = |offset: usize| -> i64 {
+        read_u64(offset) as i64
+    };
+    
+    // Helper to read u32 at offset
+    let read_u32 = |offset: usize| -> u32 {
+        if offset + 4 <= data.len() {
+            u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]])
+        } else {
+            0
+        }
+    };
+    
+    // Helper to read i32 at offset
+    let read_i32 = |offset: usize| -> i32 {
+        read_u32(offset) as i32
+    };
+    
+    // Helper to read u16 at offset
+    let read_u16 = |offset: usize| -> u16 {
+        if offset + 2 <= data.len() {
+            u16::from_le_bytes([data[offset], data[offset+1]])
+        } else {
+            0
+        }
+    };
+    
+    match type_index {
+        TIMESPEC => {
+            if data.len() >= SIZEOF_TIMESPEC as usize {
+                let ts = Timespec {
+                    sec: read_i64(0),
+                    nsec: read_i64(8),
+                };
+                Some(ts.format())
+            } else {
+                None
+            }
+        }
+        TIMEVAL => {
+            if data.len() >= SIZEOF_TIMEVAL as usize {
+                let tv = Timeval {
+                    sec: read_i64(0),
+                    usec: read_i64(8),
+                };
+                Some(tv.format())
+            } else {
+                None
+            }
+        }
+        SIGACTION => {
+            if data.len() >= SIZEOF_SIGACTION as usize {
+                let sa = Sigaction {
+                    sa_handler: read_u64(0),
+                    sa_sigaction: read_u64(8),
+                    sa_mask: read_u64(16),
+                    sa_flags: read_u64(24),
+                    sa_restorer: read_u64(32),
+                };
+                Some(sa.format())
+            } else {
+                None
+            }
+        }
+        POLLFD => {
+            if data.len() >= SIZEOF_POLLFD as usize {
+                let pfd = Pollfd {
+                    fd: read_i32(0),
+                    events: read_u16(4),
+                    revents: read_u16(6),
+                };
+                Some(pfd.format())
+            } else {
+                None
+            }
+        }
+        STACK_T => {
+            if data.len() >= SIZEOF_STACK_T as usize {
+                let st = StackT {
+                    ss_sp: read_u64(0),
+                    ss_flags: read_i32(8),
+                    ss_size: read_i32(12),
+                };
+                Some(st.format())
+            } else {
+                None
+            }
+        }
+        MSGHDR => {
+            if data.len() >= SIZEOF_MSGHDR as usize {
+                let msg = Msghdr {
+                    name: read_u64(0),
+                    namelen: read_u32(8),
+                    _pad_cgo_0: [0; 4],
+                    iov: read_u64(16),
+                    iovlen: read_u64(24),
+                    control: read_u64(32),
+                    controllen: read_u64(40),
+                    flags: read_i32(48),
+                    _pad_cgo_1: [0; 4],
+                };
+                Some(msg.format())
+            } else {
+                None
+            }
+        }
+        RUSAGE => {
+            if data.len() >= SIZEOF_RUSAGE as usize {
+                let ru = Rusage {
+                    utime: Timeval { sec: read_i64(0), usec: read_i64(8) },
+                    stime: Timeval { sec: read_i64(16), usec: read_i64(24) },
+                    maxrss: read_i64(32),
+                    ixrss: read_i64(40),
+                    idrss: read_i64(48),
+                    isrss: read_i64(56),
+                    minflt: read_i64(64),
+                    majflt: read_i64(72),
+                    nswap: read_i64(80),
+                    inblock: read_i64(88),
+                    oublock: read_i64(96),
+                    msgsnd: read_i64(104),
+                    msgrcv: read_i64(112),
+                    nsignals: read_i64(120),
+                    nvcsw: read_i64(128),
+                    nivcsw: read_i64(136),
+                };
+                Some(ru.format())
+            } else {
+                None
+            }
+        }
+        STAT => {
+            if data.len() >= SIZEOF_STAT_T as usize {
+                let st = StatT {
+                    dev: read_u64(0),
+                    ino: read_u64(8),
+                    nlink: read_u64(16),
+                    mode: read_u32(24),
+                    uid: read_u32(28),
+                    gid: read_u32(32),
+                    _pad0: read_i32(36),
+                    rdev: read_u64(40),
+                    size: read_i64(48),
+                    blksize: read_i64(56),
+                    blocks: read_i64(64),
+                    atim: Timespec { sec: read_i64(72), nsec: read_i64(80) },
+                    mtim: Timespec { sec: read_i64(88), nsec: read_i64(96) },
+                    ctim: Timespec { sec: read_i64(104), nsec: read_i64(112) },
+                    _unused: [0; 3],
+                };
+                Some(st.format())
+            } else {
+                None
+            }
+        }
+        STATFS => {
+            if data.len() >= SIZEOF_STATFS_T as usize {
+                let sfs = StatfsT {
+                    r#type: read_i64(0),
+                    bsize: read_i64(8),
+                    blocks: read_u64(16),
+                    bfree: read_u64(24),
+                    bavail: read_u64(32),
+                    files: read_u64(40),
+                    ffree: read_u64(48),
+                    fsid: [read_i32(56), read_i32(60)],
+                    namelen: read_i64(64),
+                    frsize: read_i64(72),
+                    flags: read_i64(80),
+                    spare: [read_i64(88), read_i64(96), read_i64(104), read_i64(112)],
+                };
+                Some(sfs.format())
+            } else {
+                None
+            }
+        }
+        EPOLLEVENT => {
+            if data.len() >= SIZEOF_EPOLL_EVENT as usize {
+                let ev = EpollEvent {
+                    events: read_u32(0),
+                    fd: read_i32(4),
+                    pad: read_i32(8),
+                };
+                Some(ev.format())
+            } else {
+                None
+            }
+        }
+        IOVEC => {
+            if data.len() >= SIZEOF_IOVEC as usize {
+                let iov = Iovec {
+                    base: read_u64(0),
+                    buflen: read_u64(8),
+                };
+                Some(iov.format())
+            } else {
+                None
+            }
+        }
+        ITTMERSPEC => {
+            if data.len() >= SIZEOF_ITTMERSPEC as usize {
+                let its = ItTmerspec {
+                    it_interval: Timespec { sec: read_i64(0), nsec: read_i64(8) },
+                    it_value: Timespec { sec: read_i64(16), nsec: read_i64(24) },
+                };
+                Some(its.format())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Render a single arg value from the raw bytes based on its base_type.
 ///
 /// This is the top-level dispatch that mirrors the Go `ARG_*.Parse()` methods.
 /// Returns `(formatted_string, bytes_consumed)`.
 pub fn render_arg_value(
     base_type: u32,
+    type_index: u32,
     type_size: u32,
     format_type: u32,
     data: &[u8],
@@ -209,8 +441,13 @@ pub fn render_arg_value(
             }
         }
         TYPE_STRUCT => {
-            // Generic struct: just hex dump.
-            format_buffer(data)
+            // Try to render as a known struct type first
+            if let Some(formatted) = render_struct_by_type_index(type_index, data) {
+                formatted
+            } else {
+                // Unknown struct: fallback to hex dump
+                format_buffer(data)
+            }
         }
         _ => format_buffer(data),
     }
@@ -281,7 +518,7 @@ mod tests {
     fn render_int_value() {
         let data = 42u64.to_le_bytes();
         assert_eq!(
-            render_arg_value(TYPE_INT, 4, FORMAT_NUM, &data, false),
+            render_arg_value(TYPE_INT, 0, 4, FORMAT_NUM, &data, false),
             "42"
         );
     }
@@ -290,7 +527,7 @@ mod tests {
     fn render_uint_hex() {
         let data = 0xDEADu64.to_le_bytes();
         assert_eq!(
-            render_arg_value(TYPE_UINT, 4, FORMAT_HEX, &data, false),
+            render_arg_value(TYPE_UINT, 0, 4, FORMAT_HEX, &data, false),
             "0xdead"
         );
     }
@@ -299,7 +536,7 @@ mod tests {
     fn render_string_value() {
         let data = b"hello\0";
         assert_eq!(
-            render_arg_value(TYPE_STRING, 0, FORMAT_NUM, data, false),
+            render_arg_value(TYPE_STRING, 0, 0, FORMAT_NUM, data, false),
             "(hello)"
         );
     }

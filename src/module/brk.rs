@@ -8,6 +8,9 @@ use anyhow::{bail, Result};
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
+use std::os::fd::FromRawFd;
+
+#[cfg(target_os = "linux")]
 const PERF_EVENT_IOC_ENABLE: u32 = 0x2400;
 
 /// Module name constant

@@ -7,12 +7,9 @@
 //!   - Polls the unified `events` perf map and decodes TLV payloads via `contract::decode`
 
 use crate::config::SyscallConfig;
-use crate::contract::{THREAD_NAME_BLACKLIST, THREAD_NAME_WHITELIST};
 use crate::logger::Logger;
-use anyhow::{anyhow, bail, Context, Result};
-use std::sync::atomic::{AtomicBool, Ordering};
+use anyhow::{bail, Result};
 use std::sync::Arc;
-use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use libbpf_rs::{MapFlags, Object, ObjectBuilder, PerfBufferBuilder};

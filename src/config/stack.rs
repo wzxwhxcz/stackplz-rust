@@ -3,7 +3,6 @@
 
 use super::sconfig::{stack_filter_from, HookConfig, SConfig, StackFilter};
 use anyhow::{bail, Result};
-use rand::Rng;
 
 /// Flags for the `stack` subcommand. Mirrors `StackConfig` (`config_stack.go`).
 #[derive(Debug, Clone, Default)]
@@ -77,12 +76,11 @@ impl ProbeConfig {
         if !has_symbol {
             // ebpfmanager requires AttachToFuncName non-empty even when an
             // offset is used. Fill with a random 8-char ASCII lowercase name.
-            let mut rng = rand::thread_rng();
+            use rand::distr::{Distribution, Uniform};
+            let between = Uniform::new_inclusive(b'a', b'z').unwrap();
+            let mut rng = rand::rng();
             let chars: String = (0..8)
-                .map(|_| {
-                    let c = rng.gen_range(b'a'..=b'z');
-                    c as char
-                })
+                .map(|_| between.sample(&mut rng) as char)
                 .collect();
             self.symbol = chars;
         }

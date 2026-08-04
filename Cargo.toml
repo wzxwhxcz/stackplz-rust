@@ -28,7 +28,7 @@ debug_print = []
 clap = { version = "4", features = ["derive"] }
 # Error handling
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 # Serialization (config.json, YAML config files)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,11 +38,11 @@ flate2 = "1"
 # Regex (kernel config parsing)
 regex = "1"
 # Random symbol name generation (offset-only hooks)
-rand = "0.8"
+rand = "0.10"
 # Dynamic loading of libstackplz.so (replaces cgo dlopen)
-libloading = "0.8"
+libloading = "0.9"
 # ELF parsing for uprobe symbol -> offset resolution
-object = { version = "0.32", default-features = false, features = ["read"] }
+object = { version = "0.40", default-features = false, features = ["read"] }
 # Casting repr(C) filter structs to bytes for the BPF map update.
 # `derive` so we can `#[derive(Pod, Zeroable)]` on the filter structs.
 bytemuck = { version = "1", features = ["derive"] }
@@ -54,7 +54,7 @@ hex = "0.4"
 once_cell = "1.19"
 [target.'cfg(target_os = "linux")'.dependencies]
 # eBPF core (replacement for cilium/ebpf + ehids/ebpfmanager)
-libbpf-rs = "0.23"
+libbpf-rs = "0.27"
 # POSIX API (sysconf, signals)
 libc = "0.2"
 # NOTE: libbpf-sys (pulled by libbpf-rs) builds vendored libbpf but links the

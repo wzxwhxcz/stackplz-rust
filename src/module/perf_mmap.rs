@@ -88,7 +88,7 @@ impl PerfMmapModule {
             _padding: [u8; 80],
         }
         
-        let mut attr = PerfEventAttr {
+        let attr = PerfEventAttr {
             type_: PERF_TYPE_SOFTWARE,
             size: 128,
             config: PERF_COUNT_SW_DUMMY as u64,

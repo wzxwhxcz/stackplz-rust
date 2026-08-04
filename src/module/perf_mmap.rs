@@ -145,6 +145,7 @@ impl PerfMmapModule {
     }
 
     #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
     fn handle_mmap2_event(data: &[u8], logger: &Logger) -> Result<()> {
         if data.len() < std::mem::size_of::<Mmap2Event>() {
             bail!("mmap2 event too short: {} bytes", data.len());

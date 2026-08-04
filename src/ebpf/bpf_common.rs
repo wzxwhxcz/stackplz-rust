@@ -114,7 +114,6 @@ pub mod linux {
         obj.maps()
             .find(|m| m.name() == name)
             .ok_or_else(|| anyhow!("cannot find map: {}", name))
-            .map(|m| m as &'a Map<'a>)
     }
 
     /// Write a key/value pair into a HASH/ARRAY map by name.

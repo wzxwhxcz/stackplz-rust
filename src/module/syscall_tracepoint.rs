@@ -263,17 +263,17 @@ impl SyscallTracepointModule {
         
         // Add default blacklist
         for name in self.conf.default_thread_blacklist() {
-            self.add_thread_filter(map, name, THREAD_NAME_BLACKLIST)?;
+            self.add_thread_filter(&map, name, THREAD_NAME_BLACKLIST)?;
         }
         
         // Add user-specified blacklist
         for name in &self.conf.tname_blacklist {
-            self.add_thread_filter(map, name, THREAD_NAME_BLACKLIST)?;
+            self.add_thread_filter(&map, name, THREAD_NAME_BLACKLIST)?;
         }
         
         // Add user-specified whitelist
         for name in &self.conf.tname_whitelist {
-            self.add_thread_filter(map, name, THREAD_NAME_WHITELIST)?;
+            self.add_thread_filter(&map, name, THREAD_NAME_WHITELIST)?;
         }
         
         logger.println("updated thread_filter");
@@ -450,7 +450,7 @@ impl SyscallTracepointModule {
             eprintln!("Lost {} events", count);
         };
 
-        let perf = PerfBufferBuilder::new(map)
+        let perf = PerfBufferBuilder::new(&map)
             .sample_cb(handle_event)
             .lost_cb(handle_lost)
             .build()

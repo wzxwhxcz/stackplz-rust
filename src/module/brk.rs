@@ -154,7 +154,7 @@ impl BrkModule {
     }
 
     #[cfg(target_os = "linux")]
-    fn set_hw_breakpoint(&self, pid: i32, addr: u64, brk_type: BrkType, brk_len: BrkLen) -> Result<()> {
+    fn set_hw_breakpoint(&self, pid: i32, _addr: u64, brk_type: BrkType, _brk_len: BrkLen) -> Result<()> {
         // On x86_64/arm64, hardware breakpoints use debug registers
         // This is a simplified implementation using perf_event_open with PERF_TYPE_BREAKPOINT
         

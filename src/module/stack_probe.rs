@@ -61,7 +61,7 @@ impl StackProbeModule {
 
         // 1. Load the BPF object.
         let obj_bytes = bpf_common::STACK_OBJ;
-        let mut obj = bpf_common::linux::open_object(obj_bytes)?;
+        let obj = bpf_common::linux::open_object(obj_bytes)?;
         logger.println(&format!("{NAME}\teBPF object loaded"));
 
         // 2. Write op_list map.

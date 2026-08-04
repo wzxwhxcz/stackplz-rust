@@ -399,14 +399,14 @@ fn pretty_byte_slice(buf: &[u8]) -> String {
         result.push('"');
     } else {
         // Show as hex
-        result.push_str("[");
+        result.push('[');
         for (i, &b) in buf[..len].iter().enumerate() {
             if i > 0 {
                 result.push(' ');
             }
             result.push_str(&format!("{:02x}", b));
         }
-        result.push_str("]");
+        result.push(']');
     }
 
     if buf.len() > 32 {

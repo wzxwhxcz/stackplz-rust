@@ -16,7 +16,7 @@ pub fn format_num(value: u64, format_type: u32, is_signed: bool, byte_size: u32)
     // Mask to the effective byte size.
     let masked = mask_to_size(value, byte_size);
     let signed_val = if is_signed {
-        sign_extend(masked, byte_size) as i64
+        sign_extend(masked, byte_size)
     } else {
         0
     };

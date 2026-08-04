@@ -77,6 +77,12 @@ pub struct FilterHelper {
     filters: Vec<ArgFilter>,
 }
 
+impl Default for FilterHelper {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FilterHelper {
     pub fn new() -> Self {
         Self {

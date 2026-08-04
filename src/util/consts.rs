@@ -2,7 +2,6 @@
 
 /// Offset ranges for common_list map entries.
 /// These offsets partition the map key space for different filter types.
-
 pub const SYS_WHITELIST_START: u32 = 0x400;
 pub const SYS_BLACKLIST_START: u32 = SYS_WHITELIST_START + 0x400;
 pub const UID_WHITELIST_START: u32 = SYS_BLACKLIST_START + 0x400;

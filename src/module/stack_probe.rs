@@ -131,7 +131,8 @@ impl StackProbeModule {
         for (i, point) in self.hook_points.iter().enumerate() {
             let prog_name = format!("probe_stack_{i}");
             let prog = obj
-                .prog_mut(&prog_name)
+                .progs_mut()
+                .find(|p| p.name() == prog_name.as_str())
                 .ok_or_else(|| anyhow!("program {prog_name} not found in BPF object"))?;
 
             let attach_offset = if !point.symbol.is_empty() {
@@ -161,7 +162,8 @@ impl StackProbeModule {
         let render_logger = logger.clone();
 
         let events_map = obj
-            .map("events")
+            .maps()
+            .find(|m| m.name() == "events")
             .ok_or_else(|| anyhow!("cannot find events map"))?;
 
         let pb = libbpf_rs::PerfBufferBuilder::new(events_map)

@@ -12,7 +12,7 @@ use anyhow::{bail, Result};
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
-use libbpf_rs::{MapFlags, Object, ObjectBuilder, PerfBufferBuilder};
+use libbpf_rs::{MapCore, MapFlags, Object, ObjectBuilder, PerfBufferBuilder};
 
 /// Module name. Mirrors `MODULE_NAME_SYSCALL` (`const.go`).
 pub const NAME: &str = super::MODULE_NAME_SYSCALL;
@@ -68,21 +68,24 @@ impl SyscallTracepointModule {
     fn attach_tracepoints(&self, obj: &mut Object) -> Result<()> {
         // Attach sys_enter
         let prog = obj
-            .prog_mut("raw_tracepoint__sys_enter")
+            .progs_mut()
+            .find(|p| p.name() == "raw_tracepoint__sys_enter")
             .ok_or_else(|| anyhow!("sys_enter program not found"))?;
         let _link = prog.attach()?;
         std::mem::forget(_link); // Keep attached
 
         // Attach sys_exit
         let prog = obj
-            .prog_mut("raw_tracepoint__sys_exit")
+            .progs_mut()
+            .find(|p| p.name() == "raw_tracepoint__sys_exit")
             .ok_or_else(|| anyhow!("sys_exit program not found"))?;
         let _link = prog.attach()?;
         std::mem::forget(_link);
 
         // Attach sched_process_fork
         let prog = obj
-            .prog_mut("raw_tracepoint__sched_process_fork")
+            .progs_mut()
+            .find(|p| p.name() == "raw_tracepoint__sched_process_fork")
             .ok_or_else(|| anyhow!("sched_process_fork program not found"))?;
         let _link = prog.attach()?;
         std::mem::forget(_link);
@@ -122,7 +125,10 @@ impl SyscallTracepointModule {
 
     #[cfg(target_os = "linux")]
     fn update_base_config(&self, obj: &mut Object, logger: &Logger) -> Result<()> {
-        let map = obj.map_mut("base_config").context("base_config map not found")?;
+        let map = obj
+            .maps_mut()
+            .find(|m| m.name() == "base_config")
+            .context("base_config map not found")?;
         let key: u32 = 0;
         let value = self.conf.to_base_config_bytes();
         
@@ -180,7 +186,10 @@ impl SyscallTracepointModule {
         )?;
 
         // Update common_filter struct
-        let map = obj.map_mut("common_filter").context("common_filter map not found")?;
+        let map = obj
+            .maps_mut()
+            .find(|m| m.name() == "common_filter")
+            .context("common_filter map not found")?;
         let key: u32 = 0;
         let value = self.conf.to_common_filter_bytes();
         
@@ -204,7 +213,10 @@ impl SyscallTracepointModule {
             return Ok(());
         }
 
-        let map = obj.map_mut("common_list").context("common_list map not found")?;
+        let map = obj
+            .maps_mut()
+            .find(|m| m.name() == "common_list")
+            .context("common_list map not found")?;
         
         for &item in items {
             let key = item + offset;
@@ -223,7 +235,8 @@ impl SyscallTracepointModule {
         }
 
         let map = obj
-            .map_mut("child_parent_map")
+            .maps_mut()
+            .find(|m| m.name() == "child_parent_map")
             .context("child_parent_map not found")?;
         
         for &pid in &self.conf.pid_whitelist {
@@ -237,7 +250,10 @@ impl SyscallTracepointModule {
 
     #[cfg(target_os = "linux")]
     fn update_thread_filter(&self, obj: &mut Object, logger: &Logger) -> Result<()> {
-        let map = obj.map_mut("thread_filter").context("thread_filter map not found")?;
+        let map = obj
+            .maps_mut()
+            .find(|m| m.name() == "thread_filter")
+            .context("thread_filter map not found")?;
         
         // Add default blacklist
         for name in self.conf.default_thread_blacklist() {
@@ -288,7 +304,8 @@ impl SyscallTracepointModule {
         use crate::contract::SyscallPointArgs;
         
         let map = obj
-            .map_mut("sysenter_point_args")
+            .maps_mut()
+            .find(|m| m.name() == "sysenter_point_args")
             .context("sysenter_point_args map not found")?;
 
         // TODO Phase 4: Parse syscall points from config file.
@@ -330,7 +347,8 @@ impl SyscallTracepointModule {
         use crate::contract::SyscallPointArgs;
         
         let map = obj
-            .map_mut("sysexit_point_args")
+            .maps_mut()
+            .find(|m| m.name() == "sysexit_point_args")
             .context("sysexit_point_args map not found")?;
 
         // TODO Phase 4: Parse syscall points from config file.
@@ -370,7 +388,8 @@ impl SyscallTracepointModule {
         use crate::contract::OpConfig;
         
         let map = obj
-            .map_mut("op_list")
+            .maps_mut()
+            .find(|m| m.name() == "op_list")
             .context("op_list map not found")?;
 
         // TODO Phase 4: Generate op_list from argtype definitions.
@@ -397,7 +416,10 @@ impl SyscallTracepointModule {
 
     #[cfg(target_os = "linux")]
     fn poll_events(&self, obj: &mut Object, logger: Arc<Logger>) -> Result<()> {
-        let map = obj.map("events").context("events map not found")?;
+        let map = obj
+            .maps()
+            .find(|m| m.name() == "events")
+            .context("events map not found")?;
         
         let running = Arc::new(AtomicBool::new(true));
         let r = running.clone();

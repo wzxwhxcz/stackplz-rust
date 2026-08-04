@@ -100,7 +100,8 @@ pub mod linux {
     /// Mirrors `filterMap.Update(unsafe.Pointer(&filter_key), unsafe.Pointer(&filter), ebpf.UpdateAny)`.
     pub fn write_filter_map<T: bytemuck::Pod>(obj: &Object, filter: &T) -> Result<()> {
         let map = obj
-            .map("filter_map")
+            .maps()
+            .find(|m| m.name() == "filter_map")
             .ok_or_else(|| anyhow!("cannot find filter_map"))?;
         let key = 0u32.to_ne_bytes();
         let value_bytes: &[u8] = bytemuck::bytes_of(filter);
@@ -109,8 +110,9 @@ pub mod linux {
     }
 
     /// Borrow the `*_events` PERF_EVENT_ARRAY map for the perf-reader loop.
-    pub fn events_map<'a>(obj: &'a Object, name: &str) -> Result<&'a Map> {
-        obj.map(name)
+    pub fn events_map<'a>(obj: &'a Object, name: &str) -> Result<&'a Map<'a>> {
+        obj.maps()
+            .find(|m| m.name() == name)
             .ok_or_else(|| anyhow!("cannot find map: {}", name))
     }
 
@@ -123,7 +125,8 @@ pub mod linux {
         value: &V,
     ) -> Result<()> {
         let map = obj
-            .map(map_name)
+            .maps()
+            .find(|m| m.name() == map_name)
             .ok_or_else(|| anyhow!("cannot find map: {map_name}"))?;
         let key_bytes = bytemuck::bytes_of(key);
         let val_bytes = bytemuck::bytes_of(value);
@@ -134,7 +137,8 @@ pub mod linux {
     /// Write a map entry with raw byte key/value (for maps with non-Pod shapes).
     pub fn write_map_raw(obj: &Object, map_name: &str, key: &[u8], value: &[u8]) -> Result<()> {
         let map = obj
-            .map(map_name)
+            .maps()
+            .find(|m| m.name() == map_name)
             .ok_or_else(|| anyhow!("cannot find map: {map_name}"))?;
         map.update(key, value, MapFlags::ANY)?;
         Ok(())
@@ -144,7 +148,8 @@ pub mod linux {
     /// Mirrors Go's `update_op_list()` in `stack.go:341-357`.
     pub fn write_op_list(obj: &Object) -> Result<()> {
         let map = obj
-            .map("op_list")
+            .maps()
+            .find(|m| m.name() == "op_list")
             .ok_or_else(|| anyhow!("cannot find op_list map"))?;
         for (op_key, op_config) in crate::argtype::get_all_op_list() {
             let key_bytes = op_key.to_ne_bytes();
@@ -163,7 +168,8 @@ pub mod linux {
     ) -> Result<()> {
         use crate::contract::types::StackPointArgs;
         let map = obj
-            .map("uprobe_point_args")
+            .maps()
+            .find(|m| m.name() == "uprobe_point_args")
             .ok_or_else(|| anyhow!("cannot find uprobe_point_args map"))?;
         for point in points {
             let key = point.index.to_ne_bytes();
@@ -225,7 +231,8 @@ pub mod linux {
     /// Mirrors Go's `update_common_list()` in `stack.go:215-235`.
     pub fn write_common_list(obj: &Object, items: &[u32], offset: u32) -> Result<()> {
         let map = obj
-            .map("common_list")
+            .maps()
+            .find(|m| m.name() == "common_list")
             .ok_or_else(|| anyhow!("cannot find common_list map"))?;
         for &v in items {
             let key = v + offset;

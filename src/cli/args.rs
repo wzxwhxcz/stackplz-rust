@@ -187,6 +187,54 @@ pub struct GlobalArgs {
     /// dump return address
     #[arg(long, default_value_t = false)]
     pub dumpret: bool,
+
+    /// arg filter rule
+    #[arg(short = 'f', long = "filter")]
+    pub filter: Vec<String>,
+
+    /// filter syscalls (whitelist, comma separated)
+    #[arg(short = 's', long, default_value = "")]
+    pub syscall: String,
+
+    /// syscall black list, max 20
+    #[arg(long, default_value = "")]
+    pub no_syscall: String,
+
+    /// max operation count for uprobe, at least 192 for string array
+    #[arg(long, default_value_t = 64)]
+    pub maxop: u32,
+
+    /// stack dump size, default 8192 bytes, max 65528 bytes
+    #[arg(long, default_value_t = 8192)]
+    pub stack_size: u32,
+
+    /// lib dirs, library directory path or apk path
+    #[arg(long = "libdirs")]
+    pub libdirs: Vec<String>,
+
+    /// set hardware breakpoint address
+    #[arg(long, default_value = "")]
+    pub brk: String,
+
+    /// set hardware breakpoint pid, just keep default
+    #[arg(long = "brk-pid", default_value_t = -1)]
+    pub brk_pid: i32,
+
+    /// as library base address, work with -p/--pid option
+    #[arg(long = "brk-lib", default_value = "")]
+    pub brk_lib: String,
+
+    /// hardware breakpoint length, default 4, support [1, 8]
+    #[arg(long = "brk-len", default_value_t = 4)]
+    pub brk_len: u64,
+
+    /// enable rpc
+    #[arg(long, default_value_t = false)]
+    pub rpc: bool,
+
+    /// rpc path, default 127.0.0.1:41718
+    #[arg(long = "rpc-path", default_value = "127.0.0.1:41718")]
+    pub rpc_path: String,
 }
 
 #[derive(Debug, Subcommand)]

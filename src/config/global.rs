@@ -53,6 +53,13 @@ pub struct GlobalConfig {
     pub sdk_int: u32,
     // Misc flags.
     pub dumpret: bool,
+    // P0 missing parameters (root.go:631-676).
+    pub filter: Vec<String>,
+    pub syscall: String,
+    pub no_syscall: String,
+    pub maxop: u32,
+    pub stack_size: u32,
+    pub libdirs: Vec<String>,
 }
 
 impl GlobalConfig {
@@ -95,6 +102,12 @@ impl GlobalConfig {
             no_pid: args.no_pid.clone(),
             sdk_int: args.sdk_int,
             dumpret: args.dumpret,
+            filter: args.filter.clone(),
+            syscall: args.syscall.clone(),
+            no_syscall: args.no_syscall.clone(),
+            maxop: args.maxop,
+            stack_size: args.stack_size,
+            libdirs: args.libdirs.clone(),
         }
     }
 }

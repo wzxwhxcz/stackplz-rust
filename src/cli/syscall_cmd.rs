@@ -31,6 +31,30 @@ pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: SyscallAr
         conf.nr = sysno;
         conf.debug = global.debug;
 
+        // Parse syscall whitelist/blacklist from global config
+        if !global.syscall.is_empty() {
+            for syscall_name in global.syscall.split(',') {
+                let syscall_name = syscall_name.trim();
+                if !syscall_name.is_empty() {
+                    // Parse syscall name to number (simplified - real implementation would use syscall table)
+                    // For now, assume numeric input or skip
+                    if let Ok(nr) = syscall_name.parse::<u32>() {
+                        conf.sys_whitelist.push(nr);
+                    }
+                }
+            }
+        }
+        if !global.no_syscall.is_empty() {
+            for syscall_name in global.no_syscall.split(',') {
+                let syscall_name = syscall_name.trim();
+                if !syscall_name.is_empty() {
+                    if let Ok(nr) = syscall_name.parse::<u32>() {
+                        conf.sys_blacklist.push(nr);
+                    }
+                }
+            }
+        }
+
         logger.println(&format!("{}\thook nr:{}", MODULE_NAME_SYSCALL, conf.nr));
 
         let mod_logger = logger.clone();

@@ -10,6 +10,7 @@
 //!      `--uid` (pm). Exactly one is required.
 
 use crate::assets;
+use crate::config::filter::add_filter;
 use crate::config::sconfig::parse_tid_blacklist;
 use crate::config::{GlobalConfig, TargetConfig};
 use anyhow::{anyhow, bail, Result};
@@ -52,6 +53,11 @@ pub fn persistent_pre_run(global: &mut GlobalConfig, target: &mut TargetConfig) 
     target.tid_blacklist = blacklist;
     target.tid_blacklist_mask = mask;
 
+    // Parse arg filters (--filter flag)
+    for filter_str in &global.filter {
+        add_filter(filter_str).map_err(|e| anyhow!("parse filter '{}' failed: {}", filter_str, e))?;
+    }
+
     // 5. Target resolution: exactly one of --name / --uid.
     if !global.name.is_empty() {
         parse_by_package(global, target, &global.name.clone())?;
@@ -60,6 +66,10 @@ pub fn persistent_pre_run(global: &mut GlobalConfig, target: &mut TargetConfig) 
     } else {
         bail!("please set --uid or --name");
     }
+
+    // Append --libdirs to library search paths
+    target.library_dirs.extend_from_slice(&global.libdirs);
+
     Ok(())
 }
 

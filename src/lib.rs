@@ -10,4 +10,5 @@ pub mod ebpf;
 pub mod event;
 pub mod logger;
 pub mod module;
+pub mod rpc;
 pub mod util;

@@ -1,15 +1,21 @@
 //! eBPF module layer. Mirrors package `module` (`user/module/*.go`).
 //!
-//! Two concrete modules, mirroring the Go tree:
+//! Four concrete modules, mirroring the Go tree:
 //! - `stack_probe.rs`           => `probe_stack.go`        (uprobe, stack.o)
 //! - `syscall_tracepoint.rs`    => `tracepoint_raw_syscalls.go` (tracepoint)
+//! - `perf_mmap.rs`             => `perf_mmap.go`          (mmap2 event monitoring)
+//! - `brk.rs`                   => `brk.go`                (hardware breakpoints)
 //!
 //! The shared lifecycle (load, write filter_map, spawn perf reader, dispatch
 //! events) lives in `Module` here, mirroring `imodule.go`.
 
+pub mod brk;
+pub mod perf_mmap;
 pub mod stack_probe;
 pub mod syscall_tracepoint;
 
+pub use brk::{BrkModule, BrkConfig, BrkType, BrkLen};
+pub use perf_mmap::PerfMmapModule;
 pub use stack_probe::StackProbeModule;
 pub use syscall_tracepoint::SyscallTracepointModule;
 

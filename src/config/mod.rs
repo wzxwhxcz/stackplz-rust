@@ -13,6 +13,7 @@ pub mod file_parser;
 pub mod filter;
 pub mod global;
 pub mod hook_json;
+pub mod perf_mmap;
 pub mod point_arg;
 pub mod point_parser;
 pub mod sconfig;
@@ -26,6 +27,7 @@ pub use filter::{ArgFilter, FilterHelper, EArgFilter, add_filter, get_filter_by_
 pub use filter::{UNKNOWN_FILTER, EQUAL_FILTER, GREATER_FILTER, LESS_FILTER, WHITELIST_FILTER, BLACKLIST_FILTER, REPLACE_FILTER};
 pub use global::GlobalConfig;
 pub use hook_json::{BaseHookConfig, HookConfig, LibHookConfig};
+pub use perf_mmap::PerfMmapConfig;
 pub use point_arg::{PointArg, UprobeArgs, EBPF_SYS_ENTER, EBPF_UPROBE_ENTER};
 pub use point_parser::{parse_arg_type, parse_hook_point};
 pub use sconfig::{SConfig, StackFilter, SyscallFilter, MAX_TID_BLACKLIST_COUNT};

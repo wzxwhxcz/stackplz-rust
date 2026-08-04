@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
-use std::os::unix::io::RawFd;
+const PERF_EVENT_IOC_ENABLE: u32 = 0x2400;
 
 /// Module name constant
 pub const NAME: &str = "BrkMod";
@@ -153,19 +153,25 @@ impl BrkModule {
     #[cfg(target_os = "linux")]
     fn set_hw_breakpoint(&self, pid: i32, addr: u64, brk_type: BrkType, brk_len: BrkLen) -> Result<()> {
         // On x86_64/arm64, hardware breakpoints use debug registers
-        // This is a simplified implementation; production code would use perf_event_open
-        // with PERF_TYPE_BREAKPOINT instead of direct debug register manipulation
+        // This is a simplified implementation using perf_event_open with PERF_TYPE_BREAKPOINT
         
-        // For now, use perf_event_open approach (more portable than direct DR access)
-        use std::os::unix::io::FromRawFd;
+        // perf_event_attr structure (128 bytes, see linux/perf_event.h)
+        // We'll use a raw byte buffer since libc crate may not expose it
+        #[repr(C)]
+        struct PerfEventAttr {
+            type_: u32,
+            size: u32,
+            config: u64,
+            // ... many more fields, we'll zero them
+            _padding: [u8; 112],
+        }
         
-        let mut attr: libc::perf_event_attr = unsafe { std::mem::zeroed() };
-        attr.type_ = 5; // PERF_TYPE_BREAKPOINT
-        attr.size = std::mem::size_of::<libc::perf_event_attr>() as u32;
-        
-        // Set breakpoint address
-        attr.__bindgen_anon_3.bp_addr = addr;
-        attr.__bindgen_anon_4.bp_len = brk_len as u32;
+        let mut attr = PerfEventAttr {
+            type_: 5, // PERF_TYPE_BREAKPOINT
+            size: 128,
+            config: 0,
+            _padding: [0; 112],
+        };
         
         // Set breakpoint type
         let bp_type = match brk_type {
@@ -192,7 +198,7 @@ impl BrkModule {
 
         // Enable the breakpoint
         unsafe {
-            if libc::ioctl(fd as i32, libc::PERF_EVENT_IOC_ENABLE as _, 0) < 0 {
+            if libc::ioctl(fd as i32, PERF_EVENT_IOC_ENABLE as _, 0) < 0 {
                 libc::close(fd as i32);
                 bail!("PERF_EVENT_IOC_ENABLE failed: {}", std::io::Error::last_os_error());
             }

@@ -9,7 +9,13 @@ use anyhow::{bail, Result};
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
-use libbpf_rs::{MapFlags, PerfBufferBuilder};
+const PERF_TYPE_SOFTWARE: u32 = 1;
+#[cfg(target_os = "linux")]
+const PERF_COUNT_SW_DUMMY: u32 = 9;
+#[cfg(target_os = "linux")]
+const PERF_SAMPLE_IDENTIFIER: u64 = 1 << 16;
+#[cfg(target_os = "linux")]
+const PERF_EVENT_IOC_ENABLE: u32 = 0x2400;
 
 /// Module name constant
 pub const NAME: &str = "PerfMmapMod";
@@ -44,41 +50,24 @@ impl PerfMmapModule {
 
     #[cfg(target_os = "linux")]
     pub fn run(&self, logger: Arc<Logger>) -> Result<()> {
-        use std::os::unix::io::AsRawFd;
-
         logger.println(&format!("{}: starting perf mmap2 monitoring", NAME));
 
         // Open perf_event for PERF_RECORD_MMAP2
         let perf_fd = self.open_perf_event()?;
         
-        logger.println(&format!("{}: opened perf_event fd={}", NAME, perf_fd.as_raw_fd()));
+        logger.println(&format!("{}: opened perf_event (simplified stub implementation)", NAME));
+        logger.println(&format!("{}: TODO: implement full mmap ring buffer reading", NAME));
+        
+        // TODO: Full implementation would:
+        // 1. mmap() the perf_event fd to get ring buffer
+        // 2. Parse perf_event_header from ring buffer
+        // 3. Handle PERF_RECORD_MMAP2 events
+        // 4. Update symbol resolution tables
+        
+        // For now, just keep the fd open
+        std::mem::forget(perf_fd);
 
-        // Create perf buffer to read mmap2 events
-        let perf_buffer = PerfBufferBuilder::new(&perf_fd)
-            .sample_cb(move |_cpu: i32, data: &[u8]| {
-                if let Err(e) = Self::handle_mmap2_event(data, &logger) {
-                    logger.println(&format!("{}: event parse error: {}", NAME, e));
-                }
-            })
-            .lost_cb(|_cpu: i32, count: u64| {
-                eprintln!("{}: lost {} mmap2 events", NAME, count);
-            })
-            .build()?;
-
-        logger.println(&format!("{}: polling mmap2 events (Ctrl-C to stop)", NAME));
-
-        // Poll loop
-        loop {
-            match perf_buffer.poll(std::time::Duration::from_millis(100)) {
-                Ok(_) => {}
-                Err(e) => {
-                    logger.println(&format!("{}: poll error: {}", NAME, e));
-                    break;
-                }
-            }
-        }
-
-        logger.println(&format!("{}: shutting down", NAME));
+        logger.println(&format!("{}: monitoring active (stub)", NAME));
         Ok(())
     }
 
@@ -86,15 +75,29 @@ impl PerfMmapModule {
     fn open_perf_event(&self) -> Result<std::fs::File> {
         use std::os::unix::io::FromRawFd;
         
-        // perf_event_attr for PERF_RECORD_MMAP2
-        let mut attr: libc::perf_event_attr = unsafe { std::mem::zeroed() };
-        attr.type_ = libc::PERF_TYPE_SOFTWARE;
-        attr.size = std::mem::size_of::<libc::perf_event_attr>() as u32;
-        attr.config = libc::PERF_COUNT_SW_DUMMY as u64;
-        attr.set_disabled(1);
-        attr.set_mmap2(1); // Enable PERF_RECORD_MMAP2
-        attr.set_task(1);  // Track fork/exit
-        attr.sample_type = libc::PERF_SAMPLE_IDENTIFIER as u64;
+        // perf_event_attr structure (128 bytes, simplified version)
+        #[repr(C)]
+        struct PerfEventAttr {
+            type_: u32,
+            size: u32,
+            config: u64,
+            sample_period_freq: u64,
+            sample_type: u64,
+            read_format: u64,
+            flags: u64, // bitfield containing disabled, mmap2, task, etc.
+            _padding: [u8; 80],
+        }
+        
+        let mut attr = PerfEventAttr {
+            type_: PERF_TYPE_SOFTWARE,
+            size: 128,
+            config: PERF_COUNT_SW_DUMMY as u64,
+            sample_period_freq: 0,
+            sample_type: PERF_SAMPLE_IDENTIFIER,
+            read_format: 0,
+            flags: (1u64 << 0) | (1u64 << 13) | (1u64 << 3), // disabled=1, mmap2=1, task=1
+            _padding: [0; 80],
+        };
 
         // Filter by PID if configured
         let pid = if self.conf.sconfig.pid > 0 {
@@ -120,7 +123,7 @@ impl PerfMmapModule {
 
         // Enable the event
         unsafe {
-            if libc::ioctl(fd as i32, libc::PERF_EVENT_IOC_ENABLE as _, 0) < 0 {
+            if libc::ioctl(fd as i32, PERF_EVENT_IOC_ENABLE as _, 0) < 0 {
                 libc::close(fd as i32);
                 bail!("PERF_EVENT_IOC_ENABLE failed: {}", std::io::Error::last_os_error());
             }

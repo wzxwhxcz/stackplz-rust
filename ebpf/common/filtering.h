@@ -104,6 +104,14 @@ static __always_inline u64 should_trace(program_data_t *p)
         return 1;
     }
 
+    // 回归修复：dev 把过滤语义从 master 的「0 = 不过滤」反转成了无条件默认拒绝，
+    // 用户在没有任何 uid/pid/tid/thread 过滤条件时必然静默零事件（master 则照常出事件）。
+    // 当用户确实没给任何过滤条件（no_filter_allow == 1）时回落到 master 的宽松语义。
+    // 注意此处位于所有黑名单/自我排除/线程白名单判定之后，因此那些负向过滤依然生效。
+    if (filter->no_filter_allow == 1) {
+        return 1;
+    }
+
     return 0;
 }
 

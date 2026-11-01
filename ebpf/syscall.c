@@ -61,17 +61,12 @@ int tracepoint__sched__sched_process_fork(struct bpf_raw_tracepoint_args *ctx)
 SEC("raw_tracepoint/sys_enter")
 int raw_syscalls_sys_enter(struct bpf_raw_tracepoint_args* ctx) {
 
-    struct task_struct *task = (struct task_struct *) bpf_get_current_task();
-    if (unlikely(task == NULL)) return 0;
-
-    bool is32 = BPF_CORE_READ(task, thread_info.flags) & _TIF_32BIT;
-#if defined(__TARGET_ARCH_arm)
-    if (!is32)
-#else
-    if (is32)
-#endif
-        return 0;
-
+    // 架构门控已移除（回归修复）：原先此处用 arm64 专属位 _TIF_32BIT(1<<22) 读
+    // thread_info.flags 判定 is32，并在任何过滤/事件提交之前 return 0：
+    //   - arm64 构建：is32 为真（AArch32 / 32 位目标进程）→ 全部静默丢弃，零事件；
+    //   - arm32 构建：该位在 arm32 上恒为 0，!is32 恒真 → 目标一律丢弃。
+    // master 的 tracepoint/raw_syscalls/sys_enter 没有任何架构判定，这里回到 master
+    // 语义：不做架构过滤，交给 should_trace 与 syscall 号过滤决定。
     program_data_t p = {};
     if (!init_program_data(&p, ctx))
         return 0;
@@ -140,7 +135,7 @@ int raw_syscalls_sys_enter(struct bpf_raw_tracepoint_args* ctx) {
     op_ctx_t* op_ctx = bpf_map_lookup_elem(&op_ctx_map, &ctx_index);
     // make ebpf verifier happy
     if (unlikely(op_ctx == NULL)) return 0;
-    __builtin_memset((void *)op_ctx, 0, sizeof(op_ctx));
+    __builtin_memset((void *)op_ctx, 0, sizeof(*op_ctx));
 
     op_ctx->reg_0 = saved_regs.regs[0];
     op_ctx->save_index = 4;
@@ -171,17 +166,12 @@ int raw_syscalls_sys_enter(struct bpf_raw_tracepoint_args* ctx) {
 SEC("raw_tracepoint/sys_exit")
 int raw_syscalls_sys_exit(struct bpf_raw_tracepoint_args* ctx) {
 
-    struct task_struct *task = (struct task_struct *) bpf_get_current_task();
-    if (unlikely(task == NULL)) return 0;
-
-    bool is32 = BPF_CORE_READ(task, thread_info.flags) & _TIF_32BIT;
-#if defined(__TARGET_ARCH_arm)
-    if (!is32)
-#else
-    if (is32)
-#endif
-        return 0;
-
+    // 架构门控已移除（回归修复）：原先此处用 arm64 专属位 _TIF_32BIT(1<<22) 读
+    // thread_info.flags 判定 is32，并在任何过滤/事件提交之前 return 0：
+    //   - arm64 构建：is32 为真（AArch32 / 32 位目标进程）→ 全部静默丢弃，零事件；
+    //   - arm32 构建：该位在 arm32 上恒为 0，!is32 恒真 → 目标一律丢弃。
+    // master 的 tracepoint/raw_syscalls/sys_enter 没有任何架构判定，这里回到 master
+    // 语义：不做架构过滤，交给 should_trace 与 syscall 号过滤决定。
     program_data_t p = {};
     if (!init_program_data(&p, ctx))
         return 0;
@@ -227,7 +217,7 @@ int raw_syscalls_sys_exit(struct bpf_raw_tracepoint_args* ctx) {
     int ctx_index = 1;
     op_ctx_t* op_ctx = bpf_map_lookup_elem(&op_ctx_map, &ctx_index);
     if (unlikely(op_ctx == NULL)) return 0;
-    __builtin_memset((void *)op_ctx, 0, sizeof(op_ctx));
+    __builtin_memset((void *)op_ctx, 0, sizeof(*op_ctx));
 
     op_ctx->reg_0 = saved_regs.regs[0];
     op_ctx->save_index = 1;

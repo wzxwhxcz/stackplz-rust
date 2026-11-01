@@ -85,8 +85,38 @@ impl SyscallConfig {
         bytes
     }
 
+    /// True when the user asked for no uid/pid/tid/thread filtering at all, i.e.
+    /// every inclusion *and* exclusion list is empty and no uid group is traced.
+    ///
+    /// Used to restore master's "0 = no filtering" semantics on the eBPF side:
+    /// `should_trace()` ends in an unconditional `return 0` (default deny), so
+    /// without this fallback a run with no filter flags produces zero events
+    /// while master traced everything (report §4.2 / §6.2).
+    ///
+    /// `default_thread_blacklist()` entries are deliberately NOT counted: they
+    /// are applied unconditionally by the user side and are not a user choice.
+    pub fn has_no_user_filter(&self) -> bool {
+        self.uid_whitelist.is_empty()
+            && self.uid_blacklist.is_empty()
+            && self.pid_whitelist.is_empty()
+            && self.pid_blacklist.is_empty()
+            && self.tid_whitelist.is_empty()
+            && self.tid_blacklist.is_empty()
+            && self.tname_whitelist.is_empty()
+            && self.tname_blacklist.is_empty()
+            // trace_uid_group is written as 0 by this config (see below).
+            && self.trace_uid_group() == 0
+    }
+
+    /// `common_filter_t.trace_uid_group` for this config. Currently always 0
+    /// (no `--uid-group` flag yet); kept as a helper so `has_no_user_filter()`
+    /// cannot silently disagree with the bytes we actually write.
+    pub fn trace_uid_group(&self) -> u32 {
+        0
+    }
+
     /// Convert to common_filter map value (C struct bytes).
-    /// Mirrors `common_filter_t` in `src/types.h`:
+    /// Mirrors `common_filter_t` in `ebpf/types.h`:
     /// ```c
     /// typedef struct common_filter {
     ///     u32 is_32bit;
@@ -94,10 +124,11 @@ impl SyscallConfig {
     ///     u32 trace_uid_group;
     ///     u32 signal;
     ///     u32 tsignal;
+    ///     u32 no_filter_allow;
     /// } common_filter_t;
     /// ```
     pub fn to_common_filter_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(20);
+        let mut bytes = Vec::with_capacity(24);
 
         // is_32bit: 0 for 64-bit (ARM64/x86_64)
         bytes.extend_from_slice(&0u32.to_ne_bytes());
@@ -115,13 +146,18 @@ impl SyscallConfig {
         bytes.extend_from_slice(&trace_mode.to_ne_bytes());
 
         // trace_uid_group: UID filtering flags (not used in current implementation)
-        bytes.extend_from_slice(&0u32.to_ne_bytes());
+        bytes.extend_from_slice(&self.trace_uid_group().to_ne_bytes());
 
         // signal: signal number to send (0 = no signal)
         bytes.extend_from_slice(&0u32.to_ne_bytes());
 
         // tsignal: target signal (0 = no target)
         bytes.extend_from_slice(&0u32.to_ne_bytes());
+
+        // no_filter_allow: 1 when no filter was configured, so should_trace()
+        // falls back to master's "0 = no filtering" behaviour.
+        let no_filter_allow: u32 = if self.has_no_user_filter() { 1 } else { 0 };
+        bytes.extend_from_slice(&no_filter_allow.to_ne_bytes());
 
         bytes
     }
@@ -158,5 +194,83 @@ impl HookConfig for SyscallConfig {
     }
     fn info(&self) -> String {
         SyscallConfig::info(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reading back a u32 written with `to_ne_bytes`.
+    fn u32_at(bytes: &[u8], off: usize) -> u32 {
+        u32::from_ne_bytes(bytes[off..off + 4].try_into().unwrap())
+    }
+
+    /// Regression test for report §4.2: a config with no uid/pid/tid/thread
+    /// filter must set `no_filter_allow = 1`, otherwise the eBPF
+    /// `should_trace()` default deny silently produces zero events while
+    /// master traced everything.
+    #[test]
+    fn no_filter_config_requests_permissive_fallback() {
+        let conf = SyscallConfig::new();
+        assert!(conf.has_no_user_filter());
+
+        let bytes = conf.to_common_filter_bytes();
+        assert_eq!(bytes.len(), 24);
+        assert_eq!(
+            u32_at(&bytes, 20),
+            1,
+            "no_filter_allow must be 1 when nothing is filtered"
+        );
+    }
+
+    /// The default thread blacklist is applied unconditionally by the user side
+    /// and is not a user filter, so it must not disable the fallback.
+    #[test]
+    fn default_thread_blacklist_does_not_count_as_a_filter() {
+        let conf = SyscallConfig::new();
+        assert!(!conf.default_thread_blacklist().is_empty());
+        assert!(conf.has_no_user_filter());
+    }
+
+    /// Any explicitly configured filter must keep the upstream whitelist-style
+    /// default deny (`no_filter_allow = 0`), so filtering behaviour is unchanged.
+    #[test]
+    fn any_explicit_filter_disables_permissive_fallback() {
+        let mutators: Vec<fn(&mut SyscallConfig)> = vec![
+            |c| c.uid_whitelist.push(1000),
+            |c| c.uid_blacklist.push(0),
+            |c| c.pid_whitelist.push(1234),
+            |c| c.pid_blacklist.push(1),
+            |c| c.tid_whitelist.push(4321),
+            |c| c.tid_blacklist.push(2),
+            |c| c.tname_whitelist.push("RenderThread".to_string()),
+            |c| c.tname_blacklist.push("android.bg".to_string()),
+        ];
+
+        for mutate in mutators {
+            let mut conf = SyscallConfig::new();
+            mutate(&mut conf);
+            assert!(
+                !conf.has_no_user_filter(),
+                "a configured filter must disable the permissive fallback"
+            );
+            assert_eq!(u32_at(&conf.to_common_filter_bytes(), 20), 0);
+        }
+    }
+
+    /// Byte layout contract with `common_filter_t` in ebpf/types.h: the five
+    /// legacy fields keep their offsets and the new flag is appended at 20.
+    #[test]
+    fn common_filter_bytes_keep_legacy_offsets() {
+        let conf = SyscallConfig::new();
+        let bytes = conf.to_common_filter_bytes();
+        assert_eq!(bytes.len(), 24);
+        assert_eq!(u32_at(&bytes, 0), 0, "is_32bit");
+        assert_eq!(u32_at(&bytes, 8), 0, "trace_uid_group");
+        assert_eq!(u32_at(&bytes, 12), 0, "signal");
+        assert_eq!(u32_at(&bytes, 16), 0, "tsignal");
+        assert_eq!(u32_at(&bytes, 20), 1, "no_filter_allow");
+        assert_eq!(conf.trace_uid_group(), u32_at(&bytes, 8));
     }
 }

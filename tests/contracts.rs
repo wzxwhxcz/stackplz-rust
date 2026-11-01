@@ -206,8 +206,10 @@ fn dev_event_context_is_56_bytes() {
 }
 
 #[test]
-fn dev_common_filter_is_20_bytes() {
-    assert_eq!(std::mem::size_of::<CommonFilter>(), 20);
+fn dev_common_filter_is_24_bytes() {
+    // 5 x u32 (is_32bit..tsignal) + the appended `no_filter_allow` flag.
+    // Must match `common_filter_t` in ebpf/types.h.
+    assert_eq!(std::mem::size_of::<CommonFilter>(), 24);
 }
 
 #[test]

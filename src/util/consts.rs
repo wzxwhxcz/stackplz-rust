@@ -1,12 +1,10 @@
 //! Constants for BPF map offsets. Mirrors `user/util/helper.go`.
 
-/// Offset ranges for common_list map entries.
-/// These offsets partition the map key space for different filter types.
-pub const SYS_WHITELIST_START: u32 = 0x400;
-pub const SYS_BLACKLIST_START: u32 = SYS_WHITELIST_START + 0x400;
-pub const UID_WHITELIST_START: u32 = SYS_BLACKLIST_START + 0x400;
-pub const UID_BLACKLIST_START: u32 = UID_WHITELIST_START + 0x400;
-pub const PID_WHITELIST_START: u32 = UID_BLACKLIST_START + 0x400;
-pub const PID_BLACKLIST_START: u32 = PID_WHITELIST_START + 0x400;
-pub const TID_WHITELIST_START: u32 = PID_BLACKLIST_START + 0x400;
-pub const TID_BLACKLIST_START: u32 = TID_WHITELIST_START + 0x400;
+// Re-exported from the single source of truth in [`crate::contract::consts`] so
+// the two copies can never drift apart again. The `common_list` segment stride
+// used to be duplicated as a literal here and in `ebpf/common/consts.h`.
+pub use crate::contract::consts::{
+    COMMON_LIST_MAX_KEY, COMMON_LIST_SEGMENT_STRIDE, PID_BLACKLIST_START, PID_WHITELIST_START,
+    SYS_BLACKLIST_START, SYS_WHITELIST_START, TID_BLACKLIST_START, TID_WHITELIST_START,
+    UID_BLACKLIST_START, UID_WHITELIST_START,
+};

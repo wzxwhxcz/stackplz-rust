@@ -10,6 +10,9 @@ typedef struct common_filter {
     u32 trace_uid_group;
     u32 signal;
     u32 tsignal;
+    // 1 = 用户未指定任何 uid/pid/tid/thread 过滤条件 → should_trace 末尾回落到
+    // master 的宽松语义（0 = 不过滤）；0 = 保持白名单式的默认拒绝。
+    u32 no_filter_allow;
 } common_filter_t;
 
 typedef struct ctx_regs {

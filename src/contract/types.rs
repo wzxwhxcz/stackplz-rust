@@ -44,7 +44,8 @@ pub struct EventContext {
 }
 
 /// `common_filter_t` — global behavior filter (map `common_filter`, key 0).
-/// 20 bytes.
+/// 24 bytes: the five original `u32`s (0..20) plus `no_filter_allow` at 20.
+/// Appending at offset 20 keeps every pre-existing field at its old offset.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CommonFilter {
@@ -53,6 +54,10 @@ pub struct CommonFilter {
     pub trace_uid_group: u32,
     pub signal: u32,
     pub tsignal: u32,
+    /// 1 = no uid/pid/tid/thread filter was configured by the user, so
+    /// `should_trace()` may fall back to the master "0 = no filtering"
+    /// semantics. 0 = keep the whitelist-style default deny.
+    pub no_filter_allow: u32,
 }
 
 /// `config_entry_t` — global config (map `base_config`, key 0). 8 bytes.
@@ -270,8 +275,21 @@ mod tests {
     }
 
     #[test]
-    fn common_filter_is_20_bytes() {
-        assert_eq!(std::mem::size_of::<CommonFilter>(), 20);
+    fn common_filter_is_24_bytes() {
+        assert_eq!(std::mem::size_of::<CommonFilter>(), 24);
+    }
+
+    /// The appended `no_filter_allow` flag must not shift any field that the
+    /// eBPF side already reads: offsets 0..20 are unchanged from the 20-byte
+    /// layout, and the new flag lands at 20.
+    #[test]
+    fn common_filter_keeps_legacy_offsets_and_appends_flag() {
+        assert_eq!(offset!(CommonFilter, is_32bit), 0);
+        assert_eq!(offset!(CommonFilter, trace_mode), 4);
+        assert_eq!(offset!(CommonFilter, trace_uid_group), 8);
+        assert_eq!(offset!(CommonFilter, signal), 12);
+        assert_eq!(offset!(CommonFilter, tsignal), 16);
+        assert_eq!(offset!(CommonFilter, no_filter_allow), 20);
     }
 
     #[test]

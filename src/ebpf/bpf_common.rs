@@ -206,6 +206,12 @@ pub mod linux {
     /// bitmask, and kill signals.
     /// Mirrors Go's `update_common_filter()` (the final `common_filter` write
     /// part) in `stack.go:245-259`.
+    ///
+    /// `no_filter_allow` is written as 0 here: the uprobe (`stack`) module always
+    /// sets an explicit uid-group mask / thread filter, so `should_trace()` must
+    /// keep its whitelist-style default deny. Only the syscall module passes 1,
+    /// and only when the user configured no filter at all
+    /// (`SyscallConfig::has_no_user_filter()`).
     pub fn write_common_filter(
         obj: &Object,
         is_32bit: bool,
@@ -221,6 +227,7 @@ pub mod linux {
             trace_uid_group,
             signal,
             tsignal,
+            no_filter_allow: 0,
         };
         write_map(obj, "common_filter", &0u32, &filter)
     }

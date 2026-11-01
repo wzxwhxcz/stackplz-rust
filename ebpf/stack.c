@@ -73,7 +73,9 @@ static __always_inline u32 probe_stack_warp(struct pt_regs* ctx, u32 point_key) 
     save_to_submit_buf(p.event, (void *) &point_key, sizeof(u32), 0);
     u64 lr = 0;
     u64 sp = 0;
-    if(filter->is_32bit) {
+    // 按「目标进程自身」的 ABI 选择寄存器来源（不再用宿主二进制架构的 filter->is_32bit）。
+    // 这里只决定 lr/sp 从哪组寄存器读，不参与过滤、不产生任何提前 return。
+    if (is_current_task_compat32()) {
         bpf_probe_read_kernel(&lr, sizeof(lr), &ctx->regs[14]);
         save_to_submit_buf(p.event, (void *) &lr, sizeof(u64), 1);
         bpf_probe_read_kernel(&sp, sizeof(sp), &ctx->regs[13]);

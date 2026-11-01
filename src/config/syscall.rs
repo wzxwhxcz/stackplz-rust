@@ -1,6 +1,7 @@
 //! `syscall` subcommand config. Mirrors `ModuleConfig` + `SyscallConfig` (`config_module.go`).
 
 use super::sconfig::{syscall_filter_from, HookConfig, SConfig, SyscallFilter};
+use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
 
 /// Syscall tracepoint module configuration. Mirrors `ModuleConfig` + `SyscallConfig`.
 #[derive(Debug, Clone)]
@@ -115,6 +116,27 @@ impl SyscallConfig {
         0
     }
 
+    /// `common_filter_t.trace_mode` for this config.
+    ///
+    /// Mirrors master's `SyscallConfig.TraceMode` (`config_module.go:560,649`),
+    /// but with the values the C side actually compares against
+    /// (`ebpf/common/consts.h`): `TRACE_COMMON(0)` makes `ebpf/syscall.c:88,202`
+    /// gate on the per-sysno whitelist in `common_list`, `TRACE_ALL(1)` skips
+    /// that gate.
+    ///
+    /// A non-empty `sys_whitelist` is exactly the case where the user asked for
+    /// a syscall subset (`-s <nr>,...`), so it is the only case that may switch
+    /// the gate on. `-s all` — and no `-s` at all — leave `sys_whitelist` empty
+    /// and therefore trace every syscall (`--no-syscall` keeps working because
+    /// the blacklist is checked in both modes).
+    pub fn trace_mode(&self) -> u32 {
+        if self.sys_whitelist.is_empty() {
+            TRACE_ALL
+        } else {
+            TRACE_COMMON
+        }
+    }
+
     /// Convert to common_filter map value (C struct bytes).
     /// Mirrors `common_filter_t` in `ebpf/types.h`:
     /// ```c
@@ -133,16 +155,10 @@ impl SyscallConfig {
         // is_32bit: 0 for 64-bit (ARM64/x86_64)
         bytes.extend_from_slice(&0u32.to_ne_bytes());
 
-        // trace_mode: determines filter logic (whitelist vs blacklist)
-        // 1 = whitelist mode, 2 = blacklist mode
-        let trace_mode: u32 = if !self.uid_whitelist.is_empty()
-            || !self.pid_whitelist.is_empty()
-            || !self.tid_whitelist.is_empty()
-        {
-            1 // WHITELIST_FILTER
-        } else {
-            2 // BLACKLIST_FILTER
-        };
+        // trace_mode: `TRACE_ALL` (1) unless a sysno whitelist is present, in
+        // which case `TRACE_COMMON` (0) makes `ebpf/syscall.c` enforce it.
+        // See `trace_mode()`; the C side compares against `TRACE_COMMON` only.
+        let trace_mode: u32 = self.trace_mode();
         bytes.extend_from_slice(&trace_mode.to_ne_bytes());
 
         // trace_uid_group: UID filtering flags (not used in current implementation)
@@ -267,10 +283,60 @@ mod tests {
         let bytes = conf.to_common_filter_bytes();
         assert_eq!(bytes.len(), 24);
         assert_eq!(u32_at(&bytes, 0), 0, "is_32bit");
+        assert_eq!(u32_at(&bytes, 4), TRACE_ALL, "trace_mode");
         assert_eq!(u32_at(&bytes, 8), 0, "trace_uid_group");
         assert_eq!(u32_at(&bytes, 12), 0, "signal");
         assert_eq!(u32_at(&bytes, 16), 0, "tsignal");
         assert_eq!(u32_at(&bytes, 20), 1, "no_filter_allow");
         assert_eq!(conf.trace_uid_group(), u32_at(&bytes, 8));
+    }
+
+    /// Regression test for report §5.1: `trace_mode` must be one of the two
+    /// contract values `TRACE_COMMON(0)`/`TRACE_ALL(1)` understood by
+    /// `ebpf/syscall.c:88,202`, never the old ad-hoc `1`/`2`. With `-s 63` the
+    /// sysno whitelist gate must switch on, i.e. exactly `TRACE_COMMON == 0`
+    /// (the old code wrote 1 or 2 here, so the gate never fired).
+    #[test]
+    fn sys_whitelist_writes_trace_common() {
+        let mut conf = SyscallConfig::new();
+        conf.sys_whitelist.push(63);
+
+        assert_eq!(
+            TRACE_COMMON, 0,
+            "ebpf/syscall.c gates on `trace_mode == TRACE_COMMON`"
+        );
+        assert_eq!(conf.trace_mode(), TRACE_COMMON);
+
+        let written = u32_at(&conf.to_common_filter_bytes(), 4);
+        assert_eq!(written, TRACE_COMMON, "trace_mode for `-s 63`");
+        // The values that used to be written (1 = "whitelist", 2 = "blacklist")
+        // are not part of the contract: 1 is TRACE_ALL, 2 means nothing.
+        assert_ne!(written, TRACE_ALL, "1 means TRACE_ALL, the opposite gate");
+        assert_ne!(written, 2, "2 is not part of the trace_mode contract");
+        assert!([TRACE_COMMON, TRACE_ALL].contains(&written));
+    }
+
+    /// `-s all` (and no `-s` at all) leave `sys_whitelist` empty, so the eBPF
+    /// side must not gate syscalls: `TRACE_ALL`. `--no-syscall` still applies
+    /// because the C side checks the blacklist in both modes.
+    #[test]
+    fn empty_sys_whitelist_writes_trace_all() {
+        let conf = SyscallConfig::new();
+        assert!(conf.sys_whitelist.is_empty());
+        assert_eq!(conf.trace_mode(), TRACE_ALL);
+
+        let written = u32_at(&conf.to_common_filter_bytes(), 4);
+        assert_eq!(written, TRACE_ALL, "trace_mode without a sysno whitelist");
+        assert!([TRACE_COMMON, TRACE_ALL].contains(&written));
+    }
+
+    /// A blacklist-only config must not accidentally switch the whitelist gate
+    /// on, otherwise every syscall would be denied before the blacklist runs.
+    #[test]
+    fn sys_blacklist_alone_does_not_enable_the_whitelist_gate() {
+        let mut conf = SyscallConfig::new();
+        conf.sys_blacklist.push(63);
+        assert_eq!(conf.trace_mode(), TRACE_ALL);
+        assert_eq!(u32_at(&conf.to_common_filter_bytes(), 4), TRACE_ALL);
     }
 }

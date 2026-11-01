@@ -212,14 +212,19 @@ fn parse_defines(src: &str) -> HashMap<String, String> {
     out
 }
 
-/// Evaluate a `#define` expression made only of `+`, parentheses, hex/decimal
+/// Evaluate a `#define` expression made of `+`, `<<`, parentheses, hex/decimal
 /// literals and previously defined identifiers.
 fn eval_define(name: &str, defs: &HashMap<String, String>, depth: usize) -> u64 {
     assert!(depth < 16, "define recursion too deep at {name}");
     let expr = defs
         .get(name)
         .unwrap_or_else(|| panic!("{name} is not defined in the header"));
-    // Parentheses only group additions here, so flattening them is safe.
+    eval_sum(expr, defs, depth)
+}
+
+/// `+` is the lowest-precedence operator used by these headers, so it is split
+/// first; parentheses only group sums and shifts here, so flattening is safe.
+fn eval_sum(expr: &str, defs: &HashMap<String, String>, depth: usize) -> u64 {
     let flat = expr.replace(['(', ')'], " ");
     let mut total = 0u64;
     for term in flat.split('+') {
@@ -227,17 +232,31 @@ fn eval_define(name: &str, defs: &HashMap<String, String>, depth: usize) -> u64 
         if term.is_empty() {
             continue;
         }
-        let value = if let Some(hex) = term.strip_prefix("0x").or_else(|| term.strip_prefix("0X")) {
-            u64::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("bad hex {term:?}"))
-        } else if term.chars().all(|c| c.is_ascii_digit()) {
-            term.parse::<u64>()
-                .unwrap_or_else(|_| panic!("bad number {term:?}"))
-        } else {
-            eval_define(term, defs, depth + 1)
-        };
-        total += value;
+        total += eval_shift(term, defs, depth);
     }
     total
+}
+
+/// Left-associative `<<` chain, e.g. `1 << 22` (`_TIF_32BIT`).
+fn eval_shift(term: &str, defs: &HashMap<String, String>, depth: usize) -> u64 {
+    let mut parts = term.split("<<");
+    let mut acc = eval_atom(parts.next().unwrap_or_default().trim(), defs, depth);
+    for part in parts {
+        acc = acc.wrapping_shl(eval_atom(part.trim(), defs, depth) as u32);
+    }
+    acc
+}
+
+/// A single literal or a previously defined identifier.
+fn eval_atom(term: &str, defs: &HashMap<String, String>, depth: usize) -> u64 {
+    if let Some(hex) = term.strip_prefix("0x").or_else(|| term.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("bad hex {term:?}"))
+    } else if !term.is_empty() && term.chars().all(|c| c.is_ascii_digit()) {
+        term.parse::<u64>()
+            .unwrap_or_else(|_| panic!("bad number {term:?}"))
+    } else {
+        eval_define(term, defs, depth + 1)
+    }
 }
 
 /// The Rust constants in `contract::consts` must resolve to exactly the same
@@ -358,4 +377,234 @@ fn common_filter_field_order_matches_the_c_header() {
         fields.len() * 4,
         std::mem::size_of::<stackplz::contract::types::CommonFilter>()
     );
+}
+
+// ---- ③ lr/sp register source must follow the *target* task's ABI -----------
+
+/// Locate the first brace-delimited block following `needle` (searched from byte
+/// `from`) and return `(needle_pos, block_body, closing_brace_pos)`.
+///
+/// None of the sources under test has a brace inside a string literal, so plain
+/// brace counting is exact for them.
+fn find_block<'a>(src: &'a str, needle: &str, from: usize) -> (usize, &'a str, usize) {
+    let needle_pos = from
+        + src[from..]
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} not found"));
+    let open = needle_pos
+        + src[needle_pos..]
+            .find('{')
+            .unwrap_or_else(|| panic!("no `{{` after {needle:?}"));
+    let mut depth = 0usize;
+    for (offset, ch) in src[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (needle_pos, &src[open + 1..open + offset], open + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced braces after {needle:?}");
+}
+
+/// The `if` that picks the lr/sp register source (AArch32 vs AArch64).
+const COMPAT32_CALL: &str = "if (is_current_task_compat32())";
+
+/// `filter->is_32bit` was written by the user side from the architecture of the
+/// stackplz *host binary*, which says nothing about the traced process. The
+/// registers lr/sp must be read from the layout of the *target task*'s ABI, so
+/// the predicate must be `is_current_task_compat32()` and both register
+/// branches must survive untouched.
+///
+/// This is the test that catches the old defect: with `filter->is_32bit` in
+/// place it fails on the very first assertion.
+#[test]
+fn lr_sp_registers_follow_the_target_task_not_the_host_binary() {
+    // file, program, aarch32 lr, aarch32 sp, aarch64 lr, aarch64 sp
+    let cases = [
+        (
+            "syscall.c",
+            "raw_syscalls_sys_enter",
+            "&regs->regs[14]",
+            "&regs->regs[13]",
+            "&regs->regs[30]",
+            "&regs->sp",
+        ),
+        (
+            "stack.c",
+            "probe_stack_warp",
+            "&ctx->regs[14]",
+            "&ctx->regs[13]",
+            "&ctx->regs[30]",
+            "&ctx->sp",
+        ),
+    ];
+
+    for (file, program, lr32, sp32, lr64, sp64) in cases {
+        let src = strip_c_comments(&read_ebpf(file));
+        assert!(
+            !src.contains("is_32bit"),
+            "ebpf/{file} still derives the lr/sp registers from the host binary's \
+             architecture (filter->is_32bit) instead of the target task's ABI"
+        );
+        assert_eq!(
+            src.matches(COMPAT32_CALL).count(),
+            1,
+            "ebpf/{file} must call is_current_task_compat32() exactly once ({program})"
+        );
+
+        let (_, aarch32, call_end) = find_block(&src, COMPAT32_CALL, 0);
+        let (else_pos, aarch64, _) = find_block(&src, "else", call_end);
+        assert!(
+            src[call_end + 1..else_pos].trim().is_empty(),
+            "the compat32 branch in ebpf/{file} must be followed directly by its else"
+        );
+
+        assert!(
+            aarch32.contains(lr32) && aarch32.contains(sp32),
+            "ebpf/{file}: the compat32 branch must read lr/sp from {lr32}/{sp32}"
+        );
+        assert!(
+            aarch64.contains(lr64) && aarch64.contains(sp64),
+            "ebpf/{file}: the 64-bit branch must read lr/sp from {lr64}/{sp64}"
+        );
+
+        // Only the register source differs; both branches must still emit lr
+        // (slot 1) and sp (slot 2) for the event.
+        for (name, block) in [("compat32", aarch32), ("64-bit", aarch64)] {
+            assert!(
+                block.contains("save_to_submit_buf")
+                    && block.contains("sizeof(u64), 1)")
+                    && block.contains("sizeof(u64), 2)"),
+                "ebpf/{file}: the {name} branch must keep submitting lr and sp"
+            );
+        }
+    }
+}
+
+/// The fix must not resurrect the removed architecture *gate*: that one did
+/// `return 0` before any filtering, which silently dropped every AArch32 target
+/// on arm64 and every target on arm32. The new predicate may only choose
+/// registers, so (a) it must run *after* `should_trace()` and (b) neither of its
+/// branches may return.
+#[test]
+fn compat32_predicate_selects_registers_but_never_drops_events() {
+    for (file, program) in [
+        ("syscall.c", "raw_syscalls_sys_enter"),
+        ("stack.c", "probe_stack_warp"),
+    ] {
+        let src = strip_c_comments(&read_ebpf(file));
+        let program_start = src
+            .find(program)
+            .unwrap_or_else(|| panic!("{program} not found in ebpf/{file}"));
+
+        let (call, then_block, call_end) = find_block(&src, COMPAT32_CALL, program_start);
+        let (_, else_block, _) = find_block(&src, "else", call_end);
+
+        let filed = program_start
+            + src[program_start..]
+                .find("if (!should_trace(&p))")
+                .unwrap_or_else(|| panic!("{program} lost its should_trace() call"));
+        assert!(
+            filed < call,
+            "{program} must filter with should_trace() before it picks registers, \
+             otherwise the register selector is being used as a filter"
+        );
+
+        for (branch, block) in [("compat32", then_block), ("64-bit", else_block)] {
+            assert!(
+                !block.contains("return"),
+                "{program}: the {branch} branch must not return — returning here is \
+                 the architecture gate that was removed because it caused zero events"
+            );
+            assert!(
+                !block.contains("should_trace") && !block.contains("bpf_map_lookup_elem"),
+                "{program}: the {branch} branch must only touch registers, never filter"
+            );
+        }
+    }
+}
+
+/// `is_current_task_compat32()` has to live in `ebpf/common/task.h`: keeping it
+/// there is what allows `ebpf/syscall.c` to stay free of `_TIF_32BIT` /
+/// `thread_info.flags` / `__TARGET_ARCH_arm` (see `syscall_c_has_no_arch_gate`).
+/// It must also stay a pure register selector.
+#[test]
+fn task_h_exposes_a_compat32_register_selector_not_a_filter() {
+    let src = strip_c_comments(&read_ebpf("common/task.h"));
+    let signature = "static __always_inline bool is_current_task_compat32(void)";
+    let (_, body, _) = find_block(&src, signature, 0);
+
+    // arm build: every target is 32-bit, so it answers without touching flags.
+    let arm_if = "#if defined(__TARGET_ARCH_arm)";
+    let arm_start = body
+        .find(arm_if)
+        .unwrap_or_else(|| panic!("task.h helper lost its {arm_if} branch"));
+    let arm_else = body.find("#else").expect("task.h helper lost its #else");
+    let arm_endif = body.find("#endif").expect("task.h helper lost its #endif");
+    let arm_branch = &body[arm_start + arm_if.len()..arm_else];
+    assert!(
+        arm_branch.contains("return true;"),
+        "on arm every target is 32-bit, the helper must return true"
+    );
+    assert!(
+        !arm_branch.contains("flags"),
+        "on arm the helper must not read thread_info.flags (bit 22 is always 0 there)"
+    );
+
+    // other builds: the *target task*'s own ABI decides, not the host binary.
+    let compat_branch = &body[arm_else..arm_endif];
+    for needle in [
+        "bpf_get_current_task()",
+        "thread_info.flags",
+        "_TIF_32BIT",
+        "return false;",
+    ] {
+        assert!(
+            compat_branch.contains(needle),
+            "the non-arm branch must read the target's ABI via {needle:?}"
+        );
+    }
+
+    for forbidden in ["bpf_map_lookup_elem", "should_trace", "return 0"] {
+        assert!(
+            !body.contains(forbidden),
+            "is_current_task_compat32() must stay a register selector: found {forbidden:?}"
+        );
+    }
+
+    // Both eBPF programs reach the helper through the shared context header.
+    let context_header = strip_c_comments(&read_ebpf("common/context.h"));
+    assert!(
+        context_header.contains("common/task.h"),
+        "ebpf/common/context.h must keep including common/task.h, otherwise \
+         syscall.c/stack.c cannot see the helper"
+    );
+}
+
+/// `_TIF_32BIT` is the map/flag contract between the C predicate and the Rust
+/// side (`contract::consts::_TIF_32BIT`); `thread_info.flags` bit numbering must
+/// match or the predicate silently reads a different bit.
+#[test]
+fn tif_32bit_define_matches_the_rust_contract() {
+    use stackplz::contract::consts as c;
+
+    let header = parse_defines(&read_ebpf("common/consts.h"));
+    let expr = header
+        .get("_TIF_32BIT")
+        .unwrap_or_else(|| panic!("ebpf/common/consts.h lost its _TIF_32BIT define"));
+    assert!(
+        expr.contains("<<"),
+        "_TIF_32BIT must remain a shift expression (bit 22), got {expr:?}"
+    );
+    assert_eq!(
+        eval_define("_TIF_32BIT", &header, 0),
+        u64::from(c::_TIF_32BIT),
+        "_TIF_32BIT differs between ebpf/common/consts.h and contract::consts"
+    );
+    assert_eq!(c::_TIF_32BIT, 1 << 22, "arm64 thread_info.flags bit 22");
 }

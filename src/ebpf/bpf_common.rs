@@ -19,19 +19,58 @@ pub const STACK_OBJ: &[u8] = include_bytes!("../../ebpf/bpf/stack.o");
 /// `-D__MODULE_SYSCALL` (dev branch renamed `raw_syscalls.c` -> `syscall.c`).
 #[cfg(feature = "embedded_bpf")]
 pub const SYSCALL_OBJ: &[u8] = include_bytes!("../../ebpf/bpf/syscall.o");
-/// Embedded perf_mmap eBPF object (stub in dev; compiled from
-/// `ebpf/perf_mmap.c`).
-#[cfg(feature = "embedded_bpf")]
-pub const PERF_MMAP_OBJ: &[u8] = include_bytes!("../../ebpf/bpf/perf_mmap.o");
-
 // When the .o files aren't built yet, expose placeholder slices so the code
 // compiles without `embedded_bpf` (the real loader is Linux-only anyway).
 #[cfg(not(feature = "embedded_bpf"))]
 pub const STACK_OBJ: &[u8] = b"<stack.o not built; run the ebpf build step>";
 #[cfg(not(feature = "embedded_bpf"))]
 pub const SYSCALL_OBJ: &[u8] = b"<syscall.o not built; run the ebpf build step>";
-#[cfg(not(feature = "embedded_bpf"))]
-pub const PERF_MMAP_OBJ: &[u8] = b"<perf_mmap.o not built; run the ebpf build step>";
+
+// The `perf_mmap` module and its embedded `perf_mmap.o` were deleted in this
+// round (report W10): the module had no scheduler in this crate, so the
+// bytecode was never loaded. The upstream-owned C source `ebpf/perf_mmap.c`
+// stays untouched.
+
+/// Wire size of the `arg_filter` map value (`arg_filter_t`, `ebpf/types.h`).
+/// Taken from the contract struct so the two can never drift:
+/// `u32 filter_type; char str_val[256]; u32 str_len; u64 num_val;` = 272.
+pub const ARG_FILTER_WIRE_SIZE: usize = std::mem::size_of::<crate::contract::types::ArgFilter>();
+
+/// Serialize one [`crate::config::ArgFilter`] into the exact 272-byte
+/// `arg_filter_t` map value (`ebpf/types.h`):
+///
+/// ```c
+/// typedef struct arg_filter {
+///     u32 filter_type;
+///     char str_val[256];
+///     u32 str_len;
+///     u64 num_val;
+/// } arg_filter_t;
+/// ```
+///
+/// Fields are laid out explicitly (instead of relying on a `Pod` impl for
+/// `config::EArgFilter`) so a future change to that struct is caught by
+/// `arg_filter_wire_value_matches_the_contract_struct` rather than silently
+/// corrupting the map value. Natural alignment keeps the layout dense:
+/// `num_val` starts at offset 264, which is 8-aligned, so there is no gap.
+pub fn arg_filter_wire_bytes(filter: &crate::config::ArgFilter) -> [u8; ARG_FILTER_WIRE_SIZE] {
+    let e = filter.to_ebpf_value();
+    let mut out = [0u8; ARG_FILTER_WIRE_SIZE];
+    out[0..4].copy_from_slice(&e.filter_type.to_ne_bytes());
+    out[4..4 + crate::contract::MAX_STRCMP_LEN].copy_from_slice(&e.str_val);
+    let str_len_off = 4 + crate::contract::MAX_STRCMP_LEN;
+    out[str_len_off..str_len_off + 4].copy_from_slice(&e.str_len.to_ne_bytes());
+    out[str_len_off + 4..str_len_off + 12].copy_from_slice(&e.num_val.to_ne_bytes());
+    out
+}
+
+/// The `child_parent_map` seed pairs for a pid whitelist. Upstream
+/// `MStack.update_child_parent()` (`stack.go:261-267`) writes each pid as its
+/// own parent (`key = pid, value = pid`), which `ebpf/stack.c` then extends on
+/// `sched_process_fork`.
+pub fn child_parent_pairs(pids: &[u32]) -> Vec<(u32, u32)> {
+    pids.iter().map(|&pid| (pid, pid)).collect()
+}
 
 /// Resolve a dynamic symbol name to its file offset inside an ELF shared
 /// object. Replaces what `ebpfmanager`'s `AttachToFuncName` did internally
@@ -191,13 +230,20 @@ pub mod linux {
     }
 
     /// Write the `base_config` map (key 0). Contains stackplz's own PID
-    /// (for self-filtering) and whether a thread whitelist is active.
-    /// Mirrors Go's `update_base_config()` in `stack.go:207-213`.
-    pub fn write_base_config(obj: &Object, stackplz_pid: u32) -> Result<()> {
+    /// (for self-filtering) and whether a thread *whitelist* is active.
+    /// Mirrors Go's `update_base_config()` (`stack.go:207-213`) +
+    /// `ModuleConfig.GetConfigMap()` (`config_module.go:999-1010`): the field
+    /// is `1` iff at least one thread name was whitelisted (dev does not count
+    /// the default blacklist here).
+    pub fn write_base_config(
+        obj: &Object,
+        stackplz_pid: u32,
+        thread_whitelist: bool,
+    ) -> Result<()> {
         use crate::contract::types::ConfigEntry;
         let config = ConfigEntry {
             stackplz_pid,
-            thread_whitelist: 0,
+            thread_whitelist: if thread_whitelist { 1 } else { 0 },
         };
         write_map(obj, "base_config", &0u32, &config)
     }
@@ -237,6 +283,9 @@ pub mod linux {
     /// Used for uid/pid/tid white+blacklists.
     /// Mirrors Go's `update_common_list()` in `stack.go:215-235`.
     pub fn write_common_list(obj: &Object, items: &[u32], offset: u32) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
         let map = obj
             .maps()
             .find(|m| m.name() == "common_list")
@@ -246,6 +295,74 @@ pub mod linux {
             let key_bytes = key.to_ne_bytes();
             let val_bytes = key.to_ne_bytes();
             map.update(&key_bytes, &val_bytes, MapFlags::ANY)?;
+        }
+        Ok(())
+    }
+
+    /// Write every `(offset, items)` segment into `common_list`.
+    /// Mirrors `MStack.update_common_filter()` (`stack.go:245-259`), which
+    /// always writes all six uid/pid/tid white+blacklist segments.
+    pub fn write_common_lists(obj: &Object, segments: &[(u32, &[u32])]) -> Result<()> {
+        for (offset, items) in segments {
+            write_common_list(obj, items, *offset)?;
+        }
+        Ok(())
+    }
+
+    /// Seed `child_parent_map` with each pid whitelist entry (`key = pid`,
+    /// `value = pid`). The C fork handler in `ebpf/stack.c` extends it.
+    /// Mirrors `MStack.update_child_parent()` (`stack.go:261-267`).
+    pub fn write_child_parent_map(obj: &Object, pids: &[u32]) -> Result<()> {
+        if pids.is_empty() {
+            return Ok(());
+        }
+        let map = obj
+            .maps()
+            .find(|m| m.name() == "child_parent_map")
+            .ok_or_else(|| anyhow!("cannot find child_parent_map"))?;
+        for (key, value) in super::child_parent_pairs(pids) {
+            map.update(&key.to_ne_bytes(), &value.to_ne_bytes(), MapFlags::ANY)?;
+        }
+        Ok(())
+    }
+
+    /// Write the `thread_filter` map from `(key, value)` entries built by
+    /// [`crate::config::StackConfig::thread_filter_entries`].
+    /// The key is the 16-byte `thread_name_t`; the value is
+    /// `THREAD_NAME_WHITELIST`/`THREAD_NAME_BLACKLIST`.
+    /// Mirrors `MStack.update_thread_filter()` (`stack.go:269-317`).
+    pub fn write_thread_filter(
+        obj: &Object,
+        entries: &[(crate::contract::types::ThreadName, u32)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let map = obj
+            .maps()
+            .find(|m| m.name() == "thread_filter")
+            .ok_or_else(|| anyhow!("cannot find thread_filter map"))?;
+        for (key, value) in entries {
+            map.update(bytemuck::bytes_of(key), &value.to_ne_bytes(), MapFlags::ANY)?;
+        }
+        Ok(())
+    }
+
+    /// Write the `arg_filter` map (key = `filter_index` u64, value =
+    /// 272-byte `arg_filter_t`). Mirrors `MStack.update_arg_filter()`
+    /// (`stack.go:318-339`), which pushes every `config.GetFilters()` entry.
+    pub fn write_arg_filter(obj: &Object, filters: &[crate::config::ArgFilter]) -> Result<()> {
+        if filters.is_empty() {
+            return Ok(());
+        }
+        let map = obj
+            .maps()
+            .find(|m| m.name() == "arg_filter")
+            .ok_or_else(|| anyhow!("cannot find arg_filter map"))?;
+        for filter in filters {
+            let key = (filter.filter_index as u64).to_ne_bytes();
+            let value = super::arg_filter_wire_bytes(filter);
+            map.update(&key, &value, MapFlags::ANY)?;
         }
         Ok(())
     }
@@ -271,5 +388,88 @@ mod tests {
         // Parse this Cargo.toml as a stand-in non-ELF file; should error.
         let bytes = b"not an elf";
         assert!(resolve_symbol_offset(bytes, "anything").is_err());
+    }
+
+    /// `child_parent_map` seeding: upstream writes each pid whitelist entry as
+    /// its own parent (`key = pid, value = pid`), in list order.
+    #[test]
+    fn child_parent_seeds_each_pid_as_its_own_parent() {
+        assert!(child_parent_pairs(&[]).is_empty());
+        assert_eq!(
+            child_parent_pairs(&[1234, 5678]),
+            vec![(1234, 1234), (5678, 5678)]
+        );
+    }
+
+    /// `arg_filter_t` is 272 bytes with the C field layout
+    /// (`u32` @0, `char[256]` @4, `u32` @260, `u64` @264).
+    #[test]
+    fn arg_filter_wire_value_matches_the_contract_struct() {
+        use crate::config::filter::FilterHelper;
+        use std::mem::{offset_of, size_of};
+
+        assert_eq!(ARG_FILTER_WIRE_SIZE, 272);
+        assert_eq!(size_of::<crate::contract::types::ArgFilter>(), 272);
+        assert_eq!(
+            offset_of!(crate::contract::types::ArgFilter, filter_type),
+            0
+        );
+        assert_eq!(offset_of!(crate::contract::types::ArgFilter, str_val), 4);
+        assert_eq!(offset_of!(crate::contract::types::ArgFilter, str_len), 260);
+        assert_eq!(offset_of!(crate::contract::types::ArgFilter, num_val), 264);
+
+        let mut helper = FilterHelper::new();
+        helper.add_filter("eq:0x100").unwrap();
+        helper.add_filter("w:/data").unwrap();
+        for (i, filter) in helper.get_filters().iter().enumerate() {
+            let bytes = arg_filter_wire_bytes(filter);
+            assert_eq!(bytes.len(), ARG_FILTER_WIRE_SIZE);
+
+            // Byte-for-byte identical to the contract struct with the same
+            // fields (authoritative C layout, checked by its own tests).
+            let e = filter.to_ebpf_value();
+            let contract = crate::contract::types::ArgFilter {
+                filter_type: e.filter_type,
+                str_val: e.str_val,
+                str_len: e.str_len,
+                num_val: e.num_val,
+            };
+            assert_eq!(
+                bytes.as_slice(),
+                bytemuck::bytes_of(&contract),
+                "filter {i}"
+            );
+
+            // And the key is the 1-based filter index.
+            assert_eq!(filter.filter_index, (i + 1) as u32);
+        }
+    }
+
+    /// The two mapped filters keep their parsed values in the wire bytes.
+    #[test]
+    fn arg_filter_wire_value_carries_type_and_values() {
+        use crate::config::filter::{FilterHelper, BLACKLIST_FILTER, EQUAL_FILTER};
+
+        let mut helper = FilterHelper::new();
+        helper.add_filter("eq:100").unwrap();
+        helper.add_filter("b:abc").unwrap();
+        let filters = helper.get_filters();
+
+        let eq = arg_filter_wire_bytes(&filters[0]);
+        assert_eq!(
+            u32::from_ne_bytes(eq[0..4].try_into().unwrap()),
+            EQUAL_FILTER
+        );
+        assert_eq!(u64::from_ne_bytes(eq[264..272].try_into().unwrap()), 100);
+
+        let bl = arg_filter_wire_bytes(&filters[1]);
+        assert_eq!(
+            u32::from_ne_bytes(bl[0..4].try_into().unwrap()),
+            BLACKLIST_FILTER
+        );
+        assert_eq!(&bl[4..7], b"abc");
+        assert_eq!(u32::from_ne_bytes(bl[260..264].try_into().unwrap()), 3);
+        // str_val tail stays zeroed.
+        assert!(bl[7..260].iter().all(|b| *b == 0));
     }
 }

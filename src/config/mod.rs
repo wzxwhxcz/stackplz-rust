@@ -13,14 +13,17 @@ pub mod file_parser;
 pub mod filter;
 pub mod global;
 pub mod hook_json;
-pub mod perf_mmap;
 pub mod point_arg;
 pub mod point_parser;
 pub mod sconfig;
 pub mod stack;
 pub mod syscall;
+pub mod syscall_points;
+pub mod syscall_select;
 pub mod target;
+pub mod thread_blacklist;
 
+pub use crate::cli::root::{ResolvedFilters, TidBlacklist};
 pub use file_parser::{
     load_syscall_config, load_uprobe_config, FileConfig, ParamConfig, PointConfig,
     SyscallFileConfig, SyscallPointConfig, UprobeFileConfig,
@@ -33,12 +36,14 @@ pub use filter::{
     BLACKLIST_FILTER, EQUAL_FILTER, GREATER_FILTER, LESS_FILTER, REPLACE_FILTER, UNKNOWN_FILTER,
     WHITELIST_FILTER,
 };
-pub use global::GlobalConfig;
+pub use global::{GlobalConfig, MAX_LIST_COUNT};
 pub use hook_json::{BaseHookConfig, HookConfig, LibHookConfig};
-pub use perf_mmap::PerfMmapConfig;
 pub use point_arg::{PointArg, UprobeArgs, EBPF_SYS_ENTER, EBPF_UPROBE_ENTER};
 pub use point_parser::{parse_arg_type, parse_hook_point};
 pub use sconfig::{SConfig, StackFilter, SyscallFilter, MAX_TID_BLACKLIST_COUNT};
 pub use stack::{ProbeConfig, StackConfig};
 pub use syscall::SyscallConfig;
+pub use syscall_points::{SyscallPoint, SyscallPointOpConfig, SyscallPointTable};
+pub use syscall_select::{select as select_syscalls, SyscallSelection};
 pub use target::TargetConfig;
+pub use thread_blacklist::{default_thread_blacklist, thread_filter_key, validate_thread_name};

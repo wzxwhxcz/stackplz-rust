@@ -20,7 +20,7 @@
 | **eBPF 模块** | ✅ 4/4 完整迁移 (syscall/uprobe/brk/perf_mmap) |
 | **数据结构** | ✅ 11/11 完全一致 |
 | **高级功能** | ✅ 信号控制/dump/RPC/硬件断点 |
-| **单元测试** | ✅ 182 个通过 |
+| **单元测试** | ✅ 304 个通过（254 lib + 33 contracts + 17 ebpf_sources） |
 | **CI/CD** | ✅ GitHub Actions (Ubuntu + Android) |
 | **代码质量** | ✅ clippy 0 warnings + rustfmt |
 | **文档覆盖** | ✅ 15,700+ 行完整文档 |
@@ -37,10 +37,10 @@
 | **资产嵌入** | `go-bindata` | `include_bytes!` | 编译期嵌入 |
 | **配置解析** | `encoding/json` | `serde` + `serde_json` | 强类型安全 |
 | **ELF 解析** | `ebpfmanager` 内部 | `object` crate | 跨平台支持 |
-| **eBPF C 源** | dev 分支 | **原样复制**（19 个文件） | 100% 兼容 |
+| **eBPF C 源** | dev 分支 | **12/19 逐字节相同**；6 个文件承载两轮有意修复，1 个（`common/arch.h`）删死宏 | 修复点均为有意偏差 |
 | **内存安全** | ⚠️ 运行时检查 | ✅ 编译期保证 | 零 null 指针 |
 | **并发安全** | ⚠️ 运行时检查 | ✅ Send/Sync 编译期保证 | 零数据竞争 |
-| **单元测试** | ❌ 未知 | ✅ 182 个 | 高质量保证 |
+| **单元测试** | ❌ 未知 | ✅ 304 个（254+33+17） | 高质量保证 |
 | **文档** | ❌ 部分 | ✅ 完整 rustdoc | 15,700+ 行 |
 
 ---
@@ -52,7 +52,7 @@ stackplz-rust/
 ├── Cargo.toml              # 依赖配置 (libbpf-rs 0.27.0 + clap 4.5 + serde)
 ├── build.rs                # 构建脚本：clang 编译 eBPF C -> .o
 ├── build_env.sh            # 环境准备：libbpf + bpftool + BTF
-├── ebpf/                   # eBPF C 源码（dev 分支原样复制）
+├── ebpf/                   # eBPF C 源码（dev 基线；19 个文件中 12 个逐字节相同）
 │   ├── stack.c             # uprobe handler (probe_stack_0..5)
 │   ├── syscall.c           # raw_tracepoint/sys_enter + sys_exit
 │   ├── perf_mmap.c         # perf_mmap 事件监控
@@ -93,7 +93,7 @@ stackplz-rust/
 通过 GitHub Actions 自动构建（`.github/workflows/build.yml`）：
 - **Ubuntu 构建**：x86_64 Linux
 - **Android 构建**：aarch64/armv7 交叉编译
-- **质量检查**：182 个单元测试 + clippy + rustfmt
+- **质量检查**：304 个测试（254 lib + 33 contracts + 17 ebpf_sources）+ clippy + rustfmt
 
 ### 手动构建
 
@@ -105,7 +105,8 @@ stackplz-rust/
 cargo build --release --features embedded_bpf --target aarch64-linux-android
 
 # 3. 运行测试
-cargo test --lib                  # 182 个单元测试
+cargo test --lib                  # 253 个 lib 单元测试
+cargo test                        # 全量 304 个（254 + 33 + 17）
 cargo clippy                      # 静态检查
 ```
 
@@ -271,8 +272,12 @@ open[str]s                     # 绑定到 syscall
 ## 🧪 测试
 
 ```bash
-# 单元测试（182 个）
+# 单元测试（lib 253 个）
 cargo test --lib
+
+# 集成测试（contracts 33 个 + eBPF C↔Rust 交叉锁 12 个）
+cargo test --test contracts
+cargo test --test ebpf_sources
 
 # 代码质量检查
 cargo clippy --all-targets --all-features -- -D warnings
@@ -283,6 +288,11 @@ cargo fmt --check
 # 生成文档
 cargo doc --no-deps --open
 ```
+
+**全量口径：304 个测试通过 = 254 lib + 33 contracts + 17 ebpf_sources**
+（对照报告记录的三轮修复前基线是 243 = 198 + 33 + 12；第三轮 W1–W19 修复新增
+lib 测试、并补齐 5 条 eBPF C↔Rust 交叉锁后为 304。数字随轮次变化，**准确数字以
+`DONE.md` 第三轮记录为准**。）
 
 **测试覆盖详情：**
 - `contract` 模块: 50+ 测试（数据结构字节布局验证）
@@ -315,7 +325,7 @@ cargo doc --no-deps --open
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| **eBPF C 源码** | ✅ 100% | 19 个文件原样复制，零改动 |
+| **eBPF C 源码** | ✅ 基线一致 | 12/19 逐字节相同；6 个文件承载两轮有意修复，1 个（`common/arch.h`）删死宏 |
 | **CLI 参数** | ✅ 100% | 48/48 参数完整实现 |
 | **eBPF 契约层** | ✅ 100% | 11 个结构体 + 枚举 + 常量 + TLV 解码 |
 | **argtype 系统** | ✅ 100% | 34 个 op + 57 个类型 + 注册表 |

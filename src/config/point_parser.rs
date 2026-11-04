@@ -12,43 +12,61 @@ use crate::argtype::{
 use anyhow::{anyhow, Result};
 
 /// arm64 register name → index. Mirrors `common/const_forarm64.go:GetRegIndex`.
-fn get_reg_index(name: &str) -> u32 {
-    match name {
-        "x0" => 0,
-        "x1" => 1,
-        "x2" => 2,
-        "x3" => 3,
-        "x4" => 4,
-        "x5" => 5,
-        "x6" => 6,
-        "x7" => 7,
-        "x8" => 8,
-        "x9" => 9,
-        "x10" => 10,
-        "x11" => 11,
-        "x12" => 12,
-        "x13" => 13,
-        "x14" => 14,
-        "x15" => 15,
-        "x16" => 16,
-        "x17" => 17,
-        "x18" => 18,
-        "x19" => 19,
-        "x20" => 20,
-        "x21" => 21,
-        "x22" => 22,
-        "x23" => 23,
-        "x24" => 24,
-        "x25" => 25,
-        "x26" => 26,
-        "x27" => 27,
-        "x28" => 28,
-        "x29" => 29,
+/// aarch64 register names → sample index. Mirrors `RegsNameMap`
+/// (`user/common/const.go:107-140`): x0..x29 = 0..29, lr = 30, sp = 31, pc = 32.
+fn aarch64_reg_index(name: &str) -> Option<u32> {
+    let index = match name {
         "lr" => 30,
         "sp" => 31,
         "pc" => 32,
-        _ => panic!("ParseAsReg failed =>{name}<="),
-    }
+        _ => {
+            let rest = name.strip_prefix('x')?;
+            let index: u32 = rest.parse().ok()?;
+            if index > 29 {
+                return None;
+            }
+            index
+        }
+    };
+    Some(index)
+}
+
+/// arm32 register names → sample index. Mirrors `RegsArmNameMap`
+/// (`user/common/const.go:51-67`): r0..r10 = 0..10, fp = 11, ip = 12,
+/// sp = 13, lr = 14, pc = 15.
+fn arm_reg_index(name: &str) -> Option<u32> {
+    let index = match name {
+        "fp" => 11,
+        "ip" => 12,
+        "sp" => 13,
+        "lr" => 14,
+        "pc" => 15,
+        _ => {
+            let rest = name.strip_prefix('r')?;
+            let index: u32 = rest.parse().ok()?;
+            if index > 10 {
+                return None;
+            }
+            index
+        }
+    };
+    Some(index)
+}
+
+/// Resolve a register name, arch-selected like upstream's build tags:
+/// `GetRegIndex` uses `RegsNameMap` on arm64 and `RegsArmNameMap` on arm
+/// (`user/common/const_forarm64.go:8` / `const_forarm.go:8`).
+///
+/// The arm names are additionally accepted on 64-bit hosts (after the aarch64
+/// ones, so `sp`/`lr`/`pc` keep their aarch64 indices) because the aarch32
+/// point table is embedded in every build and must stay parseable there.
+fn get_reg_index(name: &str) -> u32 {
+    let resolved = if cfg!(target_pointer_width = "32") {
+        arm_reg_index(name).or_else(|| aarch64_reg_index(name))
+    } else {
+        aarch64_reg_index(name).or_else(|| arm_reg_index(name))
+    };
+    resolved.unwrap_or_else(|| panic!("ParseAsReg failed =>{name}<="))
 }
 
 /// Parse a number string that may be hex (0x-prefixed) or decimal.

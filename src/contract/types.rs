@@ -47,7 +47,7 @@ pub struct EventContext {
 /// 24 bytes: the five original `u32`s (0..20) plus `no_filter_allow` at 20.
 /// Appending at offset 20 keeps every pre-existing field at its old offset.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CommonFilter {
     pub is_32bit: u32,
     pub trace_mode: u32,
@@ -62,7 +62,7 @@ pub struct CommonFilter {
 
 /// `config_entry_t` — global config (map `base_config`, key 0). 8 bytes.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ConfigEntry {
     pub stackplz_pid: u32,
     pub thread_whitelist: u32,

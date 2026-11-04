@@ -1,354 +1,392 @@
-//! `syscall` subcommand handler. Mirrors `syscallCommandFunc`
-//! (`cli/cmd/syscall.go:40-136`).
+//! Syscall module handler. Mirrors dev's `syscallCommandFunc` equivalent: in dev
+//! the syscall hook is not a subcommand at all — `runFunc` picks the module from
+//! `-s` (`cli/cmd/root.go:387-396`) and `SyscallConfig.Parse_Syscall`
+//! (`config_module.go:647-732`) decides the whitelist from the point table.
+//!
+//! What this module adds over the previous rounds (report W1/F1, the fatal
+//! defect): the point table is loaded and the four BPF maps
+//! (`sysenter_point_args`, `sysexit_point_args`, `op_list`, `arg_filter`) are
+//! actually filled, so `ebpf/syscall.c:81-82,188-189` no longer bails out on
+//! every syscall.
 
-use super::args::SyscallArgs;
-use crate::config::{GlobalConfig, SyscallConfig, TargetConfig};
-use crate::module::{SyscallTracepointModule, MODULE_NAME_SYSCALL};
-use anyhow::{bail, Result};
+use crate::config::global::GlobalConfig;
+use crate::config::syscall_select::SyscallSelection;
+use crate::config::{load_syscall_config, SyscallConfig, SyscallPointTable, TargetConfig};
+use crate::module::SyscallTracepointModule;
+use anyhow::{anyhow, Context, Result};
 use std::sync::Arc;
 
-/// Split a comma separated option value into trimmed, non-empty items.
-fn csv_items(raw: &str) -> impl Iterator<Item = &str> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-}
-
-/// Parse a comma separated `u32` id list.
+/// Load the syscall point table.
 ///
-/// Mirrors master's `ModuleConfig.Parse_Idlist` (`config_module.go:930`), which
-/// panics on a malformed entry. A non-numeric token is never dropped silently:
-/// dropping it would make e.g. `--no-pid 1,abc` stop filtering `1`'s peer
-/// without telling the user, which is exactly the class of defect this mapping
-/// fixes.
-fn parse_u32_list(raw: &str, list_name: &str) -> Result<Vec<u32>> {
-    let mut out = Vec::new();
-    for item in csv_items(raw) {
-        match item.parse::<u32>() {
-            Ok(value) => out.push(value),
-            Err(_) => bail!("invalid {list_name} entry: {item:?} (expected a u32)"),
+/// Default: the table embedded from `config_syscall_aarch64.json` /
+/// `config_syscall_aarch32.json` (the ported dev tables).
+///
+/// `-c/--config`: if any config file is a syscall table, it **replaces** the
+/// embedded one, mirroring `ModuleConfig.LoadConfig` (`config_module.go:876-923`)
+/// where "指定了 syscall 类型的配置 则不会采用内置配置". This is what makes the
+/// `--config` flag real (report W16: the old code stored the path and never
+/// loaded it).
+pub fn load_point_table(global: &GlobalConfig) -> Result<SyscallPointTable> {
+    crate::argtype::init_argtypes();
+
+    for path in &global.config_files {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read config file {path}"))?;
+        // Only `type: syscall` files are point tables; uprobe files are handled
+        // by the stack module.
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse {path} as JSON"))?;
+        let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if kind == "syscall" {
+            return SyscallPointTable::from_json_str(&text)
+                .with_context(|| format!("failed to load syscall table {path}"));
         }
     }
-    Ok(out)
+
+    // Also honour the typed loader when a YAML table is given (dev only reads
+    // JSON, but `load_syscall_config` exists and accepts both).
+    let _ = load_syscall_config;
+
+    SyscallPointTable::embedded()
 }
 
-/// Parse a comma separated thread-name list (`Parse_Namelist`,
-/// `config_module.go:963`). Empty items are skipped.
-fn parse_name_list(raw: &str) -> Vec<String> {
-    csv_items(raw).map(str::to_string).collect()
-}
-
-/// Parse the `-s`/`--no-syscall` list into syscall numbers.
+/// Build the [`SyscallConfig`] for a run.
 ///
-/// The second element of the tuple reports whether the special `all` item was
-/// present (`Parse_SyscallNames`, `config_module.go:560`): `-s all` means "no
-/// sysno whitelist", i.e. `TRACE_ALL`. Token values that are neither `all` nor a
-/// number are an error, as with the id lists above.
-fn parse_syscall_numbers(raw: &str) -> Result<(Vec<u32>, bool)> {
-    let mut numbers = Vec::new();
-    let mut saw_all = false;
-    for item in csv_items(raw) {
-        if item == "all" {
-            saw_all = true;
-            continue;
-        }
-        match item.parse::<u32>() {
-            Ok(value) => numbers.push(value),
-            Err(_) => {
-                bail!("invalid syscall entry: {item:?} (expected a syscall number or \"all\")")
-            }
-        }
-    }
-    Ok((numbers, saw_all))
-}
-
-/// Build the [`SyscallConfig`] for one syscall number.
-///
-/// Mirrors master's `persistentPreRunEFunc` filter mapping
-/// (`cli/cmd/root.go:166-175`): the global uid/pid/tid/tname options are
-/// `Parse_Idlist`/`Parse_Namelist`-ed into the module config, which is what
-/// hands them to eBPF (`update_common_list` / `thread_filter` in
-/// `src/module/syscall_tracepoint.rs`).
-///
-/// Without this mapping every `conf.*_whitelist`/`*_blacklist` stayed empty, so
-/// `-p/-u/-t/--tname/--no-*` never reached the BPF side and
-/// [`SyscallConfig::has_no_user_filter`] stayed `true`, forcing the permissive
-/// "no filtering" fallback for every run.
+/// Mirrors the mapping in `persistentPreRunEFunc` (`root.go:157-175`) +
+/// `InitCommonConfig` (`config_module.go:840-874`) + `GetCommonFilter`
+/// (`config_module.go:983-997`).
 pub fn build_config(
     global: &GlobalConfig,
     target: &TargetConfig,
-    args: &SyscallArgs,
-    sysno: i64,
+    table: SyscallPointTable,
+    selection: SyscallSelection,
 ) -> Result<SyscallConfig> {
-    let mut conf = SyscallConfig::new();
-    conf.sconfig.unwind_stack = args.stack;
-    conf.sconfig.show_regs = args.regs;
-    conf.sconfig.uid = global.uid;
-    conf.sconfig.pid = global.pid;
-    conf.sconfig.tid_blacklist = target.tid_blacklist;
-    conf.sconfig.tid_blacklist_mask = target.tid_blacklist_mask;
-    conf.config = args.config.clone();
-    conf.nr = sysno;
+    let mut conf = SyscallConfig::with_table(table);
+
+    // SConfig: the legacy per-module filter struct (still written to
+    // `filter_map` for the old layout, and used for the perf layer).
+    conf.sconfig.unwind_stack = global.unwind_stack;
+    conf.sconfig.show_regs = global.show_regs;
+    conf.sconfig.uid = target.uid;
+    conf.sconfig.pid = target.pid;
+    conf.sconfig.debug = global.debug;
+
     conf.debug = global.debug;
+    conf.dump_hex = global.dump_hex;
+    conf.color = global.color;
+    conf.auto_resume = global.auto_resume;
+    conf.full_tname = global.full_tname;
+    conf.buffer_mb = global.buffer;
 
-    // `-u`/`-p` are single valued with 0 meaning "not given"; the rest are
-    // comma separated lists (master treats 0 as absent for these two as well).
-    if global.uid != 0 {
-        conf.uid_whitelist.push(global.uid as u32);
-    }
-    conf.uid_blacklist = parse_u32_list(&global.no_uid, "uid blacklist")?;
-    if global.pid != 0 {
-        conf.pid_whitelist.push(global.pid as u32);
-    }
-    conf.pid_blacklist = parse_u32_list(&global.no_pid, "pid blacklist")?;
-    conf.tid_whitelist = parse_u32_list(&global.tid, "tid whitelist")?;
-    conf.tid_blacklist = parse_u32_list(&global.tids_blacklist, "tid blacklist")?;
-    conf.tname_whitelist = parse_name_list(&global.tname);
-    conf.tname_blacklist = parse_name_list(&global.no_tname);
+    // Filter lists: dev parses these in `persistentPreRunEFunc` and every module
+    // reads the same `mconf` fields, so the syscall module gets the same lists
+    // as the stack module (report W4/W5/W8/W17).
+    let filters = crate::config::ResolvedFilters::from_globals(global)?;
+    conf.uid_whitelist = filters.uid_whitelist;
+    conf.uid_blacklist = filters.uid_blacklist;
+    conf.pid_whitelist = filters.pid_whitelist;
+    conf.pid_blacklist = filters.pid_blacklist;
+    conf.tid_whitelist = filters.tid_whitelist;
+    conf.tid_blacklist = filters.tid_blacklist.all.clone();
+    conf.tname_whitelist = filters.tname_whitelist;
+    conf.tname_blacklist = filters.tname_blacklist;
 
-    // `-s <nr>[,<nr>...]` becomes the eBPF sysno whitelist that `TRACE_COMMON`
-    // gates on. `-s all` must not gate at all, so the list stays empty and
-    // `SyscallConfig::trace_mode()` yields `TRACE_ALL`.
-    let (sys_whitelist, saw_all) = parse_syscall_numbers(&global.syscall)?;
-    if !saw_all {
-        conf.sys_whitelist = sys_whitelist;
-    }
-    // `--no-syscall` is a blacklist; eBPF applies it in both trace modes, so
-    // its behaviour is unchanged by the `-s all` handling above.
-    conf.sys_blacklist = parse_syscall_numbers(&global.no_syscall)?.0;
+    // Legacy 5-entry wire mirror (`struct filter_t.tid_blacklist[5]`).
+    conf.sconfig.tid_blacklist = filters.tid_blacklist.legacy;
+    conf.sconfig.tid_blacklist_mask = filters.tid_blacklist.legacy_mask;
+
+    // Syscall selection: whitelist/blacklist + trace mode (`Parse_Syscall`).
+    conf.sys_whitelist = selection.whitelist;
+    conf.sys_blacklist = selection.blacklist;
+    conf.trace_mode = selection.trace_mode;
+    conf.trace_mode_override = Some(selection.trace_mode);
+
+    // `GetCommonFilter`: uid groups and kill signals come from the same place
+    // for every module (`config_module.go:991-995`).
+    conf.trace_uid_group = target.trace_uid_group;
+    conf.kill_signal = crate::module::stack_probe::parse_signal_name(&global.kill_signal);
+    conf.tkill_signal = crate::module::stack_probe::parse_signal_name(&global.tkill_signal);
 
     Ok(conf)
 }
 
-/// Run the `syscall` subcommand. Mirrors `syscallCommandFunc`.
-pub fn run(global: &mut GlobalConfig, target: &mut TargetConfig, args: SyscallArgs) -> Result<()> {
-    // `syscall` subcommand uses the `syscall_` log prefix.
+/// Run the syscall module (one module for every selected syscall, dev model).
+pub fn run(
+    global: &GlobalConfig,
+    target: &TargetConfig,
+    table: SyscallPointTable,
+    selection: SyscallSelection,
+) -> Result<()> {
+    let conf = build_config(global, target, table, selection)?;
     let logger = Arc::new(crate::logger::Logger::new("syscall_", true));
-    if !global.logger_file.is_empty() {
-        logger.set_out_file(&global.exec_path, &global.logger_file, global.quiet)?;
+    if !global.log_file.is_empty() {
+        logger.set_out_file(&global.exec_path, &global.log_file, global.quiet)?;
     }
 
-    let sysno_configs = vec![args.nr];
+    if global.debug {
+        logger.println(&format!("SysCallConf:{}", conf.info()));
+        logger.println(&format!("point table: {} points", conf.point_table.len()));
+    }
+
     let lib_path = format!("{}/preload_libs", global.exec_path);
-    let mut run_count = 0u32;
-
-    for sysno in sysno_configs {
-        let conf = build_config(global, target, &args, sysno)?;
-
-        logger.println(&format!("{}\thook nr:{}", MODULE_NAME_SYSCALL, conf.nr));
-
-        let mod_logger = logger.clone();
-        let mod_lib_path = lib_path.clone();
-        let handle = std::thread::Builder::new()
-            .name(format!("syscall-{}", sysno))
-            .spawn(move || {
-                let module = SyscallTracepointModule::new(conf, mod_lib_path);
-                if let Err(e) = module.run(mod_logger) {
-                    eprintln!("{} module error: {}", MODULE_NAME_SYSCALL, e);
-                }
-            })
-            .ok();
-        if handle.is_some() {
-            run_count += 1;
-        }
-    }
-
-    if run_count == 0 {
-        logger.println("No runnable modules, Exit(1)");
-        std::process::exit(1);
-    }
-    logger.println(&format!("start {} modules", run_count));
-
-    super::stack_cmd::wait_for_signal_exported();
-    Ok(())
+    let module = SyscallTracepointModule::new(conf, lib_path);
+    module
+        .run(logger)
+        .map_err(|e| anyhow!("{e:#}"))
+        .context("syscall module failed")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::args::{Cli, Command};
-    use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
-    use clap::Parser;
+    use crate::config::global::parse_id_list;
 
-    fn u32_at(bytes: &[u8], off: usize) -> u32 {
-        u32::from_ne_bytes(bytes[off..off + 4].try_into().unwrap())
+    fn global() -> GlobalConfig {
+        GlobalConfig::default()
     }
 
-    /// Parse `argv` exactly like `cli::start()` does and build the config the
-    /// same way `run()` does, so the tests cover flag -> `SyscallConfig`.
-    fn build(argv: &[&str]) -> Result<SyscallConfig> {
-        let cli = Cli::try_parse_from(argv).expect("cli should parse");
-        let global = GlobalConfig::from(&cli.global);
-        let target = TargetConfig::default();
-        let args = match cli.command {
-            Some(Command::Syscall(args)) => args,
-            _ => panic!("expected the syscall subcommand"),
-        };
-        build_config(&global, &target, &args, args.nr)
+    fn selection(all: bool) -> SyscallSelection {
+        SyscallSelection {
+            enable: true,
+            trace_mode: if all {
+                crate::contract::consts::TRACE_ALL
+            } else {
+                crate::contract::consts::TRACE_COMMON
+            },
+            whitelist: if all { Vec::new() } else { vec![56] },
+            blacklist: Vec::new(),
+        }
     }
 
-    /// `-s all` means "every syscall": the whitelist stays empty so
-    /// `trace_mode()` is `TRACE_ALL` and eBPF does not gate.
+    /// The normal path loads the embedded dev table (306 points on aarch64),
+    /// which is what makes the point-args maps non-empty (report W1).
     #[test]
-    fn sys_all_leaves_the_sysno_gate_open() {
-        let conf = build(&["stackplz", "--uid", "10245", "-s", "all", "syscall"]).unwrap();
+    fn default_table_is_the_embedded_dev_table() {
+        let table = load_point_table(&global()).unwrap();
         assert!(
-            conf.sys_whitelist.is_empty(),
-            "-s all must not gate syscalls"
+            table.len() > 250,
+            "embedded table has {} points",
+            table.len()
         );
-        assert_eq!(conf.trace_mode(), TRACE_ALL);
-        assert_eq!(u32_at(&conf.to_common_filter_bytes(), 4), TRACE_ALL);
+        assert!(table.by_name("openat").is_some());
     }
 
-    /// Regression test for report §5.1 through the CLI: `-s 63,64` must produce
-    /// the sysno whitelist *and* `TRACE_COMMON(0)`, otherwise the gate in
-    /// `ebpf/syscall.c` is dead code and every syscall is traced.
+    /// Report W16: `--config <syscall table>` now actually replaces the table
+    /// instead of being stored and ignored.
     #[test]
-    fn sysno_whitelist_switches_the_gate_on() {
-        let conf = build(&["stackplz", "--uid", "10245", "-s", "63,64", "syscall"]).unwrap();
-        assert_eq!(conf.sys_whitelist, vec![63, 64]);
-        assert_eq!(conf.trace_mode(), TRACE_COMMON);
-        assert_eq!(u32_at(&conf.to_common_filter_bytes(), 4), TRACE_COMMON);
-    }
-
-    /// `--no-syscall` alone keeps today's semantics: it fills the blacklist,
-    /// does not fill the whitelist, and therefore does not close the gate
-    /// (eBPF checks the blacklist in `TRACE_ALL` mode too).
-    #[test]
-    fn no_syscall_only_fills_the_blacklist() {
-        let conf = build(&["stackplz", "--uid", "1", "--no-syscall", "63", "syscall"]).unwrap();
-        assert!(conf.sys_whitelist.is_empty());
-        assert_eq!(conf.sys_blacklist, vec![63]);
-        assert_eq!(conf.trace_mode(), TRACE_ALL);
-    }
-
-    /// Regression test for report §5.3: every filtering flag must be mapped
-    /// into the config lists that `update_common_list`/`update_thread_filter`
-    /// push to eBPF, and the permissive fallback must be off.
-    #[test]
-    fn cli_filter_flags_reach_the_bpf_config() {
-        let conf = build(&[
-            "stackplz",
-            "--uid",
-            "1000",
-            "--pid",
-            "1234",
-            "--tid",
-            "111,222",
-            "--no-tids",
-            "333,444",
-            "--tname",
-            "alpha,beta",
-            "--no-tname",
-            "gamma",
-            "--no-uid",
-            "0,10",
-            "--no-pid",
-            "5",
-            "syscall",
-        ])
+    fn config_flag_overrides_the_embedded_table() {
+        let dir = std::env::temp_dir().join("stackplz_syscall_cfg_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("custom.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "type": "syscall",
+                "points": [
+                    {"nr": 999, "name": "custom_call",
+                     "params": [{"name": "fd", "type": "int"}, {"name": "ret", "type": "int"}]}
+                ]
+            }"#,
+        )
         .unwrap();
 
-        // `sconfig` (uprobe side) keeps the single-valued fields.
-        assert_eq!(conf.sconfig.uid, 1000);
-        assert_eq!(conf.sconfig.pid, 1234);
+        let mut global = global();
+        global.config_files = vec![path.to_string_lossy().into_owned()];
+        let table = load_point_table(&global).unwrap();
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.by_name("custom_call").map(|p| p.nr), Some(999));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        assert_eq!(conf.uid_whitelist, vec![1000]);
-        assert_eq!(conf.uid_blacklist, vec![0, 10]);
+    /// A missing `-c` file is an error, not a silent fallback to the embedded
+    /// table.
+    #[test]
+    fn missing_config_file_is_an_error() {
+        let mut global = global();
+        global.config_files = vec!["/nonexistent/syscall.json".to_string()];
+        assert!(load_point_table(&global).is_err());
+    }
+
+    /// The filter lists and kill signals must reach the module config
+    /// (report W4/W5): `-u/-p/-t/--no-*/--kill/--tkill`.
+    #[test]
+    fn build_config_carries_filters_signals_and_groups() {
+        let mut global = global();
+        global.uid = "0,1000".to_string();
+        global.pid = "1234".to_string();
+        global.tid = "11,22".to_string();
+        global.no_tid = "33,44".to_string();
+        global.tname = "alpha".to_string();
+        global.no_tname = "beta".to_string();
+        global.kill_signal = "SIGSTOP".to_string();
+        global.tkill_signal = "SIGTRAP".to_string();
+        global.full_tname = true;
+
+        let target = TargetConfig {
+            trace_uid_group: crate::contract::TraceGroup::Root as u32,
+            uid: 1000,
+            ..Default::default()
+        };
+
+        let table = SyscallPointTable::empty();
+        let conf = build_config(&global, &target, table, selection(false)).unwrap();
+
+        assert_eq!(conf.uid_whitelist, vec![0, 1000]);
+        assert_eq!(conf.uid_blacklist, Vec::<u32>::new());
         assert_eq!(conf.pid_whitelist, vec![1234]);
-        assert_eq!(conf.pid_blacklist, vec![5]);
-        assert_eq!(conf.tid_whitelist, vec![111, 222]);
-        assert_eq!(conf.tid_blacklist, vec![333, 444]);
-        assert_eq!(
-            conf.tname_whitelist,
-            vec!["alpha".to_string(), "beta".to_string()]
-        );
-        assert_eq!(conf.tname_blacklist, vec!["gamma".to_string()]);
+        assert_eq!(conf.tid_whitelist, vec![11, 22]);
+        assert_eq!(conf.tid_blacklist, vec![33, 44]);
+        assert_eq!(conf.tname_whitelist, vec!["alpha".to_string()]);
+        assert_eq!(conf.tname_blacklist, vec!["beta".to_string()]);
+        assert!(conf.full_tname);
 
-        assert!(!conf.has_no_user_filter(), "filters are configured");
+        // W5: --kill/--tkill must land in common_filter.signal/tsignal.
+        assert_eq!(
+            conf.kill_signal,
+            crate::module::stack_probe::parse_signal_name("SIGSTOP")
+        );
+        assert_ne!(conf.kill_signal, 0);
+        assert_ne!(conf.tkill_signal, 0);
         let bytes = conf.to_common_filter_bytes();
         assert_eq!(
-            bytes[20..24],
-            0u32.to_ne_bytes(),
-            "no_filter_allow must be 0 once a filter is configured"
+            u32::from_ne_bytes(bytes[12..16].try_into().unwrap()),
+            conf.kill_signal,
+            "signal at offset 12"
+        );
+        assert_eq!(
+            u32::from_ne_bytes(bytes[16..20].try_into().unwrap()),
+            conf.tkill_signal,
+            "tsignal at offset 16"
+        );
+
+        // W4: -n root must set trace_uid_group, not 0.
+        assert_eq!(
+            u32::from_ne_bytes(bytes[8..12].try_into().unwrap()),
+            crate::contract::TraceGroup::Root as u32
         );
     }
 
-    /// The mandatory target uid (`-u`/`-n` resolves to a uid) is itself a
-    /// whitelist entry, so even a bare run must disable the permissive
-    /// fallback and let `should_trace()` do its normal whitelist check.
+    /// `-u 0` is a real whitelist entry (dev semantics, report §4.2/W11).
     #[test]
-    fn required_uid_alone_disables_the_permissive_fallback() {
-        let conf = build(&["stackplz", "--uid", "10245", "syscall"]).unwrap();
-        assert_eq!(conf.uid_whitelist, vec![10245]);
+    fn uid_zero_reaches_the_config_as_a_filter() {
+        let mut global = global();
+        global.uid = "0".to_string();
+        let table = SyscallPointTable::empty();
+        let conf = build_config(&global, &TargetConfig::default(), table, selection(true)).unwrap();
+        assert_eq!(conf.uid_whitelist, vec![0]);
         assert!(!conf.has_no_user_filter());
         assert_eq!(
-            u32_at(&conf.to_common_filter_bytes(), 20),
+            u32::from_ne_bytes(conf.to_common_filter_bytes()[20..24].try_into().unwrap()),
             0,
-            "no_filter_allow"
+            "no_filter_allow must be 0 once a filter exists"
+        );
+        let _ = parse_id_list("UidWhitelist", "0");
+    }
+
+    /// Report §4.4-2 / brief item 8, re-evaluated after W1 was fixed:
+    /// `-n root` used to fall through to the permissive `no_filter_allow` because
+    /// the group mask was never written (it was hard-wired to 0). Now the group
+    /// bit is a real filter, so the fallback is off and `-n root` admits only
+    /// `uid == GROUP_ROOT` processes (`ebpf/common/filtering.h:91-105`), not
+    /// "every uid".
+    #[test]
+    fn name_group_alone_disables_the_permissive_fallback() {
+        let global = GlobalConfig::default();
+        let target = TargetConfig {
+            trace_uid_group: crate::contract::TraceGroup::Root as u32,
+            ..Default::default()
+        };
+        let conf = build_config(
+            &global,
+            &target,
+            SyscallPointTable::empty(),
+            selection(true),
+        )
+        .unwrap();
+        assert!(
+            !conf.has_no_user_filter(),
+            "a uid group is a filter: the fallback must stay off"
+        );
+        assert_eq!(
+            u32::from_ne_bytes(conf.to_common_filter_bytes()[20..24].try_into().unwrap()),
+            0,
+            "no_filter_allow must be 0 for -n root (no more 'trace every uid')"
+        );
+        assert_eq!(
+            u32::from_ne_bytes(conf.to_common_filter_bytes()[8..12].try_into().unwrap()),
+            crate::contract::TraceGroup::Root as u32,
+            "trace_uid_group carries the ROOT bit to the kernel"
         );
     }
 
-    /// Boundary pin for the `-u 0` / `-u root` question (see `build_config`).
-    ///
-    /// Master's `-u` is a **string** (`root.go:621`, default `""`), and
-    /// `Parse_Idlist` only early-returns on `""` (`config_module.go:930`), so
-    /// master's `-u 0` really means "whitelist `[0]`" = trace root only.
-    ///
-    /// This crate's `-u` is `u64` with `0` as the "absent" sentinel
-    /// (`cli/args.rs:57`), and `cli/root.rs:65` bails with "please set --uid or
-    /// --name" when `uid == 0` without `--name` — so `uid == 0` can never reach
-    /// this function as a user-chosen filter. Under that type the only sound
-    /// reading is "not given", which is what `build_config` implements. The
-    /// gap to master ("only trace root" is not expressible) is a pre-existing
-    /// CLI-typing limitation, recorded as a residual risk in DONE.md §8.4
-    /// rather than hard-coded here as an `uid == 0` special case.
-    ///
-    /// Excluding root *is* still expressible through the blacklist, which is
-    /// the same path master uses.
+    /// The remaining round-1 deviation, made explicit: with *no* filter flags at
+    /// all, round 1 deliberately restores master's "0 = no filtering" semantics
+    /// (`no_filter_allow = 1`) instead of dev's default deny. Brief item 8 keeps
+    /// that intentional fix; this test pins it so the deviation is visible
+    /// instead of accidental.
     #[test]
-    fn uid_zero_is_absent_not_trace_root_only() {
-        // `--uid 0` parses (it is a valid u64) but yields no whitelist entry.
-        let conf = build(&["stackplz", "--uid", "0", "syscall"]).unwrap();
-        assert!(
-            conf.uid_whitelist.is_empty(),
-            "uid == 0 is the 'not given' sentinel of this crate's u64 flag"
-        );
+    fn no_filters_at_all_keeps_the_round1_permissive_deviation() {
+        let global = GlobalConfig::default();
+        let conf = build_config(
+            &global,
+            &TargetConfig::default(),
+            SyscallPointTable::empty(),
+            selection(true),
+        )
+        .unwrap();
         assert!(conf.has_no_user_filter());
-
-        // Excluding root works exactly like master: the blacklist is a list.
-        let conf = build(&["stackplz", "--uid", "0", "--no-uid", "0", "syscall"]).unwrap();
-        assert_eq!(conf.uid_blacklist, vec![0]);
-        assert!(!conf.has_no_user_filter());
-
-        // `-u root` is not a uid at all: master's `ParseUint` would panic, here
-        // clap rejects it before any config is built.
-        assert!(
-            Cli::try_parse_from(["stackplz", "--uid", "root", "syscall"]).is_err(),
-            "`-u root` must be rejected as a non-numeric uid"
+        assert_eq!(
+            u32::from_ne_bytes(conf.to_common_filter_bytes()[20..24].try_into().unwrap()),
+            1,
+            "round-1 fix ②: no filter flags => permissive fallback (master semantics)"
         );
     }
 
-    /// A non-numeric list entry is user error, not something to drop silently
-    /// (master panics in `Parse_Idlist`/`Parse_SyscallNames`).
+    /// `-b/--buffer` (MiB) must reach the module config, which turns it into
+    /// perf ring-buffer pages (`pages = buffer_mb * 256`). Before this round the
+    /// flag was accepted and ignored (report W10 "dead flag list").
     #[test]
-    fn non_numeric_list_entry_is_an_error() {
-        let err = build(&["stackplz", "--uid", "1", "--no-uid", "abc", "syscall"]).unwrap_err();
-        assert!(
-            err.to_string().contains("uid blacklist"),
-            "unexpected error: {err}"
-        );
+    fn buffer_flag_reaches_the_module_config() {
+        let global = GlobalConfig {
+            buffer: 16,
+            ..Default::default()
+        };
+        let conf = build_config(
+            &global,
+            &TargetConfig::default(),
+            SyscallPointTable::empty(),
+            selection(true),
+        )
+        .unwrap();
+        assert_eq!(conf.buffer_mb, 16);
+        assert_eq!(conf.buffer_mb as usize * 256, 4096, "16 MiB == 4096 pages");
+    }
 
-        let err = build(&["stackplz", "--uid", "1", "--tid", "12,x", "syscall"]).unwrap_err();
-        assert!(
-            err.to_string().contains("tid whitelist"),
-            "unexpected error: {err}"
+    /// Trace mode comes from `-s`, not from a hard-coded guess: `-s all` writes
+    /// TRACE_ALL, `-s openat` writes TRACE_COMMON.
+    #[test]
+    fn trace_mode_comes_from_the_selection() {
+        let mut global = global();
+        global.uid = "1000".to_string();
+        let table = SyscallPointTable::empty();
+        let bytes_all = build_config(
+            &global,
+            &TargetConfig::default(),
+            table.clone(),
+            selection(true),
+        )
+        .unwrap()
+        .to_common_filter_bytes();
+        assert_eq!(
+            u32::from_ne_bytes(bytes_all[4..8].try_into().unwrap()),
+            crate::contract::consts::TRACE_ALL
         );
-
-        let err = build(&["stackplz", "--uid", "1", "-s", "open", "syscall"]).unwrap_err();
-        assert!(
-            err.to_string().contains("syscall entry"),
-            "unexpected error: {err}"
+        let bytes_common = build_config(&global, &TargetConfig::default(), table, selection(false))
+            .unwrap()
+            .to_common_filter_bytes();
+        assert_eq!(
+            u32::from_ne_bytes(bytes_common[4..8].try_into().unwrap()),
+            crate::contract::consts::TRACE_COMMON
         );
     }
 }

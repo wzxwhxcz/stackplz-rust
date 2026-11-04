@@ -1,15 +1,35 @@
 //! `syscall` subcommand config. Mirrors `ModuleConfig` + `SyscallConfig` (`config_module.go`).
 
 use super::sconfig::{syscall_filter_from, HookConfig, SConfig, SyscallFilter};
+use super::syscall_points::SyscallPointTable;
 use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
 
 /// Syscall tracepoint module configuration. Mirrors `ModuleConfig` + `SyscallConfig`.
 #[derive(Debug, Clone)]
 pub struct SyscallConfig {
     pub sconfig: SConfig,
-    /// Syscall hook config file path (currently unused beyond CLI parsing).
-    pub config: String,
-    /// Syscall number to filter on. -1 means "match none" (default).
+    /// The syscall point table (embedded `config_syscall_*.json` or a `-c`
+    /// override). This is what `update_sysenter_point_args` /
+    /// `update_sysexit_point_args` write into the BPF maps — the field whose
+    /// absence made the module emit zero events (report W1/F1).
+    pub point_table: SyscallPointTable,
+    /// `common_filter_t.trace_mode`, decided by `-s`/`--no-syscall`
+    /// (`TRACE_COMMON` gates on the sysno whitelist, `TRACE_ALL` does not).
+    pub trace_mode: u32,
+    /// Explicit override for [`SyscallConfig::trace_mode`]; `None` derives the
+    /// mode from whether a whitelist is present (hand-built configs/tests).
+    pub trace_mode_override: Option<u32>,
+    /// `common_filter_t.trace_uid_group`: uid-group mask from `-n`.
+    pub trace_uid_group: u32,
+    /// `-b/--buffer`: perf ring buffer size in MiB (dev `GlobalConfig.Buffer`).
+    pub buffer_mb: u32,
+    /// `common_filter_t.signal` / `tsignal` from `--kill` / `--tkill`.
+    pub kill_signal: u32,
+    pub tkill_signal: u32,
+    pub auto_resume: bool,
+    /// Legacy per-sysno field. dev runs one module for all syscalls and the
+    /// event renderer's `NR:` segment comes from the decoded event, so this
+    /// stays 0; kept because `SyscallDataEvent::from_config` reads it.
     pub nr: i64,
 
     // Filter lists (mirrors ModuleConfig fields)
@@ -22,6 +42,8 @@ pub struct SyscallConfig {
     pub tid_blacklist: Vec<u32>,
     pub tname_whitelist: Vec<String>,
     pub tname_blacklist: Vec<String>,
+    /// `--full-tname`: disable the 18-entry default thread blacklist.
+    pub full_tname: bool,
 
     // Syscall-specific config (mirrors SyscallConfig fields)
     pub sys_whitelist: Vec<u32>,
@@ -32,10 +54,23 @@ pub struct SyscallConfig {
 
 impl SyscallConfig {
     pub fn new() -> Self {
+        Self::with_table(SyscallPointTable::empty())
+    }
+
+    /// Build a config around a point table (the normal path: the table is the
+    /// embedded dev table, or a `-c/--config` override).
+    pub fn with_table(point_table: SyscallPointTable) -> Self {
         SyscallConfig {
             sconfig: SConfig::default(),
-            config: String::new(),
-            nr: -1,
+            point_table,
+            trace_mode: TRACE_ALL,
+            trace_mode_override: None,
+            trace_uid_group: 0,
+            buffer_mb: 8,
+            kill_signal: 0,
+            tkill_signal: 0,
+            auto_resume: false,
+            nr: 0,
             debug: false,
             uid_whitelist: Vec::new(),
             uid_blacklist: Vec::new(),
@@ -45,6 +80,7 @@ impl SyscallConfig {
             tid_blacklist: Vec::new(),
             tname_whitelist: Vec::new(),
             tname_blacklist: Vec::new(),
+            full_tname: false,
             sys_whitelist: Vec::new(),
             sys_blacklist: Vec::new(),
             dump_hex: false,
@@ -55,13 +91,28 @@ impl SyscallConfig {
     /// Produce the on-wire `SyscallFilter` for `filter_map`.
     /// Mirrors `SyscallConfig.GetFilter()` (`config_syscall.go:26-35`).
     pub fn get_filter(&self) -> SyscallFilter {
-        syscall_filter_from(&self.sconfig, self.nr)
+        // One module handles every syscall now (dev model), so the legacy
+        // per-sysno `filter_map` value carries nr = 0.
+        syscall_filter_from(&self.sconfig, 0)
     }
 
     /// Human-readable hook label, used for log lines.
-    /// Mirrors `SyscallConfig.Info()` (`config_syscall.go`).
+    /// Mirrors `SyscallConfig.Info()` (`config_syscall.go:145-160`), which lists
+    /// the whitelist/blacklist by name.
     pub fn info(&self) -> String {
-        format!("nr:{}", self.nr)
+        let name_of = |nr: u32| {
+            self.point_table
+                .by_nr(nr)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| nr.to_string())
+        };
+        let whitelist: Vec<String> = self.sys_whitelist.iter().map(|nr| name_of(*nr)).collect();
+        let blacklist: Vec<String> = self.sys_blacklist.iter().map(|nr| name_of(*nr)).collect();
+        format!(
+            "whitelist:[{}];blacklist:[{}]",
+            whitelist.join(","),
+            blacklist.join(",")
+        )
     }
 
     /// Convert to base_config map value (C struct bytes).
@@ -109,11 +160,12 @@ impl SyscallConfig {
             && self.trace_uid_group() == 0
     }
 
-    /// `common_filter_t.trace_uid_group` for this config. Currently always 0
-    /// (no `--uid-group` flag yet); kept as a helper so `has_no_user_filter()`
-    /// cannot silently disagree with the bytes we actually write.
+    /// `common_filter_t.trace_uid_group` for this config: the `-n` uid-group
+    /// mask (dev `ModuleConfig.GetCommonFilter`, `config_module.go:991-993`).
+    /// `-n root` sets `TraceGroup::Root`, and `should_trace()` then admits that
+    /// group (`ebpf/common/filtering.h:91-105`).
     pub fn trace_uid_group(&self) -> u32 {
-        0
+        self.trace_uid_group
     }
 
     /// `common_filter_t.trace_mode` for this config.
@@ -130,6 +182,12 @@ impl SyscallConfig {
     /// and therefore trace every syscall (`--no-syscall` keeps working because
     /// the blacklist is checked in both modes).
     pub fn trace_mode(&self) -> u32 {
+        // The explicit value is what `-s`/`--no-syscall` decided (dev computes
+        // it in `Parse_Syscall`); the derivation below is the fallback for
+        // configs built by hand (tests, stack module).
+        if let Some(explicit) = self.trace_mode_override {
+            return explicit;
+        }
         if self.sys_whitelist.is_empty() {
             TRACE_ALL
         } else {
@@ -164,11 +222,11 @@ impl SyscallConfig {
         // trace_uid_group: UID filtering flags (not used in current implementation)
         bytes.extend_from_slice(&self.trace_uid_group().to_ne_bytes());
 
-        // signal: signal number to send (0 = no signal)
-        bytes.extend_from_slice(&0u32.to_ne_bytes());
+        // signal: signal sent on a hook hit (`--kill`); 0 = none
+        bytes.extend_from_slice(&self.kill_signal.to_ne_bytes());
 
-        // tsignal: target signal (0 = no target)
-        bytes.extend_from_slice(&0u32.to_ne_bytes());
+        // tsignal: signal sent to the thread (`--tkill`); 0 = none
+        bytes.extend_from_slice(&self.tkill_signal.to_ne_bytes());
 
         // no_filter_allow: 1 when no filter was configured, so should_trace()
         // falls back to master's "0 = no filtering" behaviour.
@@ -178,20 +236,10 @@ impl SyscallConfig {
         bytes
     }
 
-    /// Default thread name blacklist. Mirrors `DefaultThreadBlacklist()`.
-    pub fn default_thread_blacklist(&self) -> Vec<&str> {
-        vec![
-            "pool-",
-            "RenderThread",
-            "mali-",
-            "GPU completion",
-            "hwuiTask",
-            "Jit thread pool",
-            "Signal Catcher",
-            "HeapTaskDaemon",
-            "FinalizerDaemon",
-            "Binder:",
-        ]
+    /// Default thread name blacklist. Mirrors `DefaultThreadBlacklist()`
+    /// (`config_module.go:809-836`): 18 entries, empty when `--full-tname`.
+    pub fn default_thread_blacklist(&self) -> &'static [&'static str] {
+        crate::config::default_thread_blacklist(self.full_tname)
     }
 }
 

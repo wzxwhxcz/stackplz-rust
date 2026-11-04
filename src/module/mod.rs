@@ -1,21 +1,24 @@
 //! eBPF module layer. Mirrors package `module` (`user/module/*.go`).
 //!
-//! Four concrete modules, mirroring the Go tree:
+//! Two concrete modules, mirroring the dev-branch Go tree:
 //! - `stack_probe.rs`           => `probe_stack.go`        (uprobe, stack.o)
 //! - `syscall_tracepoint.rs`    => `tracepoint_raw_syscalls.go` (tracepoint)
-//! - `perf_mmap.rs`             => `perf_mmap.go`          (mmap2 event monitoring)
-//! - `brk.rs`                   => `brk.go`                (hardware breakpoints)
 //!
 //! The shared lifecycle (load, write filter_map, spawn perf reader, dispatch
 //! events) lives in `Module` here, mirroring `imodule.go`.
+//!
+//! Report W10 (dead modules): `brk.rs`, `perf_mmap.rs` (and the crate-root
+//! `rpc.rs` / `dump.rs` / `config/perf_mmap.rs`) were deleted rather than left
+//! looking wired-up. In upstream `dev` they are scheduled from `root.go`, but
+//! this crate has no scheduler for them: nothing constructed the modules, so
+//! they could never run. Brief item 4 accepts either "connect" or "delete";
+//! deletion is the chosen option (see DONE.md). The corresponding global CLI
+//! flags (`--brk*`, `--rpc*`, `--dump`, `--parse`) are removed by the CLI
+//! rewrite in the same round.
 
-pub mod brk;
-pub mod perf_mmap;
 pub mod stack_probe;
 pub mod syscall_tracepoint;
 
-pub use brk::{BrkConfig, BrkLen, BrkModule, BrkType};
-pub use perf_mmap::PerfMmapModule;
 pub use stack_probe::StackProbeModule;
 pub use syscall_tracepoint::SyscallTracepointModule;
 

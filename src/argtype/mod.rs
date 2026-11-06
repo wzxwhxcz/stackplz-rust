@@ -15,6 +15,7 @@ pub mod base_types;
 pub mod complex_types;
 pub mod consts;
 pub mod op;
+pub mod parse;
 pub mod registry;
 pub mod render;
 pub mod struct_formatters;
@@ -30,15 +31,18 @@ pub use op::{
 // Re-export registry API.
 pub use registry::{
     get_arg_type, get_arg_type_by_name, is_registered, next_type_index, register, register_alias,
-    register_alias_type, register_new, register_pre, registry_count, try_get_arg_type_by_name,
-    update_arg_type, with_type, ArgType,
+    register_alias_type, register_new, register_pre, registry_count, try_get_arg_type,
+    try_get_arg_type_by_name, update_arg_type, with_type, ArgType,
 };
 
 // Re-export complex type builders (for Phase 2 -w parser).
 pub use complex_types::{
-    new_num_format, r_array, r_buffer_len, r_buffer_reg, r_num_array, r_num_hex, r_pointer,
-    r_struct, register_alias_types,
+    new_num_format, r_array, r_buffer_len, r_buffer_reg, r_iovec_reg, r_num_array, r_num_array_fmt,
+    r_num_hex, r_pointer, r_struct, register_alias_types,
 };
+
+// Re-export the userspace value parser.
+pub use parse::{parse_point_arg, parse_value};
 
 // Re-export the 34 singleton index accessors.
 pub use op::{

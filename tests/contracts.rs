@@ -3,11 +3,11 @@
 //!
 //! These are platform-independent (no libbpf-rs) and run on any host.
 
+use stackplz::argtype::render::b2s_trim;
 use stackplz::config::hook_json::{hex2int, HookConfig};
 use stackplz::config::sconfig::parse_tid_blacklist;
 use stackplz::config::{ProbeConfig, SConfig, StackFilter, SyscallFilter, MAX_TID_BLACKLIST_COUNT};
-use stackplz::event::context::{b2s_trim, regs_to_json};
-use stackplz::event::{ContextEvent, LibArg, UnwindBuf};
+use stackplz::event::{LibArg, UnwindBuf};
 
 // ---- filter_t byte-layout contract (mirrors C `struct filter_t`) -----------
 
@@ -76,7 +76,7 @@ fn tid_blacklist_max_five() {
     assert!(parse_tid_blacklist("1,2,3,4,5,6").is_err());
 }
 
-// ---- probe config contract (mirrors config_hook.go Check) -----------------
+// ---- probe config contract (master-era config_hook.go Check) --------------
 
 #[test]
 fn probe_config_offset_only_fills_random_symbol() {
@@ -113,7 +113,7 @@ fn probe_config_needs_symbol_xor_offset() {
     assert!(both.check().is_err());
 }
 
-// ---- config.json contract (mirrors cli/cmd/stack.go parseConfig) ----------
+// ---- config.json contract (master-era cli/cmd/stack.go parseConfig) -------
 
 #[test]
 fn parse_shipped_config_json() {
@@ -127,38 +127,7 @@ fn parse_shipped_config_json() {
     assert_eq!(hex2int("0xF37C"), 0xF37C);
 }
 
-// ---- event decode contract (mirrors event_context.go / ievent.go) ---------
-
-#[test]
-fn uuid_format_matches_go() {
-    let mut comm = [0u8; 16];
-    comm[..3].copy_from_slice(b"app");
-    let evt = ContextEvent {
-        sample_size: 0,
-        pid: 1,
-        tid: 2,
-        timestamp_ns: 0,
-        comm,
-        unwind: None,
-        regs_only: None,
-    };
-    assert_eq!(evt.uuid(), "[1|2|app]");
-}
-
-#[test]
-fn regs_json_keys_match_go_order() {
-    let mut regs = [0u64; 33];
-    for (i, r) in regs.iter_mut().enumerate() {
-        *r = i as u64;
-    }
-    let j = regs_to_json(&regs);
-    // Order must be x0..x29, lr, sp, pc.
-    assert!(j.contains("\"x0\":\"0x0\""));
-    assert!(j.contains("\"x29\":\"0x1d\""));
-    assert!(j.contains("\"lr\":\"0x1e\""));
-    assert!(j.contains("\"sp\":\"0x1f\""));
-    assert!(j.contains("\"pc\":\"0x20\""));
-}
+// ---- event buffer contract (mirrors ievent.go) ---------------------------
 
 #[test]
 fn unwind_buf_parses_little_endian() {

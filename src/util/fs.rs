@@ -1,5 +1,7 @@
-//! Filesystem helpers. Mirrors `FindLib` (`helper.go:142-179`) and
-//! `ReadMapsByPid` (`user/event/ievent.go:166-173`).
+//! Filesystem helpers. Dev has no `util.FindLib`: library search lives in
+//! `GlobalConfig.Parse_Libinfo` (`config_global.go:160`) / `FindLibInApk`
+//! (`config_global.go:104`) / `MapsHelper.FindLib` (`event_mmap2.go:106`);
+//! `ReadMapsByPid` is `user/util/helper.go:172-179`.
 
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashSet;
@@ -7,7 +9,8 @@ use std::path::PathBuf;
 
 /// Resolve a library to a single unambiguous full path.
 ///
-/// Mirrors `util.FindLib(library, library_dirs)` (`helper.go:142-179`):
+/// Mirrors master-era `util.FindLib(library, library_dirs)`
+/// (`origin/master:pkg/util/helper.go:142-179`):
 /// - If `library` starts with `/`, treat it as a full path and require it exist.
 /// - Otherwise, join it with each entry of `library_dirs` (deduplicated),
 ///   `stat` each candidate, and require exactly one hit. Zero matches is an
@@ -40,7 +43,8 @@ pub fn find_lib(library: &str, library_dirs: &[String]) -> Result<String> {
 }
 
 /// Read `/proc/{pid}/maps` as a UTF-8 string. Mirrors `ReadMapsByPid`
-/// (`ievent.go:166-173`). Returns the raw text; the native unwinder parses it.
+/// (`user/util/helper.go:172-179`). Returns the raw text; the native unwinder
+/// parses it.
 pub fn read_maps_by_pid(pid: u32) -> Result<String> {
     let path = format!("/proc/{}/maps", pid);
     std::fs::read_to_string(&path).map_err(|e| anyhow!("read {} failed: {}", path, e))

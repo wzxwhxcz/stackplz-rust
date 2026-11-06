@@ -1,5 +1,6 @@
-//! Common event primitives and on-wire buffer layouts. Mirrors
-//! `user/event/ievent.go`.
+//! Common event primitives and on-wire buffer layouts. Mirrors dev's
+//! `user/event/ievent.go` (`CommonEvent`) + `user/event/event_context.go`
+//! (`UnwindBuf` / `RegsBuf`; master kept all of these in `ievent.go`).
 //!
 //! All multi-byte fields are **little-endian** (decoded with `from_le_bytes`),
 //! matching Go's `encoding/binary.LittleEndian`.
@@ -7,7 +8,8 @@
 use anyhow::{anyhow, Result};
 
 /// Argument block passed to the native unwinder's `StackPlz` FFI.
-/// Mirrors `LibArg` (`ievent.go:104-109`). `#[repr(C)]` so the layout matches
+/// Master-era `LibArg` (`origin/master:user/event/ievent.go:104-109`; dev has
+/// none). `#[repr(C)]` so the layout matches
 /// what `get_stack(...)` expects (see `load_so.h`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -37,8 +39,8 @@ unsafe impl bytemuck::Pod for LibArg {}
 unsafe impl bytemuck::Zeroable for LibArg {}
 
 /// Parsed perf unwind buffer (regs + stack dump).
-/// Mirrors `UnwindBuf` (`ievent.go:111-117`) and `ParseContext`
-/// (`ievent.go:128-149`).
+/// Mirrors `UnwindBuf` (`user/event/event_context.go:50`) and `ParseContext`
+/// (`event_context.go:58`).
 ///
 /// On-wire layout (little-endian):
 ///   u64  abi
@@ -69,7 +71,7 @@ impl Default for UnwindBuf {
 
 impl UnwindBuf {
     /// Build the `LibArg` view passed to the native unwinder.
-    /// Mirrors `UnwindBuf.GetLibArg()` (`ievent.go:119-126`).
+    /// Master-era `UnwindBuf.GetLibArg()` (`origin/master:user/event/ievent.go:119-126`).
     pub fn lib_arg(&self) -> LibArg {
         LibArg {
             abi: self.abi,
@@ -80,7 +82,7 @@ impl UnwindBuf {
     }
 
     /// Parse from a little-endian byte cursor. Mirrors
-    /// `UnwindBuf.ParseContext(buf)` (`ievent.go:128-149`). Advances `pos`.
+    /// `UnwindBuf.ParseContext(buf)` (`user/event/event_context.go:58`). Advances `pos`.
     pub fn parse(buf: &[u8], pos: &mut usize) -> Result<Self> {
         let abi = read_u64(buf, pos)?;
         let mut regs = [0u64; super::REG_COUNT];
@@ -101,7 +103,8 @@ impl UnwindBuf {
 }
 
 /// Parsed perf registers-only buffer.
-/// Mirrors `RegsBuf` (`ievent.go:151-154`) and `RegsBuf.ParseContext`.
+/// Mirrors `RegsBuf` (`user/event/event_context.go:77`) and `RegsBuf.ParseContext`
+/// (`event_context.go:82`).
 #[derive(Debug, Clone)]
 pub struct RegsBuf {
     pub abi: u64,
@@ -128,7 +131,7 @@ impl RegsBuf {
     }
 }
 
-/// Common base event. Mirrors `CommonEvent` (`ievent.go:25-30`).
+/// Common base event. Mirrors `CommonEvent` (`user/event/ievent.go:50`).
 /// Holds the raw perf sample buffer and shared references.
 #[derive(Debug, Default)]
 pub struct CommonEvent {
@@ -144,10 +147,6 @@ impl CommonEvent {
 
 // ---- little-endian cursor helpers ----------------------------------------
 
-pub(crate) fn read_u32(buf: &[u8], pos: &mut usize) -> Result<u32> {
-    let v = u32::from_le_bytes(read_array::<4>(buf, pos)?);
-    Ok(v)
-}
 pub(crate) fn read_u64(buf: &[u8], pos: &mut usize) -> Result<u64> {
     let v = u64::from_le_bytes(read_array::<8>(buf, pos)?);
     Ok(v)

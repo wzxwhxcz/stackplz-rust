@@ -39,7 +39,7 @@ use clap::Parser;
     disable_help_subcommand(true),
 )]
 pub struct Cli {
-    // ---- target / filter flags (root.go:618-636) --------------------------
+    // ---- target / filter flags (root.go:618-631) --------------------------
     /// uid white list, comma separated (e.g. `-u 1000,1001`; `-u 0` traces root)
     #[arg(short = 'u', long, default_value = "")]
     pub uid: String,
@@ -85,7 +85,7 @@ pub struct Cli {
     #[arg(short = 'f', long = "filter", value_name = "RULE")]
     pub filter: Vec<String>,
 
-    // ---- signal flags (root.go:635-639) ----------------------------------
+    // ---- signal flags (root.go:633-635) ----------------------------------
     /// auto resume when use --kill SIGSTOP
     #[arg(long, default_value_t = false)]
     pub auto: bool,
@@ -98,7 +98,7 @@ pub struct Cli {
     #[arg(long, default_value = "")]
     pub tkill: String,
 
-    // ---- syscall hook (root.go:672-676) ----------------------------------
+    // ---- syscall hook (root.go:674-676) ----------------------------------
     /// filter syscalls, comma separated: `all`, a name, a number, a `%group`
     /// (`%file`, `%net`, ...), or `name:f0.f2` with `-f` filter groups
     #[arg(short = 's', long, default_value = "")]
@@ -108,7 +108,7 @@ pub struct Cli {
     #[arg(long, default_value = "")]
     pub no_syscall: String,
 
-    // ---- uprobe hook (root.go:664-671) -----------------------------------
+    // ---- uprobe hook (root.go:662-671) -----------------------------------
     /// lib name or lib full path, default is libc.so
     #[arg(short = 'l', long = "lib", default_value = "libc.so")]
     pub library: String,
@@ -129,7 +129,7 @@ pub struct Cli {
     #[arg(short = 'c', long = "config", value_name = "FILE")]
     pub config: Vec<String>,
 
-    // ---- stack output flags (root.go:646-663) ----------------------------
+    // ---- stack output flags (root.go:646-652) ----------------------------
     /// enable unwindstack
     #[arg(long, default_value_t = false)]
     pub stack: bool,
@@ -146,7 +146,7 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub dumphex: bool,
 
-    // ---- logging (root.go:657-663) --------------------------------------
+    // ---- logging (root.go:653-658) --------------------------------------
     /// enable debug logging
     #[arg(short = 'd', long, default_value_t = false)]
     pub debug: bool,
@@ -167,7 +167,7 @@ pub struct Cli {
     #[arg(short = 'o', long, default_value = "")]
     pub out: String,
 
-    // ---- runtime flags (root.go:617, 658-661) ---------------------------
+    // ---- runtime flags (root.go:618, 672-673) ---------------------------
     /// android os sdk int, optional (default: `getprop ro.build.version.sdk`)
     #[arg(long = "sdk-int", default_value_t = 0)]
     pub sdk_int: u32,

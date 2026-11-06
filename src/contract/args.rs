@@ -119,6 +119,24 @@ impl<'a> ArgsCursor<'a> {
         Ok((index, data))
     }
 
+    /// Consume `n` raw bytes with no index byte in front.
+    ///
+    /// Exists for the userspace parse layer, which mirrors Go's `binary.Read`
+    /// on an `Arg_struct`/`Arg_reg`: those readers consume the *fixed* struct
+    /// size, not the declared length. See [`crate::argtype::parse`].
+    pub fn next_bytes(&mut self, n: usize) -> Result<&'a [u8]> {
+        self.read_bytes(n)
+    }
+
+    /// Read an `Arg_str` header (`[u8 index][u32 len]`, 5 bytes) and return
+    /// `(index, len)` without consuming any payload. Go reads the same header
+    /// through `binary.Read(buf, &Arg_str{})`.
+    pub fn next_arg_str_header(&mut self) -> Result<(u8, u32)> {
+        let index = self.read_u8()?;
+        let len = self.read_i32()?;
+        Ok((index, len as u32))
+    }
+
     /// Consume a `save_bytes_to_buf` / `save_str_to_buf` entry:
     /// `[u8 index][i32 size][bytes; size]`. Returns the index, the declared
     /// size, and the payload slice.

@@ -1,5 +1,8 @@
 //! `stack` subcommand config and single-hook probe config.
-//! Mirrors `config_stack.go` (`StackConfig`) and `config_hook.go` (`ProbeConfig`).
+//! Master-era `StackConfig` (`origin/master:user/config/config_stack.go:3-11`)
+//! and `ProbeConfig` (`origin/master:user/config/config_hook.go:10-16`); dev's
+//! carriers are `StackUprobeConfig` (`config_module.go:23`) and `UprobeArgs`
+//! (`config_uprobe.go:9`).
 
 use super::sconfig::{stack_filter_from, HookConfig, SConfig, StackFilter};
 use crate::contract::consts::{
@@ -8,7 +11,8 @@ use crate::contract::consts::{
 };
 use anyhow::{bail, Result};
 
-/// Flags for the `stack` subcommand. Mirrors `StackConfig` (`config_stack.go`)
+/// Flags for the `stack` subcommand. Master-era `StackConfig`
+/// (`origin/master:user/config/config_stack.go`)
 /// combined with the filter half of `ModuleConfig` (`config_module.go:750-800`).
 ///
 /// Report W17: the stack module used to ignore `-t/--no-uid/--no-pid/--tname*/`
@@ -188,7 +192,9 @@ impl StackConfig {
     }
 }
 
-/// A single uprobe hook point. Mirrors `ProbeConfig` (`config_hook.go`).
+/// A single uprobe hook point. Master-era `ProbeConfig`
+/// (`origin/master:user/config/config_hook.go`); dev's carrier is `UprobeArgs`
+/// (`config_uprobe.go:9`).
 #[derive(Debug, Clone)]
 pub struct ProbeConfig {
     pub sconfig: SConfig,
@@ -205,8 +211,8 @@ pub struct ProbeConfig {
 }
 
 impl ProbeConfig {
-    /// Validate the hook point. Mirrors `ProbeConfig.Check()` in
-    /// `config_hook.go:32-56`.
+    /// Validate the hook point. Master-era `ProbeConfig.Check()` in
+    /// `origin/master:user/config/config_hook.go:32-56`.
     ///
     /// Rules:
     /// - Library must exist on disk.
@@ -241,13 +247,13 @@ impl ProbeConfig {
     }
 
     /// Produce the on-wire `StackFilter` for `filter_map`.
-    /// Mirrors `ProbeConfig.GetFilter()` (`config_hook.go:58-66`).
+    /// Master-era `ProbeConfig.GetFilter()` (`origin/master:user/config/config_hook.go:58-66`).
     pub fn get_filter(&self) -> StackFilter {
         stack_filter_from(&self.sconfig)
     }
 
     /// Human-readable hook label, used for log lines.
-    /// Mirrors `ProbeConfig.Info()` (`config_hook.go`).
+    /// Master-era `ProbeConfig.Info()` (`origin/master:user/config/config_hook.go`).
     pub fn info(&self) -> String {
         if self.offset != 0 && !self.lib_name.is_empty() {
             format!("{} {}+0x{:x}", self.lib_name, self.symbol, self.offset)

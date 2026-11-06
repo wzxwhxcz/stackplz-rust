@@ -4,9 +4,9 @@
 //!
 //! - `cli.Start()` / `cmd.Execute()` => [`start`]
 //! - `persistentPreRunEFunc`         => [`root::persistent_pre_run`]
-//! - `runFunc` (`root.go:387-460`)   => [`run_func`]
+//! - `runFunc` (`root.go:373-455`)   => [`run_func`]
 //!
-//! Module selection follows dev exactly (`root.go:393-404`):
+//! Module selection follows dev exactly (`root.go:386-396`):
 //!
 //! ```text
 //! if brk address set        -> brk module        (removed: see DONE §W10)
@@ -111,7 +111,7 @@ pub fn start() -> i32 {
     }
 }
 
-/// `runFunc` (`root.go:387-460`): pick the module(s), start them, wait.
+/// `runFunc` (`root.go:373-455`): pick the module(s), start them, wait.
 fn run_func(global: &GlobalConfig, target: &TargetConfig) -> Result<(), RunError> {
     // Load the syscall point table once (embedded, or `-c/--config` override —
     // report W16) and resolve `-s/--no-syscall` against it.
@@ -191,7 +191,7 @@ fn run_modules(
     }
     drop(tx);
 
-    // `start N modules` banner (dev `root.go:411`).
+    // `start N modules` banner (dev `root.go:417`).
     println!("start {module_count} modules");
 
     loop {
@@ -256,7 +256,7 @@ mod tests {
         assert_eq!(RunError::Usage("x".into()).exit_code(), EXIT_USAGE);
     }
 
-    /// `hook nothing` keeps dev's exact wording (`root.go:399,461`).
+    /// `hook nothing` keeps dev's exact wording (`root.go:361,396`).
     #[test]
     fn nothing_to_hook_message_matches_dev() {
         assert_eq!(

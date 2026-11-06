@@ -1,5 +1,6 @@
 //! eBPF loading glue. Replaces `ehids/ebpfmanager` + the embedded-bytecode
-//! loading in `user/module/{probe_stack,tracepoint_raw_syscalls}.go`.
+//! loading in dev's `user/module/{stack,syscall}.go` (master-era names:
+//! `{probe_stack,tracepoint_raw_syscalls}.go`).
 //!
 //! Embedded bytecode: `stack.o` / `raw_syscalls.o` compiled from
 //! `ebpf/{stack,raw_syscalls}.c` (see `build.rs`), included via `include_bytes!`
@@ -101,14 +102,16 @@ pub fn resolve_symbol_offset(elf_bytes: &[u8], symbol: &str) -> Result<u64> {
     Err(anyhow::anyhow!("symbol '{}' not found in ELF", symbol))
 }
 
-/// ARM64 register count sampled by the perf layer. Mirrors Go's
-/// `RegMask = (1 << 33) - 1` (`imodule.go:164`): all 33 arm64 registers
+/// ARM64 register count sampled by the perf layer. Dev computes the mask from
+/// `PERF_REG_ARM64_MAX` (`imodule.go:188-193`; master-era `(1 << 33) - 1` at
+/// `origin/master:user/module/imodule.go:164`): all 33 arm64 registers
 /// (x0..x29 + lr + sp + pc).
 pub const ARM64_REG_COUNT: u32 = 33;
 /// Mask covering all 33 arm64 registers for `perf_event_attr.sample_regs_user`.
 pub const ARM64_REG_MASK: u64 = (1u64 << ARM64_REG_COUNT) - 1;
-/// Per-sample stack size captured by the perf layer. Mirrors Go's
-/// `Sample_stack_user: 8192` (`imodule.go:180`).
+/// Per-sample stack size captured by the perf layer. Dev reads it from the
+/// configured stack size (`Sample_stack_user: this.mconf.StackSize`,
+/// `imodule.go:215`; 8192 is that field's default).
 pub const SAMPLE_STACK_USER: u64 = 8192;
 
 // ---- Linux-only libbpf-rs glue -------------------------------------------

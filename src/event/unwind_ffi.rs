@@ -1,8 +1,11 @@
-//! Native unwinder FFI. Mirrors `user/event/chelper.go` + `user/event/load_so.c`.
+//! Native unwinder FFI. Mirrors **master-era** `user/event/chelper.go` +
+//! `user/event/load_so.c` (the bundled `libstackplz*.so` is that build; dev
+//! dropped `dl_path`/`reg_mask` from `get_stack`, see `origin/master` below).
 //!
 //! On the Go side, `ParseStack(map_buffer, ubuf)` calls the cgo function
-//! `get_stack(dl_path, map_buffer, reg_mask, unwind_buf, stack_buf)` (declared in
-//! `load_so.h`). That C function lazily `dlopen`s `libstackplz.so` (which links
+//! `get_stack(dl_path, map_buffer, reg_mask, unwind_buf, stack_buf)` (declared
+//! in `origin/master:user/event/load_so.h:10`). That C function lazily
+//! `dlopen`s `libstackplz.so` (which links
 //! against Android `libunwindstack.so`) and calls its exported `StackPlz`
 //! symbol. We replicate the whole chain in pure Rust via `libloading`.
 //!
@@ -17,7 +20,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::sync::OnceLock;
 
-/// Signature of the C `get_stack` entry point (`load_so.h`):
+/// Signature of the C `get_stack` entry point (master-era `load_so.h:10`):
 /// ```c
 /// const char* get_stack(char* dl_path, char* map_buffer,
 ///                       uint64_t reg_mask, void* unwind_buf, void* stack_buf);
@@ -65,7 +68,7 @@ fn load_unwinder(lib_path: &str) -> Result<Unwinder> {
 
 /// Resolve a stack trace for the given unwind buffer.
 ///
-/// Mirrors Go's `ParseStack(map_buffer, ubuf)` (`chelper.go:11-20`):
+/// Mirrors Go's `ParseStack(map_buffer, ubuf)` (`origin/master:user/event/chelper.go:15-21`):
 /// - `lib_path`: directory containing the extracted `libstackplz.so` + deps
 ///   (Go's `LibPath`, set to `<exec_dir>/preload_libs` in `init()`).
 /// - `map_buffer`: full `/proc/<pid>/maps` text.

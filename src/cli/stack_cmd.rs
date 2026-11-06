@@ -2,8 +2,9 @@
 //!
 //! dev has no `stack` subcommand: `-w/--point` (and `-c/--config` with a uprobe
 //! file) are global flags and `runFunc` starts the uprobe module when syscall
-//! tracing is not enabled (`cli/cmd/root.go:387-396`). Mirrors
-//! `parseConfig` + `MStack.Run` (`cli/cmd/stack.go`, `user/module/stack.go`).
+//! tracing is not enabled (`cli/cmd/root.go:386-396`). Mirrors
+//! `GlobalConfig.Parse_Libinfo` + `MStack.Run` (`config_global.go:160`,
+//! `user/module/stack.go`).
 //!
 //! All filter flags are threaded through [`StackConfig`] so the module can write
 //! the same maps as `MStack.updateFilter()` (report W17): uid/pid/tid/tname

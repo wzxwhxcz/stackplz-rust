@@ -1,10 +1,11 @@
-//! Kernel capability probing. Mirrors `pkg/ebpf/{bpf.go, android.go, parse.go}`.
+//! Kernel capability probing. Mirrors dev's `user/util/{bpf,android}.go`
+//! (master-era `pkg/ebpf/{bpf.go, android.go, parse.go}`).
 //!
 //! - `get_system_config()` reads `/proc/config.gz` (auto-detecting gzip via the
 //!   `0x1f 0x8b` magic) and parses `CONFIG_*` lines into a map. Mirrors
-//!   `pkg/ebpf/android.go` + `parse.go`.
+//!   `GetSystemConfig` (`user/util/android.go:27`) + `parse` (`android.go:83`).
 //! - `is_enable_bpf()` asserts required BPF/uprobe configs are `y`. Mirrors
-//!   `IsEnableBPF` (`bpf.go`).
+//!   `CheckKernelConfig` (`user/util/bpf.go:60`).
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;

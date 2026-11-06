@@ -1,419 +1,335 @@
-//! Struct formatters for complex argument types
+//! Struct argument formatting, payload-driven.
 //!
-//! This module provides Format implementations for all struct-based argument types,
-//! ported from Go's config_struct.go Format() methods.
+//! Port of the `Format()` methods in `user/argtype/config_struct.go` (+ the
+//! arm64 `syscall.*` structs they embed: `Stat_t`, `Statfs_t`, `Rusage`,
+//! `Sysinfo_t`, `EpollEvent`, `RawSockaddrUnix`).
+//!
+//! Each formatter takes the exact bytes the eBPF side saved for one struct
+//! (`[u32 len][payload]`, payload length == the type's `sizeof`) and returns
+//! the text Go appends after `0x%x` of the argument address. Layouts follow the
+//! definitions Go reads (the arm64 kernel ABI), not a Rust struct mirror, so
+//! field offsets are written out explicitly.
+//!
+//! `iovec`, `msghdr` and `string_array` are *not* here: they consume several
+//! TLVs (see [`crate::argtype::parse`]).
 
-// ============================================================================
-// Basic time-related structs
-// ============================================================================
+use crate::util::hexdump::hex_dump_pure;
+use crate::util::COLOR_GREEN;
 
-/// Timespec - nanosecond-precision timestamp
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Timespec {
-    pub sec: i64,
-    pub nsec: i64,
+fn u16_at(d: &[u8], off: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(d.get(off..off + 2)?.try_into().ok()?))
 }
 
-impl Timespec {
-    pub fn format(&self) -> String {
-        format!("(sec={}, nsec={})", self.sec, self.nsec)
-    }
+fn u32_at(d: &[u8], off: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(d.get(off..off + 4)?.try_into().ok()?))
 }
 
-/// Timeval - microsecond-precision timestamp
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Timeval {
-    pub sec: i64,
-    pub usec: i64,
+fn u64_at(d: &[u8], off: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(d.get(off..off + 8)?.try_into().ok()?))
 }
 
-impl Timeval {
-    pub fn format(&self) -> String {
-        format!("{{sec={}, usec={}}}", self.sec, self.usec)
-    }
+fn i64_at(d: &[u8], off: usize) -> Option<i64> {
+    Some(i64::from_le_bytes(d.get(off..off + 8)?.try_into().ok()?))
 }
 
-/// TimeZone_t - timezone information
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct TimeZone {
-    pub tz_minuteswest: i32,
-    pub tz_dsttime: i32,
+fn i32_at(d: &[u8], off: usize) -> Option<i32> {
+    Some(i32::from_le_bytes(d.get(off..off + 4)?.try_into().ok()?))
 }
 
-impl TimeZone {
-    pub fn format(&self) -> String {
-        format!(
-            "{{tz_minuteswest={}, tz_dsttime={}}}",
-            self.tz_minuteswest, self.tz_dsttime
-        )
-    }
+fn be_u16_at(d: &[u8], off: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(d.get(off..off + 2)?.try_into().ok()?))
 }
 
-/// ItTmerspec - interval timer specification
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct ItTmerspec {
-    pub it_interval: Timespec,
-    pub it_value: Timespec,
-}
-
-impl ItTmerspec {
-    pub fn format(&self) -> String {
-        format!(
-            "{{it_interval={{sec={}, nsec={}}}, it_value={{sec={}, nsec={}}}}}",
-            self.it_interval.sec, self.it_interval.nsec, self.it_value.sec, self.it_value.nsec
-        )
-    }
-}
-
-// ============================================================================
-// Signal-related structs
-// ============================================================================
-
-/// Sigaction - signal action structure
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Sigaction {
-    pub sa_handler: u64,
-    pub sa_sigaction: u64,
-    pub sa_mask: u64,
-    pub sa_flags: u64,
-    pub sa_restorer: u64,
-}
-
-impl Sigaction {
-    pub fn format(&self) -> String {
-        format!(
-            "{{sa_handler=0x{:x}, sa_sigaction=0x{:x}, sa_mask=0x{:x}, sa_flags=0x{:x}, sa_restorer=0x{:x}}}",
-            self.sa_handler, self.sa_sigaction, self.sa_mask, self.sa_flags, self.sa_restorer
-        )
-    }
-}
-
-/// SigInfo - signal information
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct SigInfo {
-    pub si_signo: i32,
-    pub si_errno: i32,
-    pub si_code: i32,
-    pub _pad: i32,
-    pub sifields: [u8; 112], // Flexible union field
-}
-
-impl SigInfo {
-    pub fn format(&self) -> String {
-        format!(
-            "{{si_signo=0x{:x}, si_errno=0x{:x}, si_code=0x{:x}, sifields=0x{:x}}}",
-            self.si_signo,
-            self.si_errno,
-            self.si_code,
-            // Show first 8 bytes of sifields as u64
-            u64::from_ne_bytes(self.sifields[..8].try_into().unwrap_or([0; 8]))
-        )
-    }
-}
-
-/// Stack_t - signal stack
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct StackT {
-    pub ss_sp: u64,
-    pub ss_flags: i32,
-    pub ss_size: i32,
-}
-
-impl StackT {
-    pub fn format(&self) -> String {
-        format!(
-            "{{ss_sp=0x{:x}, ss_flags={}, ss_size={}}}",
-            self.ss_sp, self.ss_flags, self.ss_size
-        )
-    }
-}
-
-// ============================================================================
-// I/O and polling structs
-// ============================================================================
-
-/// Pollfd - poll file descriptor
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Pollfd {
-    pub fd: i32,
-    pub events: u16,
-    pub revents: u16,
-}
-
-impl Pollfd {
-    pub fn format(&self) -> String {
-        format!(
-            "(fd={}, events={}, revents={})",
-            self.fd, self.events, self.revents
-        )
-    }
-}
-
-/// EpollEvent - epoll event
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct EpollEvent {
-    pub events: u32,
-    pub fd: i32,
-    pub pad: i32,
-}
-
-impl EpollEvent {
-    pub fn format(&self) -> String {
-        format!("{{events=0x{:x}, fd={}}}", self.events, self.fd)
-    }
-}
-
-/// Iovec - I/O vector (pointer-based)
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Iovec {
-    pub base: u64,
-    pub buflen: u64,
-}
-
-impl Iovec {
-    pub fn format(&self) -> String {
-        format!("{{base=0x{:x}, len=0x{:x}}}", self.base, self.buflen)
-    }
-
-    pub fn format_with_buf(&self, buf: &[u8]) -> String {
-        format!(
-            "{{base=0x{:x}, len=0x{:x}, buf=({})}}",
-            self.base,
-            self.buflen,
-            pretty_byte_slice(buf)
-        )
-    }
-}
-
-/// Msghdr - message header for sendmsg/recvmsg
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Msghdr {
-    pub name: u64,
-    pub namelen: u32,
-    pub _pad_cgo_0: [u8; 4],
-    pub iov: u64,
-    pub iovlen: u64,
-    pub control: u64,
-    pub controllen: u64,
-    pub flags: i32,
-    pub _pad_cgo_1: [u8; 4],
-}
-
-impl Msghdr {
-    pub fn format(&self) -> String {
-        format!(
-            "(name=0x{:x}, namelen=0x{:x}, *iov=0x{:x}, iovlen=0x{:x}, *control=0x{:x}, controllen=0x{:x}, flags=0x{:x})",
-            self.name, self.namelen, self.iov, self.iovlen, self.control, self.controllen, self.flags
-        )
-    }
-}
-
-// ============================================================================
-// File system and resource structs
-// ============================================================================
-
-/// Stat_t - file status
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct StatT {
-    pub dev: u64,
-    pub ino: u64,
-    pub nlink: u64,
-    pub mode: u32,
-    pub uid: u32,
-    pub gid: u32,
-    pub _pad0: i32,
-    pub rdev: u64,
-    pub size: i64,
-    pub blksize: i64,
-    pub blocks: i64,
-    pub atim: Timespec,
-    pub mtim: Timespec,
-    pub ctim: Timespec,
-    pub _unused: [i64; 3],
-}
-
-impl StatT {
-    pub fn format(&self) -> String {
-        format!(
-            "{{dev={}, ino={}, nlink={}, mode={}, uid={}, gid={}, rdev={}, size={}, blksize={}, blocks={}, atim={{tv_sec={}, tv_nsec={}}}, mtim={{tv_sec={}, tv_nsec={}}}, ctim={{tv_sec={}, tv_nsec={}}}}}",
-            self.dev, self.ino, self.nlink, self.mode, self.uid, self.gid, self.rdev,
-            self.size, self.blksize, self.blocks,
-            self.atim.sec, self.atim.nsec,
-            self.mtim.sec, self.mtim.nsec,
-            self.ctim.sec, self.ctim.nsec
-        )
-    }
-}
-
-/// Statfs_t - filesystem statistics
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct StatfsT {
-    pub r#type: i64,
-    pub bsize: i64,
-    pub blocks: u64,
-    pub bfree: u64,
-    pub bavail: u64,
-    pub files: u64,
-    pub ffree: u64,
-    pub fsid: [i32; 2],
-    pub namelen: i64,
-    pub frsize: i64,
-    pub flags: i64,
-    pub spare: [i64; 4],
-}
-
-impl StatfsT {
-    pub fn format(&self) -> String {
-        format!(
-            "{{type={}, bsize={}, blocks={}, bfree={}, bavail={}, files={}, ffree={}, fsid={},{}, namelen={}, frsize={}, flags={}, spare=0x{:x},0x{:x},0x{:x},0x{:x}}}",
-            self.r#type, self.bsize, self.blocks, self.bfree, self.bavail,
-            self.files, self.ffree, self.fsid[0], self.fsid[1],
-            self.namelen, self.frsize, self.flags,
-            self.spare[0], self.spare[1], self.spare[2], self.spare[3]
-        )
-    }
-}
-
-/// Rusage - resource usage
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Rusage {
-    pub utime: Timeval,
-    pub stime: Timeval,
-    pub maxrss: i64,
-    pub ixrss: i64,
-    pub idrss: i64,
-    pub isrss: i64,
-    pub minflt: i64,
-    pub majflt: i64,
-    pub nswap: i64,
-    pub inblock: i64,
-    pub oublock: i64,
-    pub msgsnd: i64,
-    pub msgrcv: i64,
-    pub nsignals: i64,
-    pub nvcsw: i64,
-    pub nivcsw: i64,
-}
-
-impl Rusage {
-    pub fn format(&self) -> String {
-        format!(
-            "{{utime=timeval{{sec={}, usec={}}}, stime=timeval{{sec={}, usec={}}}, Maxrss=0x{:x}, Ixrss=0x{:x}, Idrss=0x{:x}, Isrss=0x{:x}, Minflt=0x{:x}, Majflt=0x{:x}, Nswap=0x{:x}, Inblock=0x{:x}, Oublock=0x{:x}, Msgsnd=0x{:x}, Msgrcv=0x{:x}, Nsignals=0x{:x}, Nvcsw=0x{:x}, Nivcsw=0x{:x}}}",
-            self.utime.sec, self.utime.usec, self.stime.sec, self.stime.usec,
-            self.maxrss, self.ixrss, self.idrss, self.isrss, self.minflt,
-            self.majflt, self.nswap, self.inblock, self.oublock, self.msgsnd,
-            self.msgrcv, self.nsignals, self.nvcsw, self.nivcsw
-        )
-    }
-}
-
-/// Sysinfo_t - system information
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct SysinfoT {
-    pub uptime: i64,
-    pub loads: [u64; 3],
-    pub totalram: u64,
-    pub freeram: u64,
-    pub sharedram: u64,
-    pub bufferram: u64,
-    pub totalswap: u64,
-    pub freeswap: u64,
-    pub procs: u16,
-    pub pad: u16,
-    pub totalhigh: u64,
-    pub freehigh: u64,
-    pub unit: u32,
-    pub _f: [i8; 0],
-}
-
-impl SysinfoT {
-    pub fn format(&self) -> String {
-        format!(
-            "{{uptime=0x{:x}, loads=0x{:x},0x{:x},0x{:x}, totalram=0x{:x}, freeram=0x{:x}, sharedram=0x{:x}, bufferram=0x{:x}, totalswap=0x{:x}, freeswap=0x{:x}, procs=0x{:x}, pad=0x{:x}, totalhigh=0x{:x}, freehigh=0x{:x}, unit=0x{:x}}}",
-            self.uptime, self.loads[0], self.loads[1], self.loads[2],
-            self.totalram, self.freeram, self.sharedram, self.bufferram,
-            self.totalswap, self.freeswap, self.procs, self.pad,
-            self.totalhigh, self.freehigh, self.unit
-        )
-    }
-}
-
-/// Pthread_attr_t - pthread attribute (opaque)
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct PthreadAttrT {
-    pub _data: [u8; 56], // Platform-dependent size
-}
-
-impl PthreadAttrT {
-    pub fn format(&self) -> String {
-        // Show first 16 bytes as hex
-        format!(
-            "{{_data=[{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} ...]}}",
-            self._data[0],
-            self._data[1],
-            self._data[2],
-            self._data[3],
-            self._data[4],
-            self._data[5],
-            self._data[6],
-            self._data[7]
-        )
-    }
-}
-
-// ============================================================================
-// Helper functions
-// ============================================================================
-
-/// Format byte slice as pretty string (max 32 bytes shown)
-fn pretty_byte_slice(buf: &[u8]) -> String {
-    if buf.is_empty() {
-        return "[]".to_string();
-    }
-
-    let len = buf.len().min(32);
-    let mut result = String::new();
-
-    // Try to show as string if printable
-    if buf.iter().all(|&b| b.is_ascii_graphic() || b == b' ') {
-        result.push('"');
-        for &b in &buf[..len] {
-            result.push(b as char);
-        }
-        result.push('"');
+/// Go `%x` on a signed value keeps the sign (`-42` -> `-2a`).
+fn hex_i64(v: i64) -> String {
+    if v < 0 {
+        format!("-{:x}", v.unsigned_abs())
     } else {
-        // Show as hex
-        result.push('[');
-        for (i, &b) in buf[..len].iter().enumerate() {
-            if i > 0 {
-                result.push(' ');
-            }
-            result.push_str(&format!("{:02x}", b));
+        format!("{v:x}")
+    }
+}
+
+/// `B2S`: decode a `[N]int8` C string (trim NUL/space from both ends).
+fn cstr(d: &[u8]) -> String {
+    super::render::b2s_trim(d)
+}
+
+/// `Arg_Timespec.Format`: `(sec=.., nsec=..)`.
+fn timespec(d: &[u8]) -> Option<String> {
+    Some(format!("(sec={}, nsec={})", i64_at(d, 0)?, i64_at(d, 8)?))
+}
+
+/// `Arg_Timeval.Format`: `{sec=.., usec=..}`.
+fn timeval(d: &[u8], off: usize) -> Option<String> {
+    Some(format!(
+        "{{sec={}, usec={}}}",
+        i64_at(d, off)?,
+        i64_at(d, off + 8)?
+    ))
+}
+
+/// Format one struct payload by its registered type name. `None` means the
+/// payload is too short for the struct (the caller turns that into a decode
+/// error) or the name has no formatter (the caller falls back).
+///
+/// Each arm mirrors the matching Go `Format()` field list, `"{%s}"` /
+/// `"(%s)"` wrapper included.
+pub fn format_struct(name: &str, d: &[u8]) -> Option<String> {
+    match name {
+        "timespec" => timespec(d),
+        "timeval" => timeval(d, 0),
+        "ittmerspec" => {
+            let fields = vec![
+                format!(
+                    "it_interval={{{}}}",
+                    timespec(d.get(0..16)?)?.trim_matches(['(', ')'])
+                ),
+                format!(
+                    "it_value={{{}}}",
+                    timespec(d.get(16..32)?)?.trim_matches(['(', ')'])
+                ),
+            ];
+            Some(braced(&fields))
         }
-        result.push(']');
+        "sigaction" => {
+            let fields = vec![
+                format!("sa_handler=0x{:x}", u64_at(d, 0)?),
+                format!("sa_sigaction=0x{:x}", u64_at(d, 8)?),
+                format!("sa_mask=0x{:x}", u64_at(d, 16)?),
+                format!("sa_flags=0x{:x}", u64_at(d, 24)?),
+                format!("sa_restorer=0x{:x}", u64_at(d, 32)?),
+            ];
+            Some(braced(&fields))
+        }
+        "siginfo" => {
+            let fields = vec![
+                format!("si_signo=0x{:x}", i32_at(d, 0)?),
+                format!("si_errno=0x{:x}", i32_at(d, 4)?),
+                format!("si_code=0x{:x}", i32_at(d, 8)?),
+                format!("sifields=0x{:x}", u64_at(d, 16)?),
+            ];
+            Some(braced(&fields))
+        }
+        "stack_t" => {
+            let fields = vec![
+                format!("ss_sp=0x{:x}", u64_at(d, 0)?),
+                format!("ss_flags={}", i32_at(d, 8)?),
+                format!("ss_size={}", i32_at(d, 12)?),
+            ];
+            Some(braced(&fields))
+        }
+        "pollfd" => Some(format!(
+            "(fd={}, events={}, revents={})",
+            i32_at(d, 0)?,
+            u16_at(d, 4)?,
+            u16_at(d, 6)?
+        )),
+        "epoll_event" => {
+            let fields = vec![
+                format!("events=0x{:x}", u32_at(d, 0)?),
+                format!("fd={}", i32_at(d, 4)?),
+            ];
+            Some(braced(&fields))
+        }
+        // Go reads `syscall.Stat_t` (linux/arm64): dev, ino, mode, nlink, uid,
+        // gid, rdev, __pad1, size, blksize, __pad2, blocks, atim, mtim, ctim.
+        "stat" => {
+            let fields = vec![
+                format!("dev={}", u64_at(d, 0)?),
+                format!("ino={}", u64_at(d, 8)?),
+                format!("nlink={}", u32_at(d, 20)?),
+                format!("mode={}", u32_at(d, 16)?),
+                format!("uid={}", u32_at(d, 24)?),
+                format!("gid={}", u32_at(d, 28)?),
+                format!("rdev={}", u64_at(d, 32)?),
+                format!("size={}", i64_at(d, 48)?),
+                format!("blksize={}", i32_at(d, 56)?),
+                format!("blocks={}", i64_at(d, 64)?),
+                format!(
+                    "atim={{tv_sec={}, tv_nsec={}}}",
+                    i64_at(d, 72)?,
+                    i64_at(d, 80)?
+                ),
+                format!(
+                    "mtim={{tv_sec={}, tv_nsec={}}}",
+                    i64_at(d, 88)?,
+                    i64_at(d, 96)?
+                ),
+                format!(
+                    "ctim={{tv_sec={}, tv_nsec={}}}",
+                    i64_at(d, 104)?,
+                    i64_at(d, 112)?
+                ),
+            ];
+            Some(braced(&fields))
+        }
+        "statfs" => {
+            let fields = vec![
+                format!("type={}", i64_at(d, 0)?),
+                format!("bsize={}", i64_at(d, 8)?),
+                format!("blocks={}", u64_at(d, 16)?),
+                format!("bfree={}", u64_at(d, 24)?),
+                format!("bavail={}", u64_at(d, 32)?),
+                format!("files={}", u64_at(d, 40)?),
+                format!("ffree={}", u64_at(d, 48)?),
+                format!("fsid={},{}", i32_at(d, 56)?, i32_at(d, 60)?),
+                format!("namelen={}", i64_at(d, 64)?),
+                format!("frsize={}", i64_at(d, 72)?),
+                format!("flags={}", i64_at(d, 80)?),
+                format!(
+                    "spare=0x{:x},0x{:x},0x{:x},0x{:x}",
+                    i64_at(d, 88)?,
+                    i64_at(d, 96)?,
+                    i64_at(d, 104)?,
+                    i64_at(d, 112)?
+                ),
+            ];
+            Some(braced(&fields))
+        }
+        "rusage" => {
+            let mut fields = vec![
+                format!(
+                    "utime=timeval{{sec={}, usec={}}}",
+                    i64_at(d, 0)?,
+                    i64_at(d, 8)?
+                ),
+                format!(
+                    "stime=timeval{{sec={}, usec={}}}",
+                    i64_at(d, 16)?,
+                    i64_at(d, 24)?
+                ),
+            ];
+            for (label, off) in [
+                ("Maxrss", 32usize),
+                ("Ixrss", 40),
+                ("Idrss", 48),
+                ("Isrss", 56),
+                ("Minflt", 64),
+                ("Majflt", 72),
+                ("Nswap", 80),
+                ("Inblock", 88),
+                ("Oublock", 96),
+                ("Msgsnd", 104),
+                ("Msgrcv", 112),
+                ("Nsignals", 120),
+                ("Nvcsw", 128),
+                ("Nivcsw", 136),
+            ] {
+                fields.push(format!("{label}=0x{}", hex_i64(i64_at(d, off)?)));
+            }
+            Some(braced(&fields))
+        }
+        // Go reads `syscall.Utsname` as six [65]int8 C strings.
+        "utsname" => {
+            if d.len() < 390 {
+                return None;
+            }
+            let fields = vec![
+                format!("sysname={}", cstr(&d[0..65])),
+                format!("nodename={}", cstr(&d[65..130])),
+                format!("release={}", cstr(&d[130..195])),
+                format!("version={}", cstr(&d[195..260])),
+                format!("machine={}", cstr(&d[260..325])),
+                format!("domainname={}", cstr(&d[325..390])),
+            ];
+            Some(braced(&fields))
+        }
+        "timezone" => {
+            let fields = vec![
+                format!("tz_minuteswest={}", i32_at(d, 0)?),
+                format!("tz_dsttime={}", i32_at(d, 4)?),
+            ];
+            Some(braced(&fields))
+        }
+        // Go reads `syscall.Sysinfo_t` (linux/arm64): every field printed as hex.
+        "sysinfo" => {
+            let fields = vec![
+                format!("uptime=0x{}", hex_i64(i64_at(d, 0)?)),
+                format!(
+                    "loads=0x{:x},0x{:x},0x{:x}",
+                    u64_at(d, 8)?,
+                    u64_at(d, 16)?,
+                    u64_at(d, 24)?
+                ),
+                format!("totalram=0x{:x}", u64_at(d, 32)?),
+                format!("freeram=0x{:x}", u64_at(d, 40)?),
+                format!("sharedram=0x{:x}", u64_at(d, 48)?),
+                format!("bufferram=0x{:x}", u64_at(d, 56)?),
+                format!("totalswap=0x{:x}", u64_at(d, 64)?),
+                format!("freeswap=0x{:x}", u64_at(d, 72)?),
+                format!("procs=0x{:x}", u16_at(d, 80)?),
+                format!("pad=0x{:x}", u16_at(d, 82)?),
+                format!("totalhigh=0x{:x}", u64_at(d, 88)?),
+                format!("freehigh=0x{:x}", u64_at(d, 96)?),
+                format!("unit=0x{:x}", u32_at(d, 104)?),
+            ];
+            Some(braced(&fields))
+        }
+        "sockaddr" => sockaddr(d),
+        _ => None,
     }
+}
 
-    if buf.len() > 32 {
-        result.push_str(&format!(" ...({} bytes total)", buf.len()));
+/// `"{%s}"` around Go's `strings.Join(fields, ", ")`.
+fn braced(fields: &[String]) -> String {
+    format!("{{{}}}", fields.join(", "))
+}
+
+/// Colour-wrapped hex dump used by the `AF_UNSPEC` / unknown-family sockaddr
+/// branches (`util.HexDump(I2B(path), COLORGREEN)`).
+fn green_hex_dump(d: &[u8]) -> String {
+    format!(
+        "{}{}{}",
+        COLOR_GREEN,
+        hex_dump_pure(d),
+        crate::util::COLOR_RESET
+    )
+}
+
+/// `Arg_RawSockaddrUnix.Format` (`config_struct.go:528-566`).
+///
+/// Go branches on the *host-endian* `Family` (`syscall.RawSockaddrUnix` embeds
+/// `Family int16` and `Path [108]int8`). The `AF_INET6` branch re-serialises the
+/// struct big-endian and re-reads fields from that buffer (an upstream quirk:
+/// `Family` is read back LE while `Port`/`Flowinfo`/`Scope_id` are BE), so the
+/// byte swaps below reproduce those exact steps.
+fn sockaddr(d: &[u8]) -> Option<String> {
+    if d.len() < 110 {
+        return None;
     }
-
-    result
+    let family = u16_at(d, 0)?;
+    let path = &d[2..110];
+    let out = match family {
+        1 => format!("(family=AF_FILE, path={})", cstr(path)),
+        2 => {
+            // RawSockaddrInet4 { Family uint16; Port uint16; Addr [4]byte; Zero [8]byte }
+            let port = u16_at(d, 2)?;
+            let addr = std::net::Ipv4Addr::new(d[4], d[5], d[6], d[7]);
+            format!("(family=AF_INET, port={port}, addr={addr})")
+        }
+        10 => {
+            // Reproduce `binary.Write(BigEndian, RawSockaddrUnix)` then the
+            // mixed-endian reads of `RawSockaddrInet6`.
+            let mut buf = vec![0u8; 110];
+            buf[0..2].copy_from_slice(&family.to_be_bytes());
+            buf[2..110].copy_from_slice(path);
+            // `Family` is read back little-endian from that big-endian buffer;
+            // its value is not printed, only used to pick the branch above.
+            let _family_from_be_buffer = u16::from_le_bytes([buf[0], buf[1]]);
+            let port = be_u16_at(&buf, 2)?;
+            let flowinfo =
+                u32::from_be_bytes([*buf.get(4)?, *buf.get(5)?, *buf.get(6)?, *buf.get(7)?]);
+            let addr = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&buf[8..24]).ok()?);
+            let scope_id =
+                u32::from_be_bytes([*buf.get(24)?, *buf.get(25)?, *buf.get(26)?, *buf.get(27)?]);
+            format!(
+                "(family=AF_INET6, port={port}, flowinfo={flowinfo}, addr={addr}, scope_id={scope_id})"
+            )
+        }
+        0 => format!("(family=AF_UNSPEC, path=\n{})", green_hex_dump(path)),
+        other => format!("(family=0x{other:x}, path=\n{})", green_hex_dump(path)),
+    };
+    Some(out)
 }
 
 #[cfg(test)]
@@ -421,33 +337,96 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_timespec_format() {
-        let ts = Timespec {
-            sec: 1234567890,
-            nsec: 123456789,
-        };
-        assert_eq!(ts.format(), "(sec=1234567890, nsec=123456789)");
+    fn timespec_matches_go() {
+        let mut d = [0u8; 16];
+        d[0..8].copy_from_slice(&1234567890i64.to_le_bytes());
+        d[8..16].copy_from_slice(&123456789i64.to_le_bytes());
+        assert_eq!(
+            format_struct("timespec", &d).unwrap(),
+            "(sec=1234567890, nsec=123456789)"
+        );
     }
 
     #[test]
-    fn test_pollfd_format() {
-        let pfd = Pollfd {
-            fd: 3,
-            events: 1,
-            revents: 0,
-        };
-        assert_eq!(pfd.format(), "(fd=3, events=1, revents=0)");
+    fn timezone_and_pollfd() {
+        let mut d = [0u8; 8];
+        d[0..4].copy_from_slice(&(-60i32).to_le_bytes());
+        d[4..8].copy_from_slice(&(1i32).to_le_bytes());
+        assert_eq!(
+            format_struct("timezone", &d).unwrap(),
+            "{tz_minuteswest=-60, tz_dsttime=1}"
+        );
+        let mut p = [0u8; 8];
+        p[0..4].copy_from_slice(&3i32.to_le_bytes());
+        p[4..6].copy_from_slice(&1u16.to_le_bytes());
+        p[6..8].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(
+            format_struct("pollfd", &p).unwrap(),
+            "(fd=3, events=1, revents=0)"
+        );
     }
 
     #[test]
-    fn test_sigaction_format() {
-        let sa = Sigaction {
-            sa_handler: 0x12345678,
-            sa_sigaction: 0,
-            sa_mask: 0xffffffff,
-            sa_flags: 0x04000000,
-            sa_restorer: 0,
-        };
-        assert!(sa.format().contains("sa_handler=0x12345678"));
+    fn short_payload_is_none() {
+        assert!(format_struct("timespec", &[0u8; 8]).is_none());
+        assert!(format_struct("sockaddr", &[0u8; 100]).is_none());
+    }
+
+    #[test]
+    fn unknown_name_is_none() {
+        assert!(format_struct("not_a_struct", &[0u8; 64]).is_none());
+    }
+
+    #[test]
+    fn sockaddr_unix() {
+        let mut d = [0u8; 110];
+        d[0..2].copy_from_slice(&1u16.to_le_bytes()); // AF_FILE
+        d[2..10].copy_from_slice(b"/tmp/foo");
+        assert_eq!(
+            format_struct("sockaddr", &d).unwrap(),
+            "(family=AF_FILE, path=/tmp/foo)"
+        );
+    }
+
+    #[test]
+    fn sockaddr_inet() {
+        let mut d = [0u8; 110];
+        d[0..2].copy_from_slice(&2u16.to_le_bytes()); // AF_INET
+        d[2..4].copy_from_slice(&8080u16.to_le_bytes());
+        d[4..8].copy_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(
+            format_struct("sockaddr", &d).unwrap(),
+            "(family=AF_INET, port=8080, addr=1.2.3.4)"
+        );
+    }
+
+    #[test]
+    fn stat_uses_go_arm64_offsets() {
+        let mut d = [0u8; 128];
+        d[0..8].copy_from_slice(&7u64.to_le_bytes()); // dev
+        d[8..16].copy_from_slice(&9u64.to_le_bytes()); // ino
+        d[16..20].copy_from_slice(&0o100644u32.to_le_bytes()); // mode
+        d[20..24].copy_from_slice(&1u32.to_le_bytes()); // nlink
+        d[24..28].copy_from_slice(&1000u32.to_le_bytes()); // uid
+        d[28..32].copy_from_slice(&1000u32.to_le_bytes()); // gid
+        let s = format_struct("stat", &d).unwrap();
+        assert!(
+            s.starts_with("{dev=7, ino=9, nlink=1, mode=33188, uid=1000, gid=1000"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn rusage_uses_hex_like_go() {
+        let mut d = [0u8; 144];
+        d[32..40].copy_from_slice(&42i64.to_le_bytes()); // Maxrss
+        let s = format_struct("rusage", &d).unwrap();
+        assert!(s.contains("Maxrss=0x2a"), "{s}");
+    }
+
+    #[test]
+    fn utf16_string_from_render_dependency_exists() {
+        // sanity: the formatter uses render::b2s_trim
+        assert_eq!(super::cstr(b"abc\0\0"), "abc");
     }
 }

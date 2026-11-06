@@ -27,10 +27,6 @@ pub struct SyscallConfig {
     pub kill_signal: u32,
     pub tkill_signal: u32,
     pub auto_resume: bool,
-    /// Legacy per-sysno field. dev runs one module for all syscalls and the
-    /// event renderer's `NR:` segment comes from the decoded event, so this
-    /// stays 0; kept because `SyscallDataEvent::from_config` reads it.
-    pub nr: i64,
 
     // Filter lists (mirrors ModuleConfig fields)
     pub debug: bool,
@@ -70,7 +66,6 @@ impl SyscallConfig {
             kill_signal: 0,
             tkill_signal: 0,
             auto_resume: false,
-            nr: 0,
             debug: false,
             uid_whitelist: Vec::new(),
             uid_blacklist: Vec::new(),
@@ -89,7 +84,7 @@ impl SyscallConfig {
     }
 
     /// Produce the on-wire `SyscallFilter` for `filter_map`.
-    /// Mirrors `SyscallConfig.GetFilter()` (`config_syscall.go:26-35`).
+    /// Master-era `SyscallConfig.GetFilter()` (`origin/master:user/config/config_syscall.go:26-35`).
     pub fn get_filter(&self) -> SyscallFilter {
         // One module handles every syscall now (dev model), so the legacy
         // per-sysno `filter_map` value carries nr = 0.
@@ -97,7 +92,7 @@ impl SyscallConfig {
     }
 
     /// Human-readable hook label, used for log lines.
-    /// Mirrors `SyscallConfig.Info()` (`config_syscall.go:145-160`), which lists
+    /// Mirrors `SyscallConfig.Info()` (`config_module.go:738-750`), which lists
     /// the whitelist/blacklist by name.
     pub fn info(&self) -> String {
         let name_of = |nr: u32| {
@@ -170,9 +165,9 @@ impl SyscallConfig {
 
     /// `common_filter_t.trace_mode` for this config.
     ///
-    /// Mirrors master's `SyscallConfig.TraceMode` (`config_module.go:560,649`),
+    /// Mirrors `SyscallConfig.TraceMode` (dev `config_module.go:441`),
     /// but with the values the C side actually compares against
-    /// (`ebpf/common/consts.h`): `TRACE_COMMON(0)` makes `ebpf/syscall.c:88,202`
+    /// (`ebpf/common/consts.h`): `TRACE_COMMON(0)` makes `ebpf/syscall.c:93,212`
     /// gate on the per-sysno whitelist in `common_list`, `TRACE_ALL(1)` skips
     /// that gate.
     ///
@@ -341,7 +336,7 @@ mod tests {
 
     /// Regression test for report §5.1: `trace_mode` must be one of the two
     /// contract values `TRACE_COMMON(0)`/`TRACE_ALL(1)` understood by
-    /// `ebpf/syscall.c:88,202`, never the old ad-hoc `1`/`2`. With `-s 63` the
+    /// `ebpf/syscall.c:93,212`, never the old ad-hoc `1`/`2`. With `-s 63` the
     /// sysno whitelist gate must switch on, i.e. exactly `TRACE_COMMON == 0`
     /// (the old code wrote 1 or 2 here, so the gate never fired).
     #[test]

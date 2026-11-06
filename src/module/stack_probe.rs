@@ -317,103 +317,11 @@ fn render_uprobe_event(raw: &[u8], hook_points: &[UprobeArgs]) -> Result<String>
 
     let rec = decode_perf_record(raw)?;
     match rec {
-        PerfRecord::UprobeEnter(e) => {
-            let ctx = &e.context;
-            let comm = {
-                let s = std::str::from_utf8(&ctx.comm)
-                    .unwrap_or("")
-                    .trim_end_matches('\0')
-                    .trim_end_matches(' ');
-                s.to_string()
-            };
-            let uuid = format!("[{}|{}|{comm}]", ctx.pid, ctx.tid);
-
-            let point_idx = e.point_key as usize;
+        PerfRecord::UprobeEnter(mut e) => {
             let point = hook_points
-                .get(point_idx)
-                .ok_or_else(|| anyhow!("point_key {point_idx} out of range"))?;
-
-            // Build arg string from the TLV cursor.
-            let mut arg_parts = Vec::new();
-            let mut cursor = e.args;
-            for pa in &point.point_args {
-                // Each arg starts with an Arg_reg: [u8 index][u64 address/value]
-                let (idx, reg_bytes) = cursor.next_raw_borrow(9)?;
-                let _ = idx;
-                if reg_bytes.len() >= 9 {
-                    let addr = u64::from_le_bytes([
-                        reg_bytes[1],
-                        reg_bytes[2],
-                        reg_bytes[3],
-                        reg_bytes[4],
-                        reg_bytes[5],
-                        reg_bytes[6],
-                        reg_bytes[7],
-                        reg_bytes[8],
-                    ]);
-
-                    // Look up the arg type to determine how to render.
-                    let at = crate::argtype::get_arg_type(pa.type_index);
-
-                    // For simple numeric/pointer types, the reg value IS the data.
-                    // For string/buffer/struct types, additional TLV payload follows.
-                    let rendered = match at.base_type {
-                        crate::argtype::consts::TYPE_INT
-                        | crate::argtype::consts::TYPE_INT8
-                        | crate::argtype::consts::TYPE_INT16
-                        | crate::argtype::consts::TYPE_INT32
-                        | crate::argtype::consts::TYPE_INT64
-                        | crate::argtype::consts::TYPE_UINT
-                        | crate::argtype::consts::TYPE_UINT8
-                        | crate::argtype::consts::TYPE_UINT16
-                        | crate::argtype::consts::TYPE_UINT32
-                        | crate::argtype::consts::TYPE_UINT64
-                        | crate::argtype::consts::TYPE_POINTER => {
-                            crate::argtype::render::format_num(
-                                addr,
-                                at.format_type,
-                                matches!(
-                                    at.base_type,
-                                    crate::argtype::consts::TYPE_INT
-                                        | crate::argtype::consts::TYPE_INT8
-                                        | crate::argtype::consts::TYPE_INT16
-                                        | crate::argtype::consts::TYPE_INT32
-                                        | crate::argtype::consts::TYPE_INT64
-                                ),
-                                at.size,
-                            )
-                        }
-                        _ => {
-                            // String/buffer/struct: try to read the payload
-                            // ([u8 index][u32 len][bytes...]).
-                            if let Ok((_, _, payload_bytes)) = cursor.next_length_prefixed() {
-                                crate::argtype::render::render_arg_value(
-                                    at.base_type,
-                                    at.type_index,
-                                    at.size,
-                                    at.format_type,
-                                    payload_bytes,
-                                    at.dump_hex,
-                                )
-                            } else {
-                                format!("0x{addr:x}")
-                            }
-                        }
-                    };
-                    arg_parts.push(format!("{}={rendered}", pa.name));
-                }
-            }
-
-            let arg_str = if arg_parts.is_empty() {
-                String::new()
-            } else {
-                format!("({})", arg_parts.join(", "))
-            };
-
-            Ok(format!(
-                "{uuid} {}{arg_str} LR:0x{:x} PC:0x{:x} SP:0x{:x}",
-                point.name, e.lr, e.pc, e.sp
-            ))
+                .get(e.point_key as usize)
+                .ok_or_else(|| anyhow!("point_key {} out of range", e.point_key))?;
+            crate::event::render::render_uprobe_event(&mut e, point)
         }
         _ => Ok(format!("non-uprobe event ({} bytes)", raw.len())),
     }

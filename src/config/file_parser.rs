@@ -183,14 +183,15 @@ impl ParamConfig {
             }
 
             "iovec" => {
-                // TODO: implement r_iovec_reg for dynamic iovec reading
-                // For now, treat as a pointer type
-                point_arg.set_type_by_name("iovec");
+                // `R_IOVEC_REG(this.Size)`: `size` is the register holding the
+                // iovec count (upstream `GetRegIndex`, panic on a bad name).
+                let type_idx = crate::argtype::r_iovec_reg(get_reg_index(&self.size));
+                point_arg.set_type_index(type_idx);
                 point_arg.set_group_type(EBPF_UPROBE_ENTER);
             }
 
             "int_arr" | "uint_arr" | "ptr_arr" => {
-                // Array with required size
+                // Array with required size.
                 let size = self
                     .size
                     .parse::<u32>()
@@ -200,9 +201,9 @@ impl ParamConfig {
                     "uint_arr" => UINT,
                     _ => UINT64,
                 };
-                // TODO: implement r_num_array_fmt for format-aware arrays
-                // For now, use basic r_num_array
-                let type_idx = crate::argtype::r_num_array(base_type, size);
+                // `R_NUM_ARRAY_FMT(base, size, this.Format)`: only `hex` changes
+                // the element format; everything else stays decimal.
+                let type_idx = crate::argtype::r_num_array_fmt(base_type, size, &self.format);
                 point_arg.set_type_index(type_idx);
                 point_arg.set_group_type(EBPF_UPROBE_ENTER);
             }

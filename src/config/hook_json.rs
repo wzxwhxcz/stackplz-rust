@@ -1,6 +1,8 @@
 //! JSON hook-config DTOs for the `stack --config` file.
-//! Mirrors `BaseHookConfig`, `LibHookConfig`, `HookConfig` in
-//! `cli/cmd/stack.go:28-44` and the `parseConfig` logic (`stack.go:199-307`).
+//! Master-era DTOs (`BaseHookConfig`, `LibHookConfig`, `HookConfig` in
+//! `origin/master:cli/cmd/stack.go:28-44`; `parseConfig` at `stack.go:199-307`).
+//! Dev has no such file: hook JSON there is parsed by `config_file.go` +
+//! `GlobalConfig.Parse_Libinfo` (`config_global.go:160`).
 //!
 //! Schema (matches the shipped `config.json`):
 //! ```jsonc
@@ -22,7 +24,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One (stack, regs) combination with its symbols and offsets.
-/// Mirrors `BaseHookConfig` (`stack.go:28-33`).
+/// Master-era `BaseHookConfig` (`origin/master:cli/cmd/stack.go:28-33`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BaseHookConfig {
     #[serde(rename = "stack", default)]
@@ -35,7 +37,8 @@ pub struct BaseHookConfig {
     pub offsets: Vec<String>,
 }
 
-/// A library's full hook config. Mirrors `LibHookConfig` (`stack.go:35-39`).
+/// A library's full hook config. Master-era `LibHookConfig`
+/// (`origin/master:cli/cmd/stack.go:35-39`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LibHookConfig {
     pub library: String,
@@ -45,7 +48,8 @@ pub struct LibHookConfig {
     pub configs: Vec<BaseHookConfig>,
 }
 
-/// Top-level hook config. Mirrors `HookConfig` (`stack.go:41-44`).
+/// Top-level hook config. Master-era `HookConfig`
+/// (`origin/master:cli/cmd/stack.go:41-44`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookConfig {
     #[serde(rename = "library_dirs", default)]
@@ -55,7 +59,8 @@ pub struct HookConfig {
 }
 
 /// Decode a hex offset string like `"0xF37C"` / `"0xf37c"` to a u64.
-/// Mirrors `hex2int` (`stack.go:46-50`): strip the `0x` prefix then parse
+/// Master-era `hex2int` (`origin/master:cli/cmd/stack.go:46-50`): strip the
+/// `0x` prefix then parse
 /// base-16. Invalid input yields 0 (matching Go's ignored error).
 pub fn hex2int(hex: &str) -> u64 {
     let cleaned = hex.replace("0x", "").replace("0X", "");

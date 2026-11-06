@@ -1,13 +1,23 @@
 //! Configuration types. Mirrors package `config` (`user/config/*.go`).
 //!
-//! - `SConfig` / `StackFilter` / `SyscallFilter` => `iconfig.go`
+//! - `SConfig` / `StackFilter` / `SyscallFilter` => master shape, no dev
+//!   carrier (`origin/master:user/config/iconfig.go:5-46`; kept here for the
+//!   legacy `filter_map` wire layout). Dev writes one shared `CommonFilter`
+//!   (`config_filter.go:18-24`) instead of per-module filter structs.
 //! - `GlobalConfig`  => `config_global.go`
-//! - `TargetConfig`  => `config_target.go`
-//! - `StackConfig` / `ProbeConfig` => `config_stack.go` / `config_hook.go`
-//! - `SyscallConfig` => `config_syscall.go`
+//! - `TargetConfig`  => master shape, no dev carrier
+//!   (`origin/master:user/config/config_target.go:3-12`); dev resolves the
+//!   target inline in `persistentPreRunEFunc` (`cli/cmd/root.go:209-250`).
+//! - `StackConfig` / `ProbeConfig` => master shape, no dev carrier
+//!   (`origin/master:user/config/config_stack.go:3-11`,
+//!   `origin/master:user/config/config_hook.go:10-16`); dev's carriers are `StackUprobeConfig`
+//!   (`config_module.go:23`) and `ModuleConfig` (`config_module.go:752-799`).
+//! - `SyscallConfig` => `config_module.go:437-447` (dev moved it out of
+//!   `config_syscall.go`)
 //! - `filter`        => `config_filter.go`
 //! - `file_parser`   => `config_file.go` (YAML/JSON config files)
-//! - JSON DTOs       => `hook_json.rs` (mirrors `cli/cmd/stack.go` structs)
+//! - JSON DTOs       => `hook_json.rs` (master shape, no dev carrier:
+//!   `origin/master:cli/cmd/stack.go:28-50`)
 
 pub mod file_parser;
 pub mod filter;

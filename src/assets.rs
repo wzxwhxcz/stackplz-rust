@@ -76,7 +76,7 @@ pub fn preload_lib_for_sdk(sdk_int: u32) -> &'static str {
     }
 }
 
-/// `GetSdkInt()` (`cli/cmd/root.go:617-624`): read `ro.build.version.sdk`, and
+/// `GetSdkInt()` (`cli/cmd/root.go:586-601`): read `ro.build.version.sdk`, and
 /// fall back to 29 when `getprop` is unavailable or unparseable.
 pub fn get_sdk_int() -> u32 {
     const DEFAULT_SDK_INT: u32 = 29;

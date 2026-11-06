@@ -10,7 +10,7 @@
 //!    an "absent" sentinel made `-u 0` ("trace root only") and multi-uid lists
 //!    inexpressible; that type is gone. See DONE.md §W11 for the conflict note
 //!    against the round-2 decision.
-//! 2. **List limits are 1024**, dev's `MAX_COUNT` (`config_const.go:10`), not
+//! 2. **List limits are 1024**, dev's `MAX_COUNT` (`config_const.go:11`), not
 //!    master's 5-entry `tid_blacklist[5]` array bound. The legacy 5-entry array
 //!    in `SConfig` is still filled for the `filter_map` wire struct, but it no
 //!    longer bounds the CLI.
@@ -20,7 +20,7 @@ use anyhow::{bail, Result};
 use crate::cli::args::Cli;
 use crate::contract::enums::TraceGroup;
 
-/// dev `config.MAX_COUNT` (`user/config/config_const.go:10`).
+/// dev `config.MAX_COUNT` (`user/config/config_const.go:11`).
 pub const MAX_LIST_COUNT: usize = 1024;
 
 /// Mirrors Go `config.GlobalConfig`.
@@ -124,7 +124,7 @@ impl GlobalConfig {
         false
     }
 
-    /// `InitLibraryDirs()` (`config_global_forarm64.go:16-27`): the standard
+    /// `InitLibraryDirs()` (`config_global_forarm64.go:14-24`): the standard
     /// Android library search paths for the target ABI.
     pub fn init_library_dirs(&mut self) {
         let paths: &[&str] = if cfg!(target_pointer_width = "32") {

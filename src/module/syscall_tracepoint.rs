@@ -57,7 +57,7 @@ impl SyscallTracepointModule {
                 PointArgsSide::Exit => point.exit_config(),
             };
             // `--kill`/`--tkill` are delivered through `common_filter`
-            // (`signal`/`tsignal`), not per point; `syscall.c:162` reads the
+            // (`signal`/`tsignal`), not per point; `syscall.c:165-167` reads the
             // per-point `signal` only for the legacy path, so it stays 0 exactly
             // like `SyscallPoint.GetEnterConfig()` does.
             let mut value = SyscallPointArgs {
@@ -373,7 +373,7 @@ impl SyscallTracepointModule {
         // Mirrors `MSyscall.update_sysenter_point_args()`
         // (`user/module/syscall.go:322-340`): one `point_args_t` per syscall
         // number, built from `SyscallPoint::enter_config()`. This is the map
-        // `ebpf/syscall.c:81-82` looks up — if it is empty, the kernel program
+        // `ebpf/syscall.c:86-87` looks up — if it is empty, the kernel program
         // returns 0 for every syscall and the whole module is a no-op
         // (report W1/F1).
         self.write_point_args(obj, logger, PointArgsSide::Enter)
@@ -453,16 +453,20 @@ impl SyscallTracepointModule {
         })
         .context("failed to set Ctrl-C handler")?;
 
+        // The renderer needs the point table to turn a decoded record into the
+        // dev-format line (`argtype`-aware, not the raw `Debug` dump).
+        let point_table = Arc::new(self.conf.point_table.clone());
+        let dump_hex = self.conf.dump_hex;
         let logger_clone = Arc::clone(&logger);
-        let handle_event =
-            move |_cpu: i32, data: &[u8]| match crate::contract::decode_perf_record(data) {
-                Ok(decoded) => {
-                    logger_clone.println(&format!("{:?}", decoded));
-                }
-                Err(e) => {
-                    logger_clone.println(&format!("decode error: {}", e));
-                }
-            };
+        let handle_event = move |_cpu: i32, data: &[u8]| {
+            let rendered = crate::contract::decode_perf_record(data).and_then(|mut decoded| {
+                crate::event::render::render_syscall_event(&point_table, &mut decoded, dump_hex)
+            });
+            match rendered {
+                Ok(line) => logger_clone.println(&line),
+                Err(e) => logger_clone.println(&format!("decode error: {}", e)),
+            }
+        };
 
         let handle_lost = |_cpu: i32, count: u64| {
             eprintln!("Lost {} events", count);

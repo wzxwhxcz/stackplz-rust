@@ -1,13 +1,13 @@
-//! Shared hook config primitives. Mirrors `user/config/iconfig.go`.
+//! Shared hook config primitives.
 //!
-//! The two filter structs (`StackFilter`, `SyscallFilter`) are the **on-wire BPF
-//! map values** that get written into the `filter_map` HASH map at runtime.
-//! Their layout MUST match `struct filter_t` in `ebpf/stack.c` and
-//! `ebpf/raw_syscalls.c` byte-for-byte (little-endian, no padding holes).
-//!
-//! Verified against the C sources:
-//! - `src/stack.c`        `struct filter_t { u32 uid; u32 pid; u32 tid_blacklist_mask; u32 tid_blacklist[5]; }`        = 32 bytes
-//! - `src/raw_syscalls.c` `struct filter_t { u32 uid; u32 pid; u32 nr; u32 tid_blacklist_mask; u32 tid_blacklist[5]; }` = 36 bytes
+//! `StackFilter` / `SyscallFilter` are **master-era** shapes with no dev
+//! carrier (`origin/master:user/config/iconfig.go:5-46`; master's C
+//! `struct filter_t`). Dev writes one shared `common_filter_t`
+//! (`src/types.h:7-13`) instead of per-module `filter_map` values. They are
+//! kept as the legacy 5-entry `tid_blacklist` carriers used by the `-t` CLI
+//! paths, with the master byte layouts (little-endian, no padding holes):
+//! - stack   `{ u32 uid; u32 pid; u32 tid_blacklist_mask; u32 tid_blacklist[5]; }` = 32 bytes
+//! - syscall `{ u32 uid; u32 pid; u32 nr; u32 tid_blacklist_mask; u32 tid_blacklist[5]; }` = 36 bytes
 
 use anyhow::{bail, Result};
 
@@ -15,7 +15,8 @@ use anyhow::{bail, Result};
 pub const MAX_TID_BLACKLIST_COUNT: usize = 5;
 
 /// Shared hook options, embedded into both `ProbeConfig` and `SyscallConfig`.
-/// Mirrors `SConfig` in `iconfig.go:26-35`.
+/// Master-era `SConfig` (`origin/master:user/config/iconfig.go:26-35`); dev
+/// folds these fields into `ModuleConfig` (`config_module.go:752-799`).
 #[derive(Debug, Clone, Default)]
 pub struct SConfig {
     pub uid: u64,
@@ -35,7 +36,8 @@ impl SConfig {
 }
 
 /// BPF `filter_map` value for the `stack` (uprobe) module.
-/// Mirrors `StackFilter` in `iconfig.go:5-10` and `struct filter_t` in `stack.c:22-27`.
+/// Master-era `StackFilter` (`origin/master:user/config/iconfig.go:5-10`) and
+/// its `struct filter_t` (`origin/master:src/stack.c:22-27`).
 ///
 /// Layout (little-endian):
 ///   offset  0: u32 uid
@@ -53,9 +55,9 @@ pub struct StackFilter {
 }
 
 /// BPF `filter_map` value for the `syscall` (tracepoint) module.
-/// Mirrors `SyscallFilter` in `iconfig.go:12-18` and `struct filter_t` in
-/// `raw_syscalls.c:23-29`. Note the extra `nr` field between `pid` and
-/// `tid_blacklist_mask`.
+/// Master-era `SyscallFilter` (`origin/master:user/config/iconfig.go:12-18`) and
+/// its `struct filter_t` (`origin/master:src/raw_syscalls.c:23-29`). Note the
+/// extra `nr` field between `pid` and `tid_blacklist_mask`.
 ///
 /// Layout (little-endian):
 ///   offset  0: u32 uid
@@ -74,8 +76,8 @@ pub struct SyscallFilter {
     pub tid_blacklist: [u32; MAX_TID_BLACKLIST_COUNT],
 }
 
-/// Trait abstraction over hook configs. Mirrors the `IConfig` interface
-/// (`iconfig.go:20-24`): `GetSConfig() / SetDebug() / Info()`.
+/// Trait abstraction over hook configs. Master-era `IConfig` interface
+/// (`origin/master:user/config/iconfig.go:20-24`): `GetSConfig()/SetDebug()/Info()`.
 pub trait HookConfig: Send + Sync {
     fn sconfig(&self) -> &SConfig;
     fn sconfig_mut(&mut self) -> &mut SConfig;
@@ -89,7 +91,7 @@ pub trait HookConfig: Send + Sync {
 }
 
 /// Helper: build a `StackFilter` from an `SConfig` snapshot.
-/// Mirrors `ProbeConfig.GetFilter()` (`config_hook.go:58-66`).
+/// Master-era `ProbeConfig.GetFilter()` (`origin/master:user/config/config_hook.go:58-66`).
 pub fn stack_filter_from(s: &SConfig) -> StackFilter {
     StackFilter {
         uid: s.uid as u32,
@@ -100,7 +102,7 @@ pub fn stack_filter_from(s: &SConfig) -> StackFilter {
 }
 
 /// Helper: build a `SyscallFilter` from an `SConfig` snapshot + syscall number.
-/// Mirrors `SyscallConfig.GetFilter()` (`config_syscall.go:26-35`).
+/// Master-era `SyscallConfig.GetFilter()` (`origin/master:user/config/config_syscall.go:26-35`).
 pub fn syscall_filter_from(s: &SConfig, nr: i64) -> SyscallFilter {
     SyscallFilter {
         uid: s.uid as u32,
@@ -143,7 +145,7 @@ mod tests {
 
     #[test]
     fn stack_filter_layout_matches_c_struct() {
-        // Must equal `struct filter_t` in stack.c exactly.
+        // Master-era `struct filter_t` layout (`origin/master:src/stack.c:22`).
         assert_eq!(std::mem::size_of::<StackFilter>(), 32);
         // Field offsets via the safe std::mem::offset_of! macro.
         assert_eq!(std::mem::offset_of!(StackFilter, uid), 0);
@@ -154,7 +156,7 @@ mod tests {
 
     #[test]
     fn syscall_filter_layout_matches_c_struct() {
-        // Must equal `struct filter_t` in raw_syscalls.c exactly (with nr field).
+        // Master-era `struct filter_t` layout, `origin/master:src/raw_syscalls.c:23-29`.
         assert_eq!(std::mem::size_of::<SyscallFilter>(), 36);
         // Field offsets via the safe std::mem::offset_of! macro.
         assert_eq!(std::mem::offset_of!(SyscallFilter, uid), 0);

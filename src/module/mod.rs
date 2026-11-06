@@ -1,8 +1,11 @@
 //! eBPF module layer. Mirrors package `module` (`user/module/*.go`).
 //!
 //! Two concrete modules, mirroring the dev-branch Go tree:
-//! - `stack_probe.rs`           => `probe_stack.go`        (uprobe, stack.o)
-//! - `syscall_tracepoint.rs`    => `tracepoint_raw_syscalls.go` (tracepoint)
+//! - `stack_probe.rs`           => `stack.go`        (uprobe, stack.o)
+//! - `syscall_tracepoint.rs`    => `syscall.go`      (tracepoint)
+//!
+//! Master-era names for the same modules were `probe_stack.go` /
+//! `tracepoint_raw_syscalls.go`.
 //!
 //! The shared lifecycle (load, write filter_map, spawn perf reader, dispatch
 //! events) lives in `Module` here, mirroring `imodule.go`.

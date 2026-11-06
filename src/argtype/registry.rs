@@ -192,6 +192,15 @@ pub fn get_arg_type(type_index: u32) -> ArgType {
         .unwrap_or_else(|| panic!("GetArgType for type_index:{type_index} failed"))
 }
 
+/// Try to find by type index, returning `None` instead of panicking.
+///
+/// The userspace parse layer must never panic on a malformed/unexpected event
+/// (the poll callback keeps running); `get_arg_type` stays panic-on-missing for
+/// the config-loading paths that mirror Go.
+pub fn try_get_arg_type(type_index: u32) -> Option<ArgType> {
+    lock_reg().get(&type_index).cloned()
+}
+
 /// `GetArgTypeByName(name)` �?find by name or alias. Panics if not found.
 pub fn get_arg_type_by_name(name: &str) -> ArgType {
     let reg = lock_reg();

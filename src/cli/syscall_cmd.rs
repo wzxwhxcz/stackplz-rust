@@ -1,12 +1,12 @@
 //! Syscall module handler. Mirrors dev's `syscallCommandFunc` equivalent: in dev
 //! the syscall hook is not a subcommand at all — `runFunc` picks the module from
-//! `-s` (`cli/cmd/root.go:387-396`) and `SyscallConfig.Parse_Syscall`
+//! `-s` (`cli/cmd/root.go:386-396`) and `SyscallConfig.Parse_Syscall`
 //! (`config_module.go:647-732`) decides the whitelist from the point table.
 //!
 //! What this module adds over the previous rounds (report W1/F1, the fatal
 //! defect): the point table is loaded and the four BPF maps
 //! (`sysenter_point_args`, `sysexit_point_args`, `op_list`, `arg_filter`) are
-//! actually filled, so `ebpf/syscall.c:81-82,188-189` no longer bails out on
+//! actually filled, so `ebpf/syscall.c:86-87,196-197` no longer bails out on
 //! every syscall.
 
 use crate::config::global::GlobalConfig;

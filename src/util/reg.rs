@@ -1,4 +1,4 @@
-//! `--reg` offset resolution. Mirrors `util.ParseReg` (`helper.go:185-214`).
+//! `--reg` offset resolution. Mirrors `util.ParseReg` (`helper.go:229-259`).
 //!
 //! Reads `/proc/{pid}/maps`, finds the segment containing the given register
 //! value, and returns `"<path> + 0x<offset>"` where

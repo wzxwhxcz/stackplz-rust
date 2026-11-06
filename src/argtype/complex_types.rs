@@ -296,6 +296,44 @@ fn r_buffer_x2() {
     });
 }
 
+/// `R_IOVEC_REG(reg_name)` — `-w` parser's `iovec` type: read the iovec count
+/// from the named register, then run the built-in [`r_iovec`] chain per entry.
+///
+/// Upstream names the type `iovec_<reg_name>` and dispatches by `ParseCB`; this
+/// port dispatches by name prefix in [`crate::argtype::parse`], so the exact
+/// suffix only has to keep the `iovec_` prefix.
+pub fn r_iovec_reg(reg_index: u32) -> u32 {
+    let name = format!("iovec_reg_{reg_index}");
+    let idx = register_new(&name, STRUCT);
+    let iovec = get_arg_type(IOVEC);
+    let iovec_ops = iovec.op_list.clone();
+    let iovec_size = iovec.size;
+    with_type(idx, |at| {
+        at.add_op(build_read_reg_break_count(u64::from(reg_index)));
+        at.add_op(opc_save_reg());
+        at.add_op(opc_for_break());
+        at.add_op(opc_set_tmp_value());
+        at.op_list.extend_from_slice(&iovec_ops);
+        at.add_op(opc_move_tmp_value());
+        at.add_op(add_offset(u64::from(iovec_size)));
+        at.add_op(opc_for_break());
+    });
+    idx
+}
+
+/// `R_NUM_ARRAY_FMT(type_index, length, format)` — array whose elements are
+/// formatted as hex only when the config asked for `format: hex`, otherwise
+/// decimal (`FORMAT_NUM`). Used by the `-w` parser's `*_arr` types.
+pub fn r_num_array_fmt(type_index: u32, length: u32, format: &str) -> u32 {
+    let fmt = if format == "hex" {
+        FORMAT_HEX
+    } else {
+        FORMAT_NUM
+    };
+    let p = new_num_format(type_index, fmt);
+    r_array(p, length)
+}
+
 /// `R_BUFFER_LEN(length)` — buffer with fixed length.
 pub fn r_buffer_len(length: u32) -> u32 {
     if length > MAX_BUF_READ_SIZE {

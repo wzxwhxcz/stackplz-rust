@@ -3,7 +3,7 @@
 //! This is the fix for report §3.2 / W1 (F1, fatal): the syscall module used to
 //! ship four **permanently empty** tables
 //! (`sysenter_point_args` / `sysexit_point_args` / `op_list` / `arg_filter`),
-//! and `ebpf/syscall.c:81-82,188-189` returns 0 as soon as
+//! and `ebpf/syscall.c:86-87,196-197` returns 0 as soon as
 //! `bpf_map_lookup_elem(&sys*_point_args, &sysno)` yields `NULL`. With empty
 //! maps that is *every* syscall, so the module could not emit a single event on
 //! a real device.

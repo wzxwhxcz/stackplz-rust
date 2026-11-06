@@ -3,8 +3,9 @@ name: build
 # Build + test the Rust rewrite against the dev-branch eBPF contract.
 #
 # Two jobs:
-#   test    — host (Linux) `cargo test --lib`; platform-independent contract
-#             unit tests. Runs on every push/PR.
+#   test    — host (Linux) `cargo test --lib` plus the `contracts` and
+#             `ebpf_sources` integration suites (the latter is the only C↔Rust
+#             cross-layer). Runs on every push/PR.
 #   android — cross-compile the eBPF objects (clang) + the Android arm64
 #             binary (NDK clang + libbpf-rs). Produces the actual on-device
 #             artifact. Verifies the eBPF C compiles and CO-RE BTF generates.
@@ -55,6 +56,14 @@ jobs:
 
       - name: cargo test (integration contracts)
         run: cargo test --test contracts
+
+      - name: cargo test (eBPF C ↔ Rust source contracts)
+        # The only C↔Rust cross-layer and the only test that reads ebpf/*.h/*.c.
+        # It needs no clang, kernel or root: it parses the C sources as text and
+        # locks the event ids, trace_mode, op_ctx/common_filter layout and the
+        # sha256 of the 12 files that are byte-identical to upstream dev. This
+        # layer was previously absent from CI, so C-side drift went unnoticed.
+        run: cargo test --test ebpf_sources --offline
 
       - name: cargo fmt --check (informational; cannot run locally during Phase 0)
         # Kept as a check but non-blocking: formatting will be normalized in a

@@ -114,6 +114,26 @@ pub const ARM64_REG_MASK: u64 = (1u64 << ARM64_REG_COUNT) - 1;
 /// `imodule.go:215`; 8192 is that field's default).
 pub const SAMPLE_STACK_USER: u64 = 8192;
 
+/// `common_list` map key for list value `v` in the segment starting at `offset`.
+///
+/// The eight segments are one `COMMON_LIST_SEGMENT_STRIDE` wide, so `v >=
+/// stride` would place a whitelist entry inside the *next* (blacklist) segment
+/// and silently flip filtering — `uid_t` is a full `u32`, so that is reachable.
+/// `checked_add` also rejects a `v` near `u32::MAX` (the offsets alone cannot
+/// overflow `u32`).
+pub fn common_list_key(v: u32, offset: u32) -> Result<u32> {
+    use crate::contract::consts::{COMMON_LIST_MAX_KEY, COMMON_LIST_SEGMENT_STRIDE};
+    v.checked_add(offset)
+        .filter(|k| v < COMMON_LIST_SEGMENT_STRIDE && *k < COMMON_LIST_MAX_KEY)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "common_list value {v} + offset {offset:#x} escapes the segment space \
+                 (value must stay below the stride {COMMON_LIST_SEGMENT_STRIDE:#x} \
+                 and the key below COMMON_LIST_MAX_KEY {COMMON_LIST_MAX_KEY:#x})"
+            )
+        })
+}
+
 // ---- Linux-only libbpf-rs glue -------------------------------------------
 
 #[cfg(target_os = "linux")]
@@ -258,9 +278,10 @@ pub mod linux {
     ///
     /// `no_filter_allow` is written as 0 here: the uprobe (`stack`) module always
     /// sets an explicit uid-group mask / thread filter, so `should_trace()` must
-    /// keep its whitelist-style default deny. Only the syscall module passes 1,
-    /// and only when the user configured no filter at all
-    /// (`SyscallConfig::has_no_user_filter()`).
+    /// keep its whitelist-style default deny. The syscall module does **not** use
+    /// this function — it assembles the same bytes with
+    /// `SyscallConfig::to_common_filter_bytes()`, which is the only writer of
+    /// `no_filter_allow = 1` (when the user configured no filter at all).
     pub fn write_common_filter(
         obj: &Object,
         is_32bit: bool,
@@ -285,6 +306,9 @@ pub mod linux {
     /// Each item `v` is stored at key `v + offset` → value `v + offset`.
     /// Used for uid/pid/tid white+blacklists.
     /// Mirrors Go's `update_common_list()` in `stack.go:215-235`.
+    ///
+    /// The key is range-checked by [`super::common_list_key`], so a value that
+    /// would land in the next segment is an error rather than an aliased filter.
     pub fn write_common_list(obj: &Object, items: &[u32], offset: u32) -> Result<()> {
         if items.is_empty() {
             return Ok(());
@@ -294,7 +318,7 @@ pub mod linux {
             .find(|m| m.name() == "common_list")
             .ok_or_else(|| anyhow!("cannot find common_list map"))?;
         for &v in items {
-            let key = v + offset;
+            let key = super::common_list_key(v, offset)?;
             let key_bytes = key.to_ne_bytes();
             let val_bytes = key.to_ne_bytes();
             map.update(&key_bytes, &val_bytes, MapFlags::ANY)?;
@@ -446,6 +470,47 @@ mod tests {
             // And the key is the 1-based filter index.
             assert_eq!(filter.filter_index, (i + 1) as u32);
         }
+    }
+
+    /// `write_common_list` used to compute `key = v + offset` unchecked. The
+    /// segments are one stride apart, so a whitelist value `>= stride` lands in
+    /// the next segment — which is that segment's *blacklist* — silently
+    /// flipping the filter. `uid_t` is a full u32, so it is reachable.
+    #[test]
+    fn common_list_key_rejects_values_that_alias_the_next_segment() {
+        use crate::contract::consts as c;
+
+        // Every legitimate value stays inside its own segment.
+        assert_eq!(
+            common_list_key(0, c::SYS_WHITELIST_START).unwrap(),
+            0x400000
+        );
+        assert_eq!(
+            common_list_key(4 * 1024 * 1024 - 1, c::PID_WHITELIST_START).unwrap(),
+            c::PID_WHITELIST_START + 4 * 1024 * 1024 - 1
+        );
+
+        // One stride of headroom is exactly what the segment has; +1 crosses it.
+        assert_eq!(
+            common_list_key(0x3FFFFF, c::PID_WHITELIST_START).unwrap(),
+            c::PID_BLACKLIST_START - 1
+        );
+        // stride == COMMON_LIST_SEGMENT_STRIDE, so whitelist + stride is the
+        // blacklist start of the same group: a whitelist entry must never land
+        // there.
+        for whitelist in [
+            c::UID_WHITELIST_START,
+            c::PID_WHITELIST_START,
+            c::TID_WHITELIST_START,
+        ] {
+            assert!(
+                common_list_key(c::COMMON_LIST_SEGMENT_STRIDE, whitelist).is_err(),
+                "{whitelist:#x} + stride must be rejected, not aliased onto the blacklist"
+            );
+        }
+
+        // u32::MAX as a uid would wrap without checked_add.
+        assert!(common_list_key(u32::MAX, c::UID_WHITELIST_START).is_err());
     }
 
     /// The two mapped filters keep their parsed values in the wire bytes.

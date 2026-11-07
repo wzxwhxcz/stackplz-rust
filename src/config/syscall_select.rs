@@ -1,7 +1,8 @@
 //! `-s/--syscall` and `--no-syscall` spec parsing.
 //!
-//! Mirrors upstream `dev`'s `SyscallConfig.Parse_SyscallNames` +
-//! `SyscallConfig.Parse_Syscall` (`user/config/config_module.go:560-732`).
+//! Mirrors upstream `dev`'s `SyscallConfig.Parse_SyscallNames`
+//! (`user/config/config_module.go:560-645`) +
+//! `SyscallConfig.Parse_Syscall` (`user/config/config_module.go:647-732`).
 //!
 //! Upstream accepts three token kinds in the comma-separated list:
 //!
@@ -30,7 +31,7 @@ use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
 
 /// One `%group` alias and the syscall names it expands to.
 ///
-/// Copied verbatim from `Parse_SyscallNames` (`config_module.go:560-644`); the
+/// Copied verbatim from `Parse_SyscallNames` (`config_module.go:560-645`); the
 /// grouping is upstream's, not a reconstruction. Order is preserved so `-s all`
 /// produces the same whitelist order.
 pub const SYSCALL_GROUPS: &[(&str, &[&str])] = &[
@@ -339,7 +340,7 @@ pub fn select(
 
 /// Attach `-f` filter indices to one syscall point's enter-side arguments.
 ///
-/// Mirrors `Parse_Syscall` (`config_module.go:700-730`) exactly, including the
+/// Mirrors `Parse_Syscall` (`config_module.go:692-727`) exactly, including the
 /// two different placements:
 /// - a single group (`openat:f0.f2`) applies its filters to the **first matching**
 ///   argument — the first `string` argument for string filters, else the first

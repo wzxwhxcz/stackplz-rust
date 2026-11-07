@@ -37,8 +37,6 @@ serde_yaml = "0.9"
 flate2 = "1"
 # Regex (kernel config parsing)
 regex = "1"
-# Random symbol name generation (offset-only hooks)
-rand = "0.10"
 # Dynamic loading of libstackplz.so (replaces cgo dlopen)
 libloading = "0.9"
 # ELF parsing for uprobe symbol -> offset resolution
@@ -46,8 +44,6 @@ object = { version = "0.40", default-features = false, features = ["read"] }
 # Casting repr(C) filter structs to bytes for the BPF map update.
 # `derive` so we can `#[derive(Pod, Zeroable)]` on the filter structs.
 bytemuck = { version = "1", features = ["derive"] }
-# Ctrl-C signal handling for graceful shutdown
-ctrlc = "3.4"
 # Hex encoding/decoding for filter parser
 hex = "0.4"
 # Lazy static initialization for global filter helper

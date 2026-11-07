@@ -207,18 +207,24 @@ fn run_modules(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // Every module thread ended without an error: the process has
-                // nothing left to wait for.
-                if INTERRUPTED.load(Ordering::SeqCst) {
-                    return Ok(());
-                }
-                return Ok(());
+                // Every module thread ended without reporting an error. For a
+                // trace loop that is not a success: both `run()` bodies only
+                // return once their poll loop breaks, so reaching here without
+                // an interrupt means a module stopped on its own.
+                return Err(RunError::Module(
+                    "all modules stopped without a signal, [skip it]".into(),
+                ));
             }
         }
     }
 }
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether SIGINT/SIGTERM has fired. Module poll loops use this to stop.
+pub fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
 
 /// Install SIGINT/SIGTERM handlers that flip [`INTERRUPTED`].
 #[cfg(unix)]

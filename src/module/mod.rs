@@ -28,34 +28,26 @@ pub use syscall_tracepoint::SyscallTracepointModule;
 /// Module name constants. Mirrors `user/module/const.go`.
 pub const MODULE_NAME_STACK: &str = "StackMod";
 pub const MODULE_NAME_SYSCALL: &str = "SyscallMod";
-pub const PROBE_TYPE_UPROBE: &str = "uprobe";
-pub const PROBE_TYPE_TRACEPOINT: &str = "tracepoint";
 
-/// Block until SIGINT/SIGTERM arrives. Used by module run loops.
-#[cfg(unix)]
-pub fn wait_for_signal() {
-    use std::os::raw::c_int;
-    extern "C" {
-        fn signal(signum: c_int, handler: usize) -> usize;
+/// Perf ring-buffer size in 4 KiB pages from the `-b/--buffer` MiB value.
+///
+/// 1 MiB == 256 pages (dev `GlobalConfig.Buffer`). Rejects 0 — a zero-page ring
+/// is unusable — and clamps the upper end so a bogus `-b` cannot over-allocate.
+pub fn perf_pages(buffer_mb: u32) -> anyhow::Result<usize> {
+    if buffer_mb == 0 {
+        anyhow::bail!("buffer size must be at least 1 MiB");
     }
-    static CAUGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    extern "C" fn handler(_sig: c_int) {
-        CAUGHT.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-    const SIGINT: c_int = 2;
-    const SIGTERM: c_int = 15;
-    unsafe {
-        signal(SIGINT, handler as *const () as usize);
-        signal(SIGTERM, handler as *const () as usize);
-    }
-    while !CAUGHT.load(std::sync::atomic::Ordering::SeqCst) {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+    // 4096 MiB == 1 GiB of ring, far above any sane value.
+    Ok(buffer_mb.min(4096) as usize * 256)
 }
 
-#[cfg(not(unix))]
-pub fn wait_for_signal() {
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn perf_pages_rejects_zero_and_clamps() {
+        assert!(super::perf_pages(0).is_err());
+        assert_eq!(super::perf_pages(1).unwrap(), 256);
+        assert_eq!(super::perf_pages(16).unwrap(), 4096);
+        assert_eq!(super::perf_pages(u32::MAX).unwrap(), 4096 * 256);
     }
 }

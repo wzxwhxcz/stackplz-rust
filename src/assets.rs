@@ -14,8 +14,11 @@ struct EmbeddedLib {
     bytes: &'static [u8],
 }
 
-/// The full list of bundled preload libs. Mirrors the 9 files in
-/// `assets/preload_libs/`.
+/// The full list of bundled preload libs: the dev unwinder pair (see below)
+/// plus master-era's 8 dependency libs. The dev `libstackplz*.so` links only
+/// against Android system libs (`readelf -d`: liblog/libm/libdl/libc), so the
+/// master-era `libbase` / `libc++` / `libunwindstack` / ... copies are unused at
+/// runtime — kept because `RestoreAssets` still writes the full upstream set.
 const PRELOAD_LIBS: &[EmbeddedLib] = &[
     EmbeddedLib {
         name: "ld-android.so",
@@ -45,6 +48,10 @@ const PRELOAD_LIBS: &[EmbeddedLib] = &[
         name: "libm.so",
         bytes: include_bytes!("../assets/preload_libs/libm.so"),
     },
+    // Dev build of https://github.com/SeeFlowerX/unwinddaemon (4-arg
+    // `StackPlz`/`StackPlzV2` ABI, see `event::unwind_ffi`). Source: the
+    // upstream stackplz dev tree at 62fc9e8, `preload_libs/libstackplz.so`
+    // (md5 ee8a7548d65f23e8ed4b961d92d200eb, 1,999,080 bytes).
     EmbeddedLib {
         name: "libstackplz.so",
         bytes: include_bytes!("../assets/preload_libs/libstackplz.so"),
@@ -69,7 +76,7 @@ const PRELOAD_LIBS: &[EmbeddedLib] = &[
 /// SDK `<= 29` (Android 10 and older) uses `libstackplz10.so`, renamed over
 /// `libstackplz.so` after extraction; `sdk_int == 0` defaults to 29.
 pub fn preload_lib_for_sdk(sdk_int: u32) -> &'static str {
-    if sdk_int == 0 || sdk_int <= 29 {
+    if sdk_int <= 29 {
         "libstackplz10.so"
     } else {
         "libstackplz.so"
@@ -169,9 +176,32 @@ mod tests {
         assert_eq!(chosen, "libstackplz10.so");
         let lib = tmp.join("preload_libs/libstackplz.so");
         assert!(lib.exists(), "libstackplz.so must exist after the rename");
-        // The Android-10 build is the bigger of the two (2,001,016 vs 597,904).
+        // Both are the ~2 MB dev builds (2,001,016 vs 1,999,080); the old
+        // master ABI build was 597,904 bytes.
         assert!(std::fs::metadata(&lib).unwrap().len() > 1_000_000);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The bundled unwinder builds must be the dev-era ABI: the library exports
+    /// `StackPlzV2` too, which the master-era 597,904-byte build did not. A
+    /// master-era library would not match `event::unwind_ffi` (4-arg `StackPlz`
+    /// with an `UnwindOption` block).
+    #[test]
+    fn bundled_unwinder_is_the_dev_abi_build() {
+        let contains = |haystack: &[u8], needle: &[u8]| {
+            haystack
+                .windows(needle.len())
+                .any(|window| window == needle)
+        };
+        for lib in PRELOAD_LIBS {
+            if lib.name.starts_with("libstackplz") {
+                assert!(
+                    contains(lib.bytes, b"StackPlzV2"),
+                    "{} is not the dev build (no StackPlzV2 export)",
+                    lib.name
+                );
+            }
+        }
     }
 
     #[test]

@@ -129,8 +129,11 @@ pub fn decode_perf_record(raw: &[u8]) -> Result<PerfRecord<'_>> {
         ));
     }
 
-    // The header is `#[repr(C)]` Pod; cast the first 56 bytes directly.
-    let context: EventContext = *bytemuck::from_bytes(&raw[..EVENT_CONTEXT_SIZE]);
+    // The header is `#[repr(C)]` Pod; cast the first 56 bytes directly. This
+    // runs inside a libbpf perf callback, so it must not panic on a
+    // misaligned/short record — a panic there unwinds through C.
+    let context: EventContext = *bytemuck::try_from_bytes(&raw[..EVENT_CONTEXT_SIZE])
+        .map_err(|e| anyhow!("bad header: {e}"))?;
     let args_blob = &raw[EVENT_CONTEXT_SIZE..];
 
     let eventid = EventId::from_u32(context.eventid)

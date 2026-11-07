@@ -68,6 +68,11 @@ pub enum OpCode {
     SavePtrString16,
 }
 
+// Pins the `transmute` in `OpCode::from_u32`: the variant range is contiguous
+// 233..=266. Inserting/reordering a member moves `SavePtrString16` and makes
+// this a build error instead of silent UB.
+const _: () = assert!(OpCode::Skip as u32 == 233 && OpCode::SavePtrString16 as u32 == 266);
+
 impl OpCode {
     /// Parse from a raw `u32`. Returns `None` for values outside the enum.
     pub fn from_u32(v: u32) -> Option<Self> {

@@ -1,39 +1,39 @@
 use anyhow::Result;
 use std::collections::HashSet;
-use std::sync::Mutex;
 
 #[cfg(target_os = "linux")]
 use nix::sys::signal::{kill, Signal};
 #[cfg(target_os = "linux")]
 use nix::unistd::Pid;
 
-/// Manages stopped processes/threads for signal control
+/// Manages stopped processes/threads for signal control.
+///
+/// Single-threaded by design (the module run loop owns it), so it needs no
+/// interior mutability: `&mut self` is the whole synchronisation.
 pub struct SignalManager {
-    stopped_pids: Mutex<HashSet<u32>>,
+    stopped_pids: HashSet<u32>,
 }
 
 impl SignalManager {
     pub fn new() -> Self {
         Self {
-            stopped_pids: Mutex::new(HashSet::new()),
+            stopped_pids: HashSet::new(),
         }
     }
 
     /// Add a PID to the stopped list
-    pub fn add_stopped(&self, pid: u32) {
-        let mut stopped = self.stopped_pids.lock().unwrap();
-        stopped.insert(pid);
+    pub fn add_stopped(&mut self, pid: u32) {
+        self.stopped_pids.insert(pid);
     }
 
     /// Remove a PID from the stopped list
-    pub fn remove_stopped(&self, pid: u32) {
-        let mut stopped = self.stopped_pids.lock().unwrap();
-        stopped.remove(&pid);
+    pub fn remove_stopped(&mut self, pid: u32) {
+        self.stopped_pids.remove(&pid);
     }
 
     /// Resume a single stopped process
     #[cfg(target_os = "linux")]
-    pub fn resume_one(&self, pid: u32) -> Result<()> {
+    pub fn resume_one(&mut self, pid: u32) -> Result<()> {
         match kill(Pid::from_raw(pid as i32), Signal::SIGCONT) {
             Ok(_) => {
                 println!("Let {} Resume", pid);
@@ -54,7 +54,7 @@ impl SignalManager {
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub fn resume_one(&self, pid: u32) -> Result<()> {
+    pub fn resume_one(&mut self, pid: u32) -> Result<()> {
         println!("Signal control not supported on this platform");
         self.remove_stopped(pid);
         Ok(())
@@ -62,12 +62,9 @@ impl SignalManager {
 
     /// Resume all stopped processes
     #[cfg(target_os = "linux")]
-    pub fn resume_all(&self) -> Result<()> {
+    pub fn resume_all(&mut self) -> Result<()> {
         println!("------LetItRun------");
-        let pids: Vec<u32> = {
-            let stopped = self.stopped_pids.lock().unwrap();
-            stopped.iter().copied().collect()
-        };
+        let pids: Vec<u32> = self.stopped_pids.iter().copied().collect();
 
         for pid in pids {
             match kill(Pid::from_raw(pid as i32), Signal::SIGCONT) {
@@ -89,15 +86,15 @@ impl SignalManager {
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub fn resume_all(&self) -> Result<()> {
+    pub fn resume_all(&mut self) -> Result<()> {
         println!("Signal control not supported on this platform");
-        self.stopped_pids.lock().unwrap().clear();
+        self.stopped_pids.clear();
         Ok(())
     }
 
     /// Send a signal to a process
     #[cfg(target_os = "linux")]
-    pub fn send_signal(&self, pid: u32, signal: Signal) -> Result<()> {
+    pub fn send_signal(&mut self, pid: u32, signal: Signal) -> Result<()> {
         kill(Pid::from_raw(pid as i32), signal)?;
 
         // Track stopped processes if SIGSTOP
@@ -109,13 +106,13 @@ impl SignalManager {
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub fn send_signal(&self, _pid: u32, _signal: i32) -> Result<()> {
+    pub fn send_signal(&mut self, _pid: u32, _signal: i32) -> Result<()> {
         Ok(())
     }
 
     /// Get count of stopped processes
     pub fn stopped_count(&self) -> usize {
-        self.stopped_pids.lock().unwrap().len()
+        self.stopped_pids.len()
     }
 }
 
@@ -153,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_signal_manager_add_remove() {
-        let mgr = SignalManager::new();
+        let mut mgr = SignalManager::new();
 
         assert_eq!(mgr.stopped_count(), 0);
 

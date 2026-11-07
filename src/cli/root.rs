@@ -15,7 +15,7 @@
 
 use crate::assets;
 use crate::config::filter::add_filter;
-use crate::config::global::{parse_id_list, parse_name_list, GlobalConfig, MAX_LIST_COUNT};
+use crate::config::global::{parse_id_list, parse_name_list, GlobalConfig};
 use crate::config::{TargetConfig, MAX_TID_BLACKLIST_COUNT};
 use anyhow::{anyhow, bail, Result};
 
@@ -99,7 +99,7 @@ impl ResolvedFilters {
 /// The persistent pre-run. Returns usage-class errors (the caller maps them to
 /// exit code 2, matching Go's panic exit status).
 pub fn persistent_pre_run(global: &mut GlobalConfig, target: &mut TargetConfig) -> Result<()> {
-    // 1. Executable directory (`root.go:137-146`).
+    // 1. Executable directory (`root.go:138-148`).
     let exe =
         std::env::current_exe().map_err(|e| anyhow!("please build as executable binary, {}", e))?;
     let exec_dir = exe
@@ -109,7 +109,7 @@ pub fn persistent_pre_run(global: &mut GlobalConfig, target: &mut TargetConfig) 
         .to_string();
     global.exec_path = exec_dir.clone();
 
-    // 2. SDK level: `--sdk-int` or `getprop ro.build.version.sdk` (`root.go:147-149`).
+    // 2. SDK level: `--sdk-int` or `getprop ro.build.version.sdk` (`root.go:149-151`).
     if global.sdk_int == 0 {
         global.sdk_int = assets::get_sdk_int();
     }
@@ -118,7 +118,7 @@ pub fn persistent_pre_run(global: &mut GlobalConfig, target: &mut TargetConfig) 
     //    (`config_global.go:76-96`). This is also what makes `--sdk-int` real.
     assets::restore_assets_for_sdk(&exec_dir, "preload_libs", global.sdk_int)?;
 
-    // 4. Library search paths (`config_global.go:InitLibraryDirs`).
+    // 4. Library search paths (`config_global_forarm64.go:14-24` `InitLibraryDirs`).
     global.init_library_dirs();
 
     // 5. `-f` argument filters (`root.go:164` → `ParseArgFilter`).
@@ -148,22 +148,22 @@ fn resolve_target(global: &mut GlobalConfig, target: &mut TargetConfig) -> Resul
 
     // dev: `for _, pkg_uid := range mconfig.UidWhitelist` — resolve the package
     // for each uid, skipping the well-known ones (0/1000/2000) which have no
-    // package entry (`root.go:229-238`).
+    // package entry (`root.go:198-207`).
     for uid in &filters.uid_whitelist {
         if matches!(*uid, 0 | 1000 | 2000) {
             continue;
         }
         let package =
             package_by_uid(*uid).map_err(|e| anyhow!("can not find pkg_uid={}: {}", uid, e))?;
-        add_lib_paths(global, target, &package);
+        add_lib_paths(global, target, &package)?;
     }
 
     // dev: `for _, pkg_name := range pkg_names` — non-group `-n` values
-    // (`root.go:239-259`).
+    // (`root.go:209-250`, the `default:` arm is `root.go:223-249`).
     for name in &package_names {
         let info = package_by_name(name)?;
         if info.uid != 1000 {
-            // dev excludes the system uid from the whitelist (`root.go:242-246`).
+            // dev excludes the system uid from the whitelist (`root.go:244-246`).
             if !filters.uid_whitelist.contains(&info.uid) {
                 // Recorded for the error/verbose path; the module lists are
                 // built from the CLI lists exactly as upstream does.
@@ -178,7 +178,7 @@ fn resolve_target(global: &mut GlobalConfig, target: &mut TargetConfig) -> Resul
                 target.library_dirs.push(dir);
             }
         }
-        add_lib_paths(global, target, name);
+        add_lib_paths(global, target, name)?;
     }
 
     if target.pid == 0 {
@@ -212,7 +212,10 @@ fn package_by_name(name: &str) -> Result<PackageInfo> {
         if let Some((key, value)) = line.split_once('=') {
             match key {
                 "userId" => {
-                    info.uid = value.trim().parse().unwrap_or(0);
+                    // A garbled `userId=` must not silently mean uid 0 (root).
+                    info.uid = value.trim().parse().map_err(|_| {
+                        anyhow!("bad userId for package {name}: {:?}", value.trim())
+                    })?;
                     saw_uid = true;
                 }
                 "legacyNativeLibraryDir" => {
@@ -223,7 +226,7 @@ fn package_by_name(name: &str) -> Result<PackageInfo> {
                         info.library_dir = Some(format!("{}/arm64", value));
                     }
                     // Only an arm64-v8a package is supported (master-era
-                    // `origin/master:cli/cmd/root.go:143-201`).
+                    // `origin/master:cli/cmd/root.go:143-205`).
                     let abi_ok = output
                         .lines()
                         .any(|l| l.trim() == "primaryCpuAbi=arm64-v8a");
@@ -267,10 +270,12 @@ fn package_by_uid(uid: u32) -> Result<String> {
 /// `addLibPath` (`root.go:455`) / `Parse_Libinfo` (`config_global.go:160`):
 /// append the apk path and `<apk>/lib/arm64` to the library search dirs when
 /// they exist.
-fn add_lib_paths(global: &mut GlobalConfig, target: &mut TargetConfig, package: &str) {
-    let Ok(output) = run_capture("pm", &["path", package]) else {
-        return;
-    };
+fn add_lib_paths(
+    global: &mut GlobalConfig,
+    target: &mut TargetConfig,
+    package: &str,
+) -> Result<()> {
+    let output = run_capture("pm", &["path", package])?;
     for line in output.lines() {
         let Some((_, apk_path)) = line.split_once(':') else {
             continue;
@@ -286,7 +291,7 @@ fn add_lib_paths(global: &mut GlobalConfig, target: &mut TargetConfig, package: 
     for dir in &global.library_dirs {
         push_unique(&mut target.library_dirs, dir);
     }
-    let _ = MAX_LIST_COUNT;
+    Ok(())
 }
 
 fn push_unique(list: &mut Vec<String>, value: &str) {

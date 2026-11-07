@@ -59,6 +59,9 @@ fn main() {
     for hdr in EBPF_HEADERS {
         println!("cargo:rerun-if-changed=ebpf/{}", hdr);
     }
+    // `debug_print` is only read via `cfg!` in this script, so the feature toggle
+    // must be named explicitly or it never retriggers a rebuild.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DEBUG_PRINT");
 
     // Write .o artifacts to the in-tree `ebpf/bpf/` dir so `include_bytes!`
     // (which needs a fixed relative path) resolves them. This dir also holds

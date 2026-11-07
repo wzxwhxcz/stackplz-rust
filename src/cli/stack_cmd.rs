@@ -45,8 +45,6 @@ pub fn has_uprobe_config(global: &GlobalConfig) -> bool {
 pub fn build_stack_config(global: &GlobalConfig, target: &TargetConfig) -> Result<StackConfig> {
     let filters = crate::config::ResolvedFilters::from_globals(global)?;
     Ok(StackConfig {
-        unwind_stack: global.unwind_stack,
-        show_regs: global.show_regs,
         reg_name: global.reg_name.clone(),
         full_tname: global.full_tname,
         buffer_mb: global.buffer,
@@ -68,6 +66,21 @@ pub fn build_stack_config(global: &GlobalConfig, target: &TargetConfig) -> Resul
     })
 }
 
+/// One attachable uprobe point for a `-c/--config` entry.
+///
+/// `-w/--point` strings get a fully parsed [`UprobeArgs`] from
+/// `parse_hook_point`; a config entry names only a symbol or an offset and has
+/// no argument list, so the point needs no `point_args`. Without this the probe
+/// carries zero points and `StackProbeModule` attaches nothing at all.
+fn uprobe_point(library: &str, symbol: &str, offset: u64) -> crate::config::UprobeArgs {
+    crate::config::UprobeArgs {
+        lib_path: library.to_string(),
+        symbol: symbol.to_string(),
+        offset,
+        ..Default::default()
+    }
+}
+
 /// Build the uprobe probes. Mirrors `parseConfig` / `Parse_HookPoint`.
 fn build_probes(
     global: &GlobalConfig,
@@ -78,8 +91,6 @@ fn build_probes(
 
     let legacy_tid = crate::config::ResolvedFilters::from_globals(global)?;
     let sconfig = SConfig {
-        unwind_stack: stack_conf.unwind_stack,
-        show_regs: stack_conf.show_regs,
         reg_name: stack_conf.reg_name.clone(),
         uid: target.uid,
         pid: target.pid,
@@ -140,18 +151,14 @@ fn build_probes(
                     }
                     seen_symbols.push(symbol.to_string());
                     let mut probe = ProbeConfig {
-                        sconfig: SConfig {
-                            unwind_stack: base.unwindstack,
-                            show_regs: base.regs,
-                            ..sconfig.clone()
-                        },
+                        sconfig: sconfig.clone(),
                         lib_name: String::new(),
                         library: library.clone(),
                         symbol: symbol.to_string(),
                         offset: 0,
                     };
                     probe.check()?;
-                    probes.push((probe, Vec::new()));
+                    probes.push((probe, vec![uprobe_point(&library, symbol, 0)]));
                 }
                 for offset in &base.offsets {
                     let offset = offset.trim();
@@ -163,18 +170,15 @@ fn build_probes(
                     }
                     seen_offsets.push(offset.to_string());
                     let mut probe = ProbeConfig {
-                        sconfig: SConfig {
-                            unwind_stack: base.unwindstack,
-                            show_regs: base.regs,
-                            ..sconfig.clone()
-                        },
+                        sconfig: sconfig.clone(),
                         lib_name: String::new(),
                         library: library.clone(),
                         symbol: String::new(),
                         offset: hex2int(offset),
                     };
                     probe.check()?;
-                    probes.push((probe, Vec::new()));
+                    let off = probe.offset;
+                    probes.push((probe, vec![uprobe_point(&library, "", off)]));
                 }
             }
         }

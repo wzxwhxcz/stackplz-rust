@@ -12,8 +12,8 @@ use super::op::*;
 use super::registry::*;
 
 /// Register all base types. Mirrors `argtype_base.go:init()`.
-/// Idempotent: safe to call multiple times (second call panics on duplicate —
-/// same as Go, so call once during init).
+/// Not idempotent — call once via [`super::init_argtypes`], which is
+/// `OnceLock`-guarded; a second direct call panics on the duplicate registration.
 pub fn init_base_types() {
     // ---- Numeric types (sizes are arm64) ----
     register("ptr", TYPE_POINTER, POINTER, 8);

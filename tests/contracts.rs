@@ -7,7 +7,7 @@ use stackplz::argtype::render::b2s_trim;
 use stackplz::config::hook_json::{hex2int, HookConfig};
 use stackplz::config::sconfig::parse_tid_blacklist;
 use stackplz::config::{ProbeConfig, SConfig, StackFilter, SyscallFilter, MAX_TID_BLACKLIST_COUNT};
-use stackplz::event::{LibArg, UnwindBuf};
+use stackplz::event::{UnwindBuf, UnwindOption};
 
 // ---- filter_t byte-layout contract (mirrors C `struct filter_t`) -----------
 
@@ -57,12 +57,20 @@ fn syscall_filter_has_nr_at_offset_8() {
 }
 
 #[test]
-fn lib_arg_is_288_bytes() {
-    // 1 + 33 + 1 + 1 = 36 u64 fields, no padding => 288 bytes.
-    assert_eq!(std::mem::size_of::<LibArg>(), 288);
+fn unwind_option_is_40_bytes() {
+    // Mirrors the C++ `UnwindOption` (unwinddaemon `lib.cpp:229-235`) that the
+    // shipped dev `libstackplz.so` reads: 4 × u64 + bool + 7 padding bytes.
+    // The field offsets match `StackPlz`'s loads (`[x1]`, `[x1,#0x10]`,
+    // `[x1,#0x18]`, `ldrb [x1,#0x20]`).
+    assert_eq!(std::mem::size_of::<UnwindOption>(), 40);
+    assert_eq!(std::mem::offset_of!(UnwindOption, abi), 0);
+    assert_eq!(std::mem::offset_of!(UnwindOption, stack_size), 8);
+    assert_eq!(std::mem::offset_of!(UnwindOption, dyn_size), 16);
+    assert_eq!(std::mem::offset_of!(UnwindOption, reg_mask), 24);
+    assert_eq!(std::mem::offset_of!(UnwindOption, show_pc), 32);
 }
 
-// ---- tid blacklist mask contract (mirrors root.go:81-92) ------------------
+// ---- tid blacklist mask contract (mirrors origin/master:cli/cmd/root.go:81-92) ----
 
 #[test]
 fn tid_blacklist_mask_is_positional_bits() {
@@ -79,7 +87,7 @@ fn tid_blacklist_max_five() {
 // ---- probe config contract (master-era config_hook.go Check) --------------
 
 #[test]
-fn probe_config_offset_only_fills_random_symbol() {
+fn probe_config_offset_only_keeps_symbol_empty() {
     let lib = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
     let mut p = ProbeConfig {
         sconfig: SConfig::default(),
@@ -89,7 +97,10 @@ fn probe_config_offset_only_fills_random_symbol() {
         offset: 0x1000,
     };
     assert!(p.check().is_ok());
-    assert_eq!(p.symbol.len(), 8);
+    // Review F5: a fabricated random symbol made every offset-only hook fail
+    // `resolve_symbol_offset`. The empty name is what routes the attach path to
+    // the numeric offset.
+    assert!(p.symbol.is_empty());
 }
 
 #[test]

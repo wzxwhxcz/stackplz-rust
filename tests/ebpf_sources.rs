@@ -1194,3 +1194,125 @@ fn identical_ebpf_sources_match_the_upstream_hash_lock() {
         assert!(ebpf_dir().join(rel).is_file(), "ebpf/{rel} vanished");
     }
 }
+
+// ===========================================================================
+// D-S1 — the arm64-only eBPF side vs. the README / CI x86_64 build claim
+//
+// The eBPF C implements *only* arm64/arm register semantics (`_TIF_32BIT` is an
+// arm64-only thread_info flag bit and every lr/sp read is an AArch64 register
+// index). An x86_64 build still compiles and CI runs it, so nothing fails
+// loudly — it just emits plausible, wrong lr/sp. The honest contract is: arm64/
+// arm is the supported target, x86_64 is build-only. These assertions pin that
+// contract in the C comments and in the README so it cannot drift back into an
+// unconditional "x86_64 supported" claim.
+// ===========================================================================
+
+/// `ebpf/common/task.h` and `ebpf/common/arch.h` are where a reader looks to
+/// learn which architectures the eBPF side actually implements. Both must name
+/// x86_64 as build-only and say the lr/sp data is untrustworthy there.
+#[test]
+fn ebpf_headers_state_x86_64_is_build_only() {
+    for file in ["common/task.h", "common/arch.h"] {
+        let src = read_ebpf(file);
+        assert!(
+            src.contains("x86_64"),
+            "ebpf/{file} must state the x86_64 contract (it is build-only), \
+             otherwise the arm64-only register code reads as portable"
+        );
+        for needle in ["x86_64", "arm64"] {
+            assert!(
+                src.contains(needle),
+                "ebpf/{file} must name {needle:?} when describing the supported targets"
+            );
+        }
+        // The claim must be the honest one: build-only, not supported.
+        assert!(
+            src.contains("不可信") || src.contains("build-only") || src.contains("仅编译"),
+            "ebpf/{file} must say x86_64 lr/sp is unusable/build-only, not supported"
+        );
+        assert!(
+            src.contains("shortcut:"),
+            "ebpf/{file}: a knowingly-limited architecture claim needs a \
+             `shortcut: <limit>, <when to upgrade>` comment"
+        );
+    }
+}
+
+/// No eBPF source outside the vendored `bpf/` headers may carry an x86_64
+/// *implementation* branch: there is none, so adding one (or restoring
+/// upstream's) without also fixing `syscall.c`/`stack.c` and this test would
+/// silently advertise x86_64 support again.
+#[test]
+fn no_ebpf_source_claims_an_x86_register_path() {
+    for file in [
+        "common/arch.h",
+        "common/consts.h",
+        "common/task.h",
+        "stack.c",
+        "syscall.c",
+    ] {
+        let src = strip_c_comments(&read_ebpf(file));
+        assert!(
+            !src.contains("__TARGET_ARCH_x86"),
+            "ebpf/{file} has an x86_64 code path; the port only implements \
+             arm64/arm registers. Either implement x86_64 in syscall.c/stack.c \
+             and update the README + ebpf_headers_state_x86_64_is_build_only, \
+             or keep the claim build-only"
+        );
+    }
+}
+
+/// The README is the user-facing support claim that started this: it must not
+/// present the x86_64 build as a supported tracing target.
+#[test]
+fn readme_marks_x86_64_as_build_only() {
+    let readme =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md"))
+            .expect("cannot read README.md");
+
+    assert!(
+        readme.contains("架构限制"),
+        "README must keep an architecture-limitations note: the eBPF side is \
+         arm64/arm only, so an x86_64 build does not produce trustworthy lr/sp"
+    );
+    assert!(
+        readme.contains("不可信") || readme.contains("build-only") || readme.contains("仅编译"),
+        "README must say the x86_64 build is build-only / its lr/sp is unusable"
+    );
+
+    // The support line may not claim x86_64 as a plain supported build, i.e. the
+    // x86_64 bullet must carry the build-only qualifier on the same line.
+    for line in readme.lines().filter(|line| line.contains("x86_64")) {
+        assert!(
+            line.contains("仅编译") || line.contains("build-only") || line.contains("不可信"),
+            "README line claims x86_64 without the build-only qualifier: {line:?}"
+        );
+    }
+}
+
+/// Review F6: `StackProbeModule` binds hook point `i` to program
+/// `probe_stack_<i>`, and `MAX_UPROBE_PROGRAMS` bounds the point count to the
+/// number of programs `ebpf/stack.c` defines. If the C side ever changes that
+/// count, the Rust constant silently becomes a wrong bound (too low = spurious
+/// rejections, too high = "program not found" at attach time), so pin the two
+/// together here.
+#[test]
+fn stack_c_probe_stack_program_count_matches_rust_bound() {
+    let src = strip_c_comments(&read_ebpf("stack.c"));
+
+    let mut defined = 0usize;
+    if src.contains("int probe_stack_0(struct pt_regs* ctx)") {
+        defined += 1;
+    }
+    // `PROBE_STACK(n)` expands into `int probe_stack_##n(...)`.
+    defined += src.matches("PROBE_STACK(").count() - 1; // -1 for the macro definition itself
+
+    assert_eq!(
+        defined,
+        stackplz::config::stack::MAX_UPROBE_PROGRAMS,
+        "ebpf/stack.c defines {defined} probe_stack_<i> programs but \
+         MAX_UPROBE_PROGRAMS says {}; the point cap in \
+         cli::stack_cmd::build_probes depends on these agreeing",
+        stackplz::config::stack::MAX_UPROBE_PROGRAMS
+    );
+}

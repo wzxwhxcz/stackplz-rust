@@ -21,6 +21,11 @@
 //! `--maxop`, `--jstack`, `--mstack`, `--getoff`, `--dumpret`, `--rpc`,
 //! `--rpc-path`, `--brk`, `--brk-pid`, `--brk-lib`, `--brk-len`, `--dump`,
 //! `--parse`, `--showpc`, `--showtime`, `--showuid`, `--btf`.
+//!
+//! `--stack`, `--regs` and `--stack-size` were also removed (review F4): the
+//! eBPF side never emits `UnwindBuf` stack data, so the native unwinder
+//! (`event::parse_stack`) has no production caller. Accepting the flags made
+//! them silently do nothing; they are rejected now instead.
 
 use clap::Parser;
 
@@ -130,18 +135,8 @@ pub struct Cli {
     pub config: Vec<String>,
 
     // ---- stack output flags (root.go:646-652) ----------------------------
-    /// enable unwindstack
-    #[arg(long, default_value_t = false)]
-    pub stack: bool,
-
-    /// show regs
-    #[arg(long, default_value_t = false)]
-    pub regs: bool,
-
-    /// stack dump size, default 8192 bytes, max 65528 bytes (8-byte aligned)
-    #[arg(long = "stack-size", default_value_t = 8192)]
-    pub stack_size: u32,
-
+    // `--stack`, `--regs` and `--stack-size` are not accepted: the unwinder has
+    // no production caller (review F4, see the module doc above).
     /// dump buffer as hex
     #[arg(long, default_value_t = false)]
     pub dumphex: bool,
@@ -203,7 +198,6 @@ mod tests {
         let cli = parse(&["stackplz"]);
         assert!(cli.uid.is_empty());
         assert_eq!(cli.library, "libc.so");
-        assert_eq!(cli.stack_size, 8192);
         assert_eq!(cli.buffer, 8);
         assert_eq!(cli.sdk_int, 0);
     }

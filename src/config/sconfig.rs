@@ -23,8 +23,6 @@ pub struct SConfig {
     pub pid: u64,
     pub tid_blacklist_mask: u32,
     pub tid_blacklist: [u32; MAX_TID_BLACKLIST_COUNT],
-    pub unwind_stack: bool,
-    pub show_regs: bool,
     pub reg_name: String,
     pub debug: bool,
 }
@@ -114,7 +112,8 @@ pub fn syscall_filter_from(s: &SConfig, nr: i64) -> SyscallFilter {
 }
 
 /// Build a tid blacklist (array + mask) from a comma-separated string.
-/// Mirrors `persistentPreRunEFunc` tid parsing (`root.go:81-92`).
+/// Mirrors master-era `persistentPreRunEFunc` tid parsing
+/// (`origin/master:cli/cmd/root.go:81-92`).
 ///
 /// Returns `(blacklist_array, mask)`. Errors if more than 5 entries.
 pub fn parse_tid_blacklist(raw: &str) -> Result<([u32; MAX_TID_BLACKLIST_COUNT], u32)> {

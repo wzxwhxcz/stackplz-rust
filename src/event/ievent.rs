@@ -1,42 +1,31 @@
 //! Common event primitives and on-wire buffer layouts. Mirrors dev's
 //! `user/event/ievent.go` (`CommonEvent`) + `user/event/event_context.go`
-//! (`UnwindBuf` / `RegsBuf`; master kept all of these in `ievent.go`).
+//! (`UnwindBuf` / `RegsBuf` / `UnwindOption`; master kept all of these in
+//! `ievent.go`).
 //!
 //! All multi-byte fields are **little-endian** (decoded with `from_le_bytes`),
 //! matching Go's `encoding/binary.LittleEndian`.
 
 use anyhow::{anyhow, Result};
 
-/// Argument block passed to the native unwinder's `StackPlz` FFI.
-/// Master-era `LibArg` (`origin/master:user/event/ievent.go:104-109`; dev has
-/// none). `#[repr(C)]` so the layout matches
-/// what `get_stack(...)` expects (see `load_so.h`).
+/// Option block passed to the native unwinder's `StackPlz` FFI. Mirrors the C++
+/// `UnwindOption` it casts `void* opt` to (unwinddaemon `lib.cpp:229-235`) and
+/// dev's `ContextEvent.GetOpt()` (`user/event/event_context.go:278-289`).
+///
+/// `#[repr(C)]` so the layout is what `StackPlz` reads: `abi` @0, `stack_size`
+/// @8, `dyn_size` @16, `reg_mask` @24, `show_pc` @32, total 40 bytes (seven
+/// trailing padding bytes). The offsets were re-checked against the bundled dev
+/// `libstackplz.so` disassembly (`StackPlz` loads `[x1]`, `[x1,#0x18]`,
+/// `[x1,#0x10]`, `ldrb [x1,#0x20]`).
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct LibArg {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnwindOption {
     pub abi: u64,
-    pub regs: [u64; super::REG_COUNT],
     pub stack_size: u64,
     pub dyn_size: u64,
+    pub reg_mask: u64,
+    pub show_pc: bool,
 }
-// `[u64; 33]` lacks a std `Default` impl (std caps array Default at 32
-// elements), so provide one manually.
-impl Default for LibArg {
-    fn default() -> Self {
-        Self {
-            abi: 0,
-            regs: [0; super::REG_COUNT],
-            stack_size: 0,
-            dyn_size: 0,
-        }
-    }
-}
-// SAFETY: repr(C) of u64 fields + [u64; 33]; all fields are u64-aligned with no
-// padding holes, and all-zero is a valid representation. Manual impl instead of
-// `#[derive(Pod)]` because bytemuck's array Pod impl is size-limited and
-// [u64; 33] (33 registers) can exceed that limit.
-unsafe impl bytemuck::Pod for LibArg {}
-unsafe impl bytemuck::Zeroable for LibArg {}
 
 /// Parsed perf unwind buffer (regs + stack dump).
 /// Mirrors `UnwindBuf` (`user/event/event_context.go:50`) and `ParseContext`
@@ -70,14 +59,16 @@ impl Default for UnwindBuf {
 }
 
 impl UnwindBuf {
-    /// Build the `LibArg` view passed to the native unwinder.
-    /// Master-era `UnwindBuf.GetLibArg()` (`origin/master:user/event/ievent.go:119-126`).
-    pub fn lib_arg(&self) -> LibArg {
-        LibArg {
+    /// Build the `UnwindOption` passed to `StackPlz`, mirroring dev's
+    /// `ContextEvent.GetOpt()` (`user/event/event_context.go:278-289`): the ARM64
+    /// register mask covers all 33 sampled registers.
+    pub fn unwind_option(&self, show_pc: bool) -> UnwindOption {
+        UnwindOption {
             abi: self.abi,
-            regs: self.regs,
             stack_size: self.stack_size,
             dyn_size: self.dyn_size,
+            reg_mask: crate::ebpf::bpf_common::ARM64_REG_MASK,
+            show_pc,
         }
     }
 
@@ -89,7 +80,8 @@ impl UnwindBuf {
         for r in regs.iter_mut() {
             *r = read_u64(buf, pos)?;
         }
-        let stack_size = read_u64(buf, pos)? as usize;
+        let stack_size =
+            usize::try_from(read_u64(buf, pos)?).map_err(|_| anyhow!("stack_size too large"))?;
         let data = read_bytes(buf, pos, stack_size)?;
         let dyn_size = read_u64(buf, pos)?;
         Ok(UnwindBuf {
@@ -152,7 +144,7 @@ pub(crate) fn read_u64(buf: &[u8], pos: &mut usize) -> Result<u64> {
     Ok(v)
 }
 pub(crate) fn read_bytes(buf: &[u8], pos: &mut usize, n: usize) -> Result<Vec<u8>> {
-    if *pos + n > buf.len() {
+    if n > buf.len().saturating_sub(*pos) {
         return Err(anyhow!(
             "buffer underflow: need {} bytes at pos {} (len {})",
             n,
@@ -177,9 +169,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lib_arg_size_matches_layout() {
-        // 1 + 33 + 1 + 1 = 36 u64s = 288 bytes, packed (u64 aligned, no holes).
-        assert_eq!(std::mem::size_of::<LibArg>(), 36 * 8);
+    fn unwind_option_matches_cpp_layout() {
+        // C++ `UnwindOption` (unwinddaemon `lib.cpp:229-235`): 4 × u64 + bool,
+        // 40 bytes including the trailing padding.
+        assert_eq!(std::mem::size_of::<UnwindOption>(), 40);
+        assert_eq!(std::mem::offset_of!(UnwindOption, abi), 0);
+        assert_eq!(std::mem::offset_of!(UnwindOption, stack_size), 8);
+        assert_eq!(std::mem::offset_of!(UnwindOption, dyn_size), 16);
+        assert_eq!(std::mem::offset_of!(UnwindOption, reg_mask), 24);
+        assert_eq!(std::mem::offset_of!(UnwindOption, show_pc), 32);
     }
 
     #[test]
@@ -203,10 +201,12 @@ mod tests {
         assert_eq!(ub.dyn_size, 0x2000);
         assert_eq!(pos, bytes.len());
 
-        let arg = ub.lib_arg();
-        assert_eq!(arg.stack_size, 4);
-        assert_eq!(arg.dyn_size, 0x2000);
-        assert_eq!(arg.regs[32], 0x1020);
+        let opt = ub.unwind_option(false);
+        assert_eq!(opt.abi, 1);
+        assert_eq!(opt.stack_size, 4);
+        assert_eq!(opt.dyn_size, 0x2000);
+        assert_eq!(opt.reg_mask, crate::ebpf::bpf_common::ARM64_REG_MASK);
+        assert!(!opt.show_pc);
     }
 
     #[test]

@@ -20,7 +20,7 @@
 | **eBPF 模块** | ✅ 4/4 完整迁移 (syscall/uprobe/brk/perf_mmap) |
 | **数据结构** | ✅ 11/11 完全一致 |
 | **高级功能** | ✅ 信号控制/dump/RPC/硬件断点 |
-| **单元测试** | ✅ 304 个通过（254 lib + 33 contracts + 17 ebpf_sources） |
+| **单元测试** | ✅ 319 个通过（267 lib + 31 contracts + 21 ebpf_sources） |
 | **CI/CD** | ✅ GitHub Actions (Ubuntu + Android) |
 | **代码质量** | ✅ clippy 0 warnings + rustfmt |
 | **文档覆盖** | ✅ 15,700+ 行完整文档 |
@@ -40,7 +40,7 @@
 | **eBPF C 源** | dev 分支 | **12/19 逐字节相同**；6 个文件承载两轮有意修复，1 个（`common/arch.h`）删死宏 | 修复点均为有意偏差 |
 | **内存安全** | ⚠️ 运行时检查 | ✅ 编译期保证 | 零 null 指针 |
 | **并发安全** | ⚠️ 运行时检查 | ✅ Send/Sync 编译期保证 | 零数据竞争 |
-| **单元测试** | ❌ 未知 | ✅ 304 个（254+33+17） | 高质量保证 |
+| **单元测试** | ❌ 未知 | ✅ 319 个（267+31+21） | 高质量保证 |
 | **文档** | ❌ 部分 | ✅ 完整 rustdoc | 15,700+ 行 |
 
 ---
@@ -91,9 +91,13 @@ stackplz-rust/
 ### 自动构建（推荐）
 
 通过 GitHub Actions 自动构建（`.github/workflows/build.yml`）：
-- **Ubuntu 构建**：x86_64 Linux
-- **Android 构建**：aarch64/armv7 交叉编译
-- **质量检查**：304 个测试（254 lib + 33 contracts + 17 ebpf_sources）+ clippy + rustfmt
+- **Ubuntu 构建（仅编译 / CI 检查）**：x86_64 Linux；x86_64 目标进程的 `lr`/`sp` 不可信
+- **Android 构建**：aarch64/armv7 交叉编译（eBPF 侧实际支持的目标平台）
+- **质量检查**：319 个测试（267 lib + 31 contracts + 21 ebpf_sources）+ clippy + rustfmt
+
+> **架构限制**：eBPF C 侧只实现 arm64/arm 的寄存器语义 —— `_TIF_32BIT` 是 arm64 专属位，
+> `lr`/`sp` 取自 AArch64 的 `regs[30]`/`regs[14]`/`regs[13]`。x86_64 仅编译（build-only），
+> 其 `lr`/`sp` 不可信，CI 也会跑；因此 x86_64 只是构建目标，不是受支持的目标平台。
 
 ### 手动构建
 
@@ -106,7 +110,7 @@ cargo build --release --features embedded_bpf --target aarch64-linux-android
 
 # 3. 运行测试
 cargo test --lib                  # 253 个 lib 单元测试
-cargo test                        # 全量 304 个（254 + 33 + 17）
+cargo test                        # 全量 319 个（267 + 31 + 21）
 cargo clippy                      # 静态检查
 ```
 
@@ -289,7 +293,7 @@ cargo fmt --check
 cargo doc --no-deps --open
 ```
 
-**全量口径：304 个测试通过 = 254 lib + 33 contracts + 17 ebpf_sources**
+**全量口径：319 个测试通过 = 267 lib + 31 contracts + 21 ebpf_sources**
 （对照报告记录的三轮修复前基线是 243 = 198 + 33 + 12；第三轮 W1–W19 修复新增
 lib 测试、并补齐 5 条 eBPF C↔Rust 交叉锁后为 304。数字随轮次变化，**准确数字以
 `DONE.md` 第三轮记录为准**。）

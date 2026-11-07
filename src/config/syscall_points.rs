@@ -131,21 +131,21 @@ impl SyscallPoint {
 
     /// `GetEnterConfig()` (`config_syscall.go:28-36`): flatten every enter-side
     /// `PointArg::get_op_list()` into one `op_key_list`.
-    pub fn enter_config(&self) -> SyscallPointOpConfig {
+    pub fn enter_config(&self) -> Result<SyscallPointOpConfig> {
         Self::flatten(&self.enter_point_args)
     }
 
     /// `GetExitConfig()` (`config_syscall.go:38-45`).
-    pub fn exit_config(&self) -> SyscallPointOpConfig {
+    pub fn exit_config(&self) -> Result<SyscallPointOpConfig> {
         Self::flatten(&self.exit_point_args)
     }
 
-    fn flatten(point_args: &[PointArg]) -> SyscallPointOpConfig {
+    fn flatten(point_args: &[PointArg]) -> Result<SyscallPointOpConfig> {
         let mut config = SyscallPointOpConfig::default();
         for point_arg in point_args {
-            config.add_point_arg(point_arg);
+            config.add_point_arg(point_arg)?;
         }
-        config
+        Ok(config)
     }
 }
 
@@ -164,15 +164,17 @@ pub struct SyscallPointOpConfig {
 impl SyscallPointOpConfig {
     /// `AddPointArg`: append one argument's op list, refusing to overflow the
     /// contract `point_args_t.op_key_list` width.
-    pub fn add_point_arg(&mut self, point_arg: &PointArg) {
+    ///
+    /// The `-c/--config` table is user input, so an oversized point is a usage
+    /// error, not a bug in the shipped JSON: return it instead of panicking.
+    pub fn add_point_arg(&mut self, point_arg: &PointArg) -> Result<()> {
         for op in point_arg.get_op_list() {
             if self.op_key_list.len() >= MAX_OP_COUNT_SYSCALL {
-                // Upstream panics here; the table is static so this cannot
-                // happen with the shipped JSON, and tests assert it.
-                panic!("syscall point op list overflow: more than {MAX_OP_COUNT_SYSCALL} ops");
+                bail!("syscall point op list overflow: more than {MAX_OP_COUNT_SYSCALL} ops");
             }
             self.op_key_list.push(op);
         }
+        Ok(())
     }
 
     pub fn op_count(&self) -> u32 {
@@ -328,7 +330,7 @@ mod tests {
         let points_with_ops = table
             .points()
             .iter()
-            .filter(|p| !p.enter_config().op_key_list.is_empty())
+            .filter(|p| p.enter_config().is_ok_and(|c| !c.op_key_list.is_empty()))
             .count();
         assert!(
             points_with_ops > 250,
@@ -409,7 +411,7 @@ mod tests {
             "dirfd/pathname/flags/mode"
         );
 
-        let enter = openat.enter_config();
+        let enter = openat.enter_config().unwrap();
         assert!(
             !enter.op_key_list.is_empty(),
             "openat must read arguments on enter"
@@ -427,12 +429,12 @@ mod tests {
         // (`more: exit`), so the exit config must carry ops.
         let read = table.by_name("read").unwrap();
         assert!(
-            !read.exit_config().op_key_list.is_empty(),
+            !read.exit_config().unwrap().op_key_list.is_empty(),
             "read's buffer is read on sys_exit"
         );
         let write = table.by_name("write").unwrap();
         assert!(
-            !write.enter_config().op_key_list.is_empty(),
+            !write.enter_config().unwrap().op_key_list.is_empty(),
             "write's buffer is read on sys_enter"
         );
     }
@@ -472,6 +474,7 @@ mod tests {
         let table = table();
         for point in table.points() {
             for config in [point.enter_config(), point.exit_config()] {
+                let config = config.unwrap();
                 assert!(
                     config.op_key_list.len() <= MAX_OP_COUNT_SYSCALL,
                     "{} overflows op_key_list",

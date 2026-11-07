@@ -11,6 +11,11 @@ use crate::contract::consts::{
 };
 use anyhow::{bail, Result};
 
+/// Number of `probe_stack_<i>` programs `ebpf/stack.c` actually defines:
+/// `probe_stack_0` plus `PROBE_STACK(1..5)`. `PROBE_STACK(6)` and up are
+/// commented out there, so indexing past this is a hard "program not found".
+pub const MAX_UPROBE_PROGRAMS: usize = 6;
+
 /// Flags for the `stack` subcommand. Master-era `StackConfig`
 /// (`origin/master:user/config/config_stack.go`)
 /// combined with the filter half of `ModuleConfig` (`config_module.go:750-800`).
@@ -21,8 +26,6 @@ use anyhow::{bail, Result};
 /// the maps upstream `MStack.updateFilter()` (`stack.go:381-390`) writes.
 #[derive(Debug, Clone, Default)]
 pub struct StackConfig {
-    pub unwind_stack: bool,
-    pub show_regs: bool,
     pub library: String,
     pub symbol: String,
     pub offset: u64,
@@ -234,15 +237,10 @@ impl ProbeConfig {
         if has_symbol && has_offset {
             bail!("set symbol or offset, not both");
         }
-        if !has_symbol {
-            // ebpfmanager requires AttachToFuncName non-empty even when an
-            // offset is used. Fill with a random 8-char ASCII lowercase name.
-            use rand::distr::{Distribution, Uniform};
-            let between = Uniform::new_inclusive(b'a', b'z').unwrap();
-            let mut rng = rand::rng();
-            let chars: String = (0..8).map(|_| between.sample(&mut rng) as char).collect();
-            self.symbol = chars;
-        }
+        // Offset-only probes keep `symbol` empty on purpose. Go's `ebpfmanager`
+        // required a non-empty `AttachToFuncName` and so filled a random string,
+        // which then failed `resolve_symbol_offset` for every offset-only hook.
+        // `libbpf-rs::attach_uprobe` takes a numeric offset and needs no name.
         Ok(())
     }
 
@@ -311,8 +309,11 @@ mod tests {
         assert!(p.check().is_err());
     }
 
+    /// Regression for review F5: offset-only probes must keep `symbol` empty.
+    /// `check` used to fabricate a random 8-char name (a Go `ebpfmanager`
+    /// requirement), which `resolve_symbol_offset` then always failed to find.
     #[test]
-    fn check_fills_random_symbol_when_offset_only() {
+    fn check_leaves_symbol_empty_when_offset_only() {
         let mut p = ProbeConfig {
             sconfig: SConfig::default(),
             lib_name: String::new(),
@@ -321,8 +322,8 @@ mod tests {
             offset: 0x1000,
         };
         assert!(p.check().is_ok());
-        assert_eq!(p.symbol.len(), 8);
-        assert!(p.symbol.chars().all(|c| c.is_ascii_lowercase()));
+        assert!(p.symbol.is_empty());
+        assert_eq!(p.offset, 0x1000);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use crate::argtype::{
     self, add_read_save_reg, consts::*, get_arg_type, opc_filter_buffer, opc_filter_string,
     opc_filter_value, opc_move_reg_value,
 };
+use anyhow::{anyhow, Result};
 
 /// Point type constants — from `user/config/config_const.go`.
 pub const EBPF_PROG_NONE: u32 = 0;
@@ -86,6 +87,15 @@ impl PointArg {
     pub fn set_type_by_name(&mut self, name: &str) {
         let at = argtype::get_arg_type_by_name(name);
         self.type_index = at.type_index;
+    }
+
+    /// Like [`Self::set_type_by_name`], but an unknown name is an error instead
+    /// of a panic: the caller's `type:` field comes from a user config file.
+    pub fn try_set_type_by_name(&mut self, name: &str) -> Result<()> {
+        let at = argtype::try_get_arg_type_by_name(name)
+            .ok_or_else(|| anyhow!("unknown arg type:{name}"))?;
+        self.type_index = at.type_index;
+        Ok(())
     }
 
     /// `SetHexFormat()` — wrap in hex format (unless it's an array).

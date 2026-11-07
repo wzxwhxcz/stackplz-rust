@@ -34,8 +34,15 @@ static __always_inline u32 get_task_ns_tgid(struct task_struct *task)
 // 当前任务自身是否运行在 AArch32(compat / 32 位) ABI 下。
 // 目的仅有一个：决定 lr/sp 从哪组寄存器读（regs[14]/regs[13] 还是 regs[30]/sp）。
 //   - arm 构建：目标恒为 32 位，不读 flags，直接 true；
-//   - 其余（arm64/x86_64）构建：读 thread_info.flags 的 _TIF_32BIT 位，即目标进程
-//     自己的 ABI，而不是 stackplz 宿主二进制的架构。
+//   - arm64 构建：读 thread_info.flags 的 _TIF_32BIT(1<<22，arm64 专属位)，即目标
+//     进程自己的 ABI，而不是 stackplz 宿主二进制的架构；
+//   - x86_64 构建：本工程 eBPF 侧没有 x86_64 寄存器模型 —— syscall.c/stack.c 读的是
+//     AArch64 的 regs[30]/regs[14]/regs[13]，而 x86_64 上 bit 22 的含义完全不同。
+//     所以此构建下 compat32 的答案无意义、lr/sp 不可信；x86_64 只是「能编译过」的
+//     构建/CI 目标，不是受支持的目标平台（见 README「架构限制」）。
+// shortcut: eBPF 侧只实现 arm64/arm 寄存器语义（x86_64 仅编译），等真正需要 x86_64
+// 目标时补 __TARGET_ARCH_x86 分支 + syscall.c/stack.c 的 ip/sp 读取，并同步更新
+// README 与 tests/ebpf_sources.rs 的声明测试。
 // 注意：本函数是「寄存器来源选择器」，不是过滤器 —— 不要在这里或调用处基于它
 // 提前 return / 丢弃事件，否则会重新引入「架构门控导致零事件」的缺陷（已在上一轮删除）。
 static __always_inline bool is_current_task_compat32(void)

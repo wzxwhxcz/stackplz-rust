@@ -56,9 +56,6 @@ pub struct GlobalConfig {
     pub reg_name: String,
 
     // ---- output / logging ----
-    pub unwind_stack: bool,
-    pub show_regs: bool,
-    pub stack_size: u32,
     pub dump_hex: bool,
     pub fmt_json: bool,
     pub color: bool,
@@ -99,9 +96,6 @@ impl GlobalConfig {
             library: cli.library.clone(),
             library_dirs: cli.libdirs.clone(),
             reg_name: cli.reg.clone(),
-            unwind_stack: cli.stack,
-            show_regs: cli.regs,
-            stack_size: cli.stack_size,
             dump_hex: cli.dumphex,
             fmt_json: cli.json,
             color: cli.color,
@@ -329,8 +323,6 @@ mod tests {
             "%file",
             "--no-syscall",
             "openat",
-            "--stack-size",
-            "16384",
             "-b",
             "16",
             "--sdk-int",
@@ -342,7 +334,6 @@ mod tests {
         assert_eq!(g.name, "root");
         assert_eq!(g.syscall, "%file");
         assert_eq!(g.no_syscall, "openat");
-        assert_eq!(g.stack_size, 16384);
         assert_eq!(g.buffer, 16);
         assert_eq!(g.sdk_int, 28);
         assert!(g.nocheck);

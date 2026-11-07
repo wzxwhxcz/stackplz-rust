@@ -53,7 +53,7 @@ impl Logger {
             .write(true)
             .truncate(true)
             .open(&p)?;
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.file = Some(f);
         g.show_terminal = !quiet;
         Ok(())
@@ -72,7 +72,7 @@ impl Logger {
 
     fn write_line(&self, msg: &str, _newline: bool) {
         let line = {
-            let g = self.inner.lock().unwrap();
+            let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             let mut s = String::new();
             if g.show_time {
                 s.push_str(&current_time_str());
@@ -85,8 +85,13 @@ impl Logger {
             s
         };
         // Acquire lock again to write (avoid holding across the format above).
-        let mut g = self.inner.lock().unwrap();
+        // A poisoned lock (a panicking writer thread) must not kill the trace
+        // loop; recovering the guard keeps logging instead of unwrapping.
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let line_bytes = line.as_bytes();
+        // Best-effort output: a closed stdout or a full disk is unactionable
+        // here (no error channel, no retry), and dropping the line beats
+        // aborting the trace loop that the whole tool runs inside.
         if g.show_terminal {
             let _ = io::stdout().write_all(line_bytes);
             let _ = io::stdout().write_all(b"\n");
@@ -140,9 +145,16 @@ fn local_utc_offset_seconds() -> i64 {
         }
         unsafe {
             let mut now: c_long = 0;
-            time(&mut now);
+            if time(&mut now) == -1 {
+                return 0;
+            }
+            // All-zero `Tm` is valid (ints plus a nullable pointer), but on
+            // failure `localtime_r` leaves it untouched, which would silently
+            // mean UTC; report "no known offset" explicitly instead.
             let mut lt = std::mem::zeroed::<Tm>();
-            localtime_r(&now, &mut lt);
+            if localtime_r(&now, &mut lt).is_null() {
+                return 0;
+            }
             lt.tm_gmtoff as i64
         }
     }

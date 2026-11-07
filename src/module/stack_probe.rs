@@ -203,8 +203,20 @@ impl StackProbeModule {
 
         // 10. Attach uprobe programs.
         let library = &self.probe.library;
-        let mut attached = 0usize;
+        // Keep every link alive until the poll loop ends: `Link::drop` calls
+        // `bpf_link__destroy`, so a per-iteration local would detach the uprobe
+        // immediately. A Vec (not mem::forget) also detaches them on `?` unwind.
+        let mut links = Vec::with_capacity(self.hook_points.len());
         for (i, point) in self.hook_points.iter().enumerate() {
+            // `ebpf/stack.c` defines `probe_stack_<i>` only for `i < 6`, so a
+            // point beyond that has no program to attach.
+            if i >= crate::config::stack::MAX_UPROBE_PROGRAMS {
+                return Err(anyhow!(
+                    "{NAME}: {} hook points exceed the {} uprobe programs in the BPF object",
+                    self.hook_points.len(),
+                    crate::config::stack::MAX_UPROBE_PROGRAMS
+                ));
+            }
             let prog_name = format!("probe_stack_{i}");
             let prog = obj
                 .progs_mut()
@@ -218,13 +230,13 @@ impl StackProbeModule {
                 point.offset
             };
 
-            let _link = prog.attach_uprobe(false, -1, library, attach_offset as usize)?;
-            attached += 1;
+            links.push(prog.attach_uprobe(false, -1, library, attach_offset as usize)?);
             logger.println(&format!(
                 "{NAME}\tattached {prog_name} to {library} at offset 0x{attach_offset:x}"
             ));
         }
 
+        let attached = links.len();
         if attached == 0 {
             return Err(anyhow!("{NAME}: no uprobe programs attached"));
         }
@@ -243,24 +255,31 @@ impl StackProbeModule {
             .ok_or_else(|| anyhow!("cannot find events map"))?;
 
         // `-b/--buffer` in MiB → 4 KiB pages (dev `GlobalConfig.Buffer`).
-        let pages = conf.buffer_mb as usize * 256;
+        let pages = super::perf_pages(conf.buffer_mb)?;
+        let lost_logger = logger.clone();
         let pb = libbpf_rs::PerfBufferBuilder::new(&events_map)
             .pages(pages)
             .sample_cb(move |_cpu: i32, data: &[u8]| {
                 let rendered = render_uprobe_event(data, &hook_points);
                 match rendered {
                     Ok(line) => render_logger.println(&line),
-                    Err(e) => eprintln!("{NAME}\tdecode error: {e}"),
+                    Err(e) => render_logger.println(&format!("{NAME}\tdecode error: {e}")),
                 }
             })
-            .lost_cb(|_cpu: i32, count: u64| {
-                eprintln!("{NAME}\tlost {count} samples on CPU {_cpu}");
+            .lost_cb(move |cpu: i32, count: u64| {
+                lost_logger.println(&format!("{NAME}\tlost {count} samples on CPU {cpu}"));
             })
             .build()?;
 
-        loop {
+        // Ctrl-C must end the trace loop here too (the syscall module polls its
+        // own `running` flag); without this the only exit was a poll error,
+        // which then surfaced as a bogus "module Run failed".
+        while !crate::cli::interrupted() {
             pb.poll(std::time::Duration::from_millis(100))?;
         }
+        logger.println(&format!("{NAME}\tshutting down"));
+        drop(links);
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]

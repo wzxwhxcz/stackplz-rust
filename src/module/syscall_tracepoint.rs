@@ -15,8 +15,7 @@ use std::sync::Arc;
 use {
     crate::contract::{THREAD_NAME_BLACKLIST, THREAD_NAME_WHITELIST},
     anyhow::{anyhow, Context},
-    libbpf_rs::{MapCore, MapFlags, Object, ObjectBuilder, PerfBufferBuilder},
-    std::sync::atomic::{AtomicBool, Ordering},
+    libbpf_rs::{Link, MapCore, MapFlags, Object, ObjectBuilder, PerfBufferBuilder},
     std::time::Duration,
 };
 
@@ -48,13 +47,13 @@ impl SyscallTracepointModule {
     pub fn point_args_entries(
         &self,
         side: PointArgsSide,
-    ) -> Vec<(u32, crate::contract::SyscallPointArgs)> {
+    ) -> Result<Vec<(u32, crate::contract::SyscallPointArgs)>> {
         use crate::contract::SyscallPointArgs;
         let mut entries = Vec::with_capacity(self.conf.point_table.len());
         for point in self.conf.point_table.points() {
             let config = match side {
-                PointArgsSide::Enter => point.enter_config(),
-                PointArgsSide::Exit => point.exit_config(),
+                PointArgsSide::Enter => point.enter_config()?,
+                PointArgsSide::Exit => point.exit_config()?,
             };
             // `--kill`/`--tkill` are delivered through `common_filter`
             // (`signal`/`tsignal`), not per point; `syscall.c:165-167` reads the
@@ -70,7 +69,7 @@ impl SyscallTracepointModule {
             value.op_key_list[..op_count].copy_from_slice(&config.op_key_list[..op_count]);
             entries.push((point.nr, value));
         }
-        entries
+        Ok(entries)
     }
 
     /// Build the `(filter_index, arg_filter_t bytes)` entries for the
@@ -103,9 +102,12 @@ impl SyscallTracepointModule {
 
         let mut obj = open_obj.load().context("failed to load syscall.o")?;
 
-        // Attach raw tracepoints
+        // Attach raw tracepoints. Keep the returned links alive until the poll
+        // loop ends: `Link::drop` calls `bpf_link__destroy`, so a per-attach
+        // local would detach the tracepoint immediately (`mem::forget` would
+        // instead leak the fd).
         logger.println(&format!("{}: attaching raw tracepoints", NAME));
-        self.attach_tracepoints(&mut obj)?;
+        let _links = self.attach_tracepoints(&mut obj)?;
 
         // Update all BPF maps
         logger.println(&format!("{}: updating BPF maps", NAME));
@@ -119,32 +121,20 @@ impl SyscallTracepointModule {
     }
 
     #[cfg(target_os = "linux")]
-    fn attach_tracepoints(&self, obj: &mut Object) -> Result<()> {
-        // Attach sys_enter
-        let prog = obj
-            .progs_mut()
-            .find(|p| p.name() == "raw_tracepoint__sys_enter")
-            .ok_or_else(|| anyhow!("sys_enter program not found"))?;
-        let _link = prog.attach()?;
-        std::mem::forget(_link); // Keep attached
-
-        // Attach sys_exit
-        let prog = obj
-            .progs_mut()
-            .find(|p| p.name() == "raw_tracepoint__sys_exit")
-            .ok_or_else(|| anyhow!("sys_exit program not found"))?;
-        let _link = prog.attach()?;
-        std::mem::forget(_link);
-
-        // Attach sched_process_fork
-        let prog = obj
-            .progs_mut()
-            .find(|p| p.name() == "raw_tracepoint__sched_process_fork")
-            .ok_or_else(|| anyhow!("sched_process_fork program not found"))?;
-        let _link = prog.attach()?;
-        std::mem::forget(_link);
-
-        Ok(())
+    fn attach_tracepoints(&self, obj: &mut Object) -> Result<Vec<Link>> {
+        let mut links = Vec::with_capacity(3);
+        for prog_name in [
+            "raw_tracepoint__sys_enter",
+            "raw_tracepoint__sys_exit",
+            "raw_tracepoint__sched_process_fork",
+        ] {
+            let prog = obj
+                .progs_mut()
+                .find(|p| p.name() == prog_name)
+                .ok_or_else(|| anyhow!("{prog_name} program not found"))?;
+            links.push(prog.attach()?);
+        }
+        Ok(links)
     }
 
     #[cfg(target_os = "linux")]
@@ -404,7 +394,7 @@ impl SyscallTracepointModule {
             .find(|m| m.name() == map_name)
             .with_context(|| format!("{map_name} map not found"))?;
 
-        let entries = self.point_args_entries(side);
+        let entries = self.point_args_entries(side)?;
         for (nr, value) in &entries {
             let key = nr.to_ne_bytes();
             let value_bytes = bytemuck::bytes_of(value);
@@ -446,12 +436,9 @@ impl SyscallTracepointModule {
             .find(|m| m.name() == "events")
             .context("events map not found")?;
 
-        let running = Arc::new(AtomicBool::new(true));
-        let r = running.clone();
-        ctrlc::set_handler(move || {
-            r.store(false, Ordering::SeqCst);
-        })
-        .context("failed to set Ctrl-C handler")?;
+        // Ctrl-C is owned by `cli::install_signal_handler` (which flips
+        // `cli::INTERRUPTED`); a second handler here would replace it and make
+        // shutdown order-dependent, besides failing on a second module start.
 
         // The renderer needs the point table to turn a decoded record into the
         // dev-format line (`argtype`-aware, not the raw `Debug` dump).
@@ -468,15 +455,13 @@ impl SyscallTracepointModule {
             }
         };
 
-        let handle_lost = |_cpu: i32, count: u64| {
-            eprintln!("Lost {} events", count);
+        let lost_logger = Arc::clone(&logger);
+        let handle_lost = move |_cpu: i32, count: u64| {
+            lost_logger.println(&format!("Lost {count} events"));
         };
 
         let perf = PerfBufferBuilder::new(&map)
-            // `-b/--buffer` is in MiB; the perf ring buffer is measured in
-            // 4 KiB pages, so 1 MiB == 256 pages (dev `GlobalConfig.Buffer`,
-            // a "perf cache buffer size" in MB).
-            .pages(self.conf.buffer_mb as usize * 256)
+            .pages(super::perf_pages(self.conf.buffer_mb)?)
             .sample_cb(handle_event)
             .lost_cb(handle_lost)
             .build()
@@ -484,7 +469,7 @@ impl SyscallTracepointModule {
 
         logger.println(&format!("{}: polling events (Ctrl-C to stop)", NAME));
 
-        while running.load(Ordering::SeqCst) {
+        while !crate::cli::interrupted() {
             if let Err(e) = perf.poll(Duration::from_millis(100)) {
                 logger.println(&format!("poll error: {}", e));
                 break;
@@ -551,7 +536,7 @@ mod tests {
         // The exact three tables the kernel program reads.
         assert!(conf.point_table.len() > 250);
         let openat = conf.point_table.by_name("openat").unwrap();
-        assert!(!openat.enter_config().op_key_list.is_empty());
+        assert!(!openat.enter_config().unwrap().op_key_list.is_empty());
     }
 
     /// The enter/exit payloads written into `sysenter_point_args` /
@@ -566,8 +551,8 @@ mod tests {
         let conf = SyscallConfig::with_table(table);
         let module = SyscallTracepointModule::new(conf, String::new());
 
-        let enter = module.point_args_entries(PointArgsSide::Enter);
-        let exit = module.point_args_entries(PointArgsSide::Exit);
+        let enter = module.point_args_entries(PointArgsSide::Enter).unwrap();
+        let exit = module.point_args_entries(PointArgsSide::Exit).unwrap();
         assert_eq!(enter.len(), expected, "one enter entry per point");
         assert_eq!(exit.len(), expected, "one exit entry per point");
 

@@ -41,7 +41,9 @@ pub const ARGS_BUF_SIZE: usize = 32000;
 /// `MAX_PERCPU_BUFSIZE` — the per-CPU scratch buffer size (`buf_t`).
 pub const MAX_PERCPU_BUFSIZE: usize = 1 << 15;
 
-/// `_TIF_32BIT` bit in `thread_info.flags`.
+/// `_TIF_32BIT` bit in `thread_info.flags`. arm64-only bit; no Rust production
+/// code reads it — only `ebpf/common/task.h` does. Kept here so
+/// `tests/ebpf_sources.rs` can pin this mirror against `ebpf/common/consts.h`.
 pub const _TIF_32BIT: u32 = 1 << 22;
 
 /// arm64 pointer size. (`PTR_SIZE` under `__TARGET_ARCH_arm64`.)

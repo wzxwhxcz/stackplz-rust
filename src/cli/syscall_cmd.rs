@@ -65,8 +65,6 @@ pub fn build_config(
 
     // SConfig: the legacy per-module filter struct (still written to
     // `filter_map` for the old layout, and used for the perf layer).
-    conf.sconfig.unwind_stack = global.unwind_stack;
-    conf.sconfig.show_regs = global.show_regs;
     conf.sconfig.uid = target.uid;
     conf.sconfig.pid = target.pid;
     conf.sconfig.debug = global.debug;

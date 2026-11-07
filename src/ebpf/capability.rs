@@ -10,6 +10,7 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::LazyLock;
 
 const REQUIRED_CONFIGS: &[&str] = &[
     "CONFIG_BPF",
@@ -33,12 +34,17 @@ pub fn get_system_config() -> Result<HashMap<String, String>> {
     Ok(parse_config(&text))
 }
 
+/// The only pattern this module parses, compiled once instead of per call.
+/// A literal pattern failing to compile is a programmer error, not input.
+static CONFIG_LINE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^(CONFIG_[A-Za-z0-9_]+)=(.*)$").expect("CONFIG_* line regex is valid")
+});
+
 /// Parse `CONFIG_XXX=y|n|m|...` lines into a map. Mirrors `parse()`.
 pub fn parse_config(text: &str) -> HashMap<String, String> {
-    let re = regex::Regex::new(r"^(CONFIG_[A-Za-z0-9_]+)=(.*)$").unwrap();
     let mut map = HashMap::new();
     for line in text.lines() {
-        if let Some(caps) = re.captures(line.trim()) {
+        if let Some(caps) = CONFIG_LINE_RE.captures(line.trim()) {
             let key = caps.get(1).unwrap().as_str().to_string();
             let value = caps.get(2).unwrap().as_str().trim_matches('"').to_string();
             map.insert(key, value);

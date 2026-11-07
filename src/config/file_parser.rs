@@ -142,7 +142,7 @@ impl ParamConfig {
         let reg_index = if self.reg.is_empty() {
             arg_index
         } else {
-            get_reg_index(&self.reg)
+            get_reg_index(&self.reg)?
         };
 
         // Create base PointArg
@@ -175,7 +175,7 @@ impl ParamConfig {
                     crate::argtype::r_buffer_len(size)
                 } else {
                     // Size from register
-                    let reg = get_reg_index(&self.size);
+                    let reg = get_reg_index(&self.size)?;
                     crate::argtype::r_buffer_reg(reg)
                 };
                 point_arg.set_type_index(type_idx);
@@ -185,7 +185,7 @@ impl ParamConfig {
             "iovec" => {
                 // `R_IOVEC_REG(this.Size)`: `size` is the register holding the
                 // iovec count (upstream `GetRegIndex`, panic on a bad name).
-                let type_idx = crate::argtype::r_iovec_reg(get_reg_index(&self.size));
+                let type_idx = crate::argtype::r_iovec_reg(get_reg_index(&self.size)?);
                 point_arg.set_type_index(type_idx);
                 point_arg.set_group_type(EBPF_UPROBE_ENTER);
             }
@@ -210,19 +210,19 @@ impl ParamConfig {
 
             "str" | "std" | "str16" | "il2cpp_string" => {
                 // String types
-                point_arg.set_type_by_name(type_name);
+                point_arg.try_set_type_by_name(type_name)?;
                 point_arg.set_group_type(EBPF_UPROBE_ENTER);
             }
 
             "int" | "uint" | "int8" | "uint8" | "int16" | "uint16" | "int32" | "uint32"
             | "int64" | "uint64" => {
                 // Numeric types
-                point_arg.set_type_by_name(type_name);
+                point_arg.try_set_type_by_name(type_name)?;
             }
 
             _ => {
                 // Struct types registered in argtype
-                point_arg.set_type_by_name(type_name);
+                point_arg.try_set_type_by_name(type_name)?;
             }
         }
 
@@ -321,7 +321,7 @@ fn compile_read_op(read_op_str: &str, point_arg: &mut PointArg) -> Result<()> {
                         }
                     } else {
                         // Register name
-                        let reg_index = get_reg_index(&token);
+                        let reg_index = get_reg_index(&token)?;
                         point_arg.add_extra_op(add_read_move_reg(reg_index as u64));
 
                         if has_first_op {
@@ -410,13 +410,14 @@ fn arm_reg_index(name: &str) -> Option<u32> {
 /// The arm names are additionally accepted on 64-bit hosts (after the aarch64
 /// ones, so `sp`/`lr`/`pc` keep their aarch64 indices) because the aarch32
 /// point table is embedded in every build and must stay parseable there.
-fn get_reg_index(name: &str) -> u32 {
+fn get_reg_index(name: &str) -> Result<u32> {
     let resolved = if cfg!(target_pointer_width = "32") {
         arm_reg_index(name).or_else(|| aarch64_reg_index(name))
     } else {
         aarch64_reg_index(name).or_else(|| arm_reg_index(name))
     };
-    resolved.unwrap_or_else(|| panic!("ParseAsReg failed =>{name}<="))
+    // A bad register name is user input, not a bug: report it, don't panic.
+    resolved.ok_or_else(|| anyhow!("ParseAsReg failed =>{name}<="))
 }
 
 /// Load syscall configuration from file.

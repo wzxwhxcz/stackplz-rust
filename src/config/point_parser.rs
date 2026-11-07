@@ -5,11 +5,12 @@
 //! configured [`PointArg`]s.
 
 use super::point_arg::*;
+use super::stack::MAX_UPROBE_PROGRAMS;
 use crate::argtype::{
     self, add_read_move_reg, consts::*, opc_add_offset, opc_add_reg, opc_move_pointer_value,
     opc_read_pointer, opc_save_addr, opc_sub_offset, opc_sub_reg, r_num_array,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 
 /// arm64 register name → index. Mirrors `common/const_forarm64.go:GetRegIndex`.
 /// aarch64 register names → sample index. Mirrors `RegsNameMap`
@@ -60,13 +61,14 @@ fn arm_reg_index(name: &str) -> Option<u32> {
 /// The arm names are additionally accepted on 64-bit hosts (after the aarch64
 /// ones, so `sp`/`lr`/`pc` keep their aarch64 indices) because the aarch32
 /// point table is embedded in every build and must stay parseable there.
-fn get_reg_index(name: &str) -> u32 {
+fn get_reg_index(name: &str) -> Result<u32> {
     let resolved = if cfg!(target_pointer_width = "32") {
         arm_reg_index(name).or_else(|| aarch64_reg_index(name))
     } else {
         aarch64_reg_index(name).or_else(|| arm_reg_index(name))
     };
-    resolved.unwrap_or_else(|| panic!("ParseAsReg failed =>{name}<="))
+    // A bad register name is user input, not a bug: report it, don't panic.
+    resolved.ok_or_else(|| anyhow!("ParseAsReg failed =>{name}<="))
 }
 
 /// Parse a number string that may be hex (0x-prefixed) or decimal.
@@ -115,10 +117,13 @@ pub fn parse_arg_type(
         for fname in filter_part.split('.') {
             if !fname.is_empty() {
                 // Phase 2 stub: filter index lookup not yet implemented.
-                // For now, parse as u32 directly.
-                if let Ok(idx) = fname.parse::<u32>() {
-                    point_arg.add_filter_index(idx);
-                }
+                // For now, parse as u32 directly. A suffix that does not parse
+                // is a typo in a user-supplied `-w`, so report it instead of
+                // silently losing the filter.
+                let idx = fname
+                    .parse::<u32>()
+                    .map_err(|_| anyhow!("bad filter index {fname} in arg_str:{arg_str}"))?;
+                point_arg.add_filter_index(idx);
             }
         }
     }
@@ -185,7 +190,7 @@ pub fn parse_arg_type(
                 argtype::r_buffer_len(size)
             } else {
                 // Register-based length
-                let reg = get_reg_index(size_str);
+                let reg = get_reg_index(size_str)?;
                 argtype::r_buffer_reg(reg)
             };
             // Set dump_hex/color on the registered type
@@ -197,8 +202,9 @@ pub fn parse_arg_type(
             point_arg.set_group_type(EBPF_UPROBE_ENTER);
         }
         _ => {
-            // Default: look up by name in the registry
-            point_arg.set_type_by_name(type_name);
+            // Default: look up by name in the registry. A typo in a user `-w`
+            // is a usage error, not a crash.
+            point_arg.try_set_type_by_name(type_name)?;
             point_arg.set_group_type(EBPF_UPROBE_ENTER);
         }
     }
@@ -271,7 +277,7 @@ fn compile_read_op(read_op_str: &str, point_arg: &mut PointArg) -> Result<()> {
                         }
                     } else {
                         // Register name
-                        let reg_index = get_reg_index(token);
+                        let reg_index = get_reg_index(token)?;
                         point_arg.add_extra_op(add_read_move_reg(u64::from(reg_index)));
                         if has_first_op {
                             if last_op == "-" {
@@ -307,8 +313,10 @@ pub fn parse_hook_point(
     if lib_path.is_empty() {
         return Err(anyhow!("library is empty, plz set with -l/--lib"));
     }
-    if configs.len() > 6 {
-        return Err(anyhow!("max uprobe hook point count is 6"));
+    if configs.len() > MAX_UPROBE_PROGRAMS {
+        return Err(anyhow!(
+            "max uprobe hook point count is {MAX_UPROBE_PROGRAMS}"
+        ));
     }
 
     let mut points = Vec::new();
@@ -389,11 +397,20 @@ pub fn parse_hook_point(
         points.push(hook_point);
     }
 
-    // Clone exit points
+    // Clone exit points. Each clone needs its own `probe_stack_<i>` program and
+    // `ebpf/stack.c` defines only `MAX_UPROBE_PROGRAMS` of them, so the expansion
+    // is what the limit has to bound (the input cap above does not: 6 inputs can
+    // become 12 points).
     let point_count = points.len();
     for point_idx in 0..point_count {
         if points[point_idx].exit_offset != 0 {
             let exit_idx = points.len();
+            if exit_idx >= MAX_UPROBE_PROGRAMS {
+                bail!(
+                    "hook point {exit_idx} (after exit-point expansion) exceeds the \
+                     {MAX_UPROBE_PROGRAMS} uprobe programs in the BPF object"
+                );
+            }
             let exit_point = points[point_idx].get_exit_point(exit_idx);
             // Mark the original's enter_key
             points[point_idx].enter_key = points[point_idx].index + 1;

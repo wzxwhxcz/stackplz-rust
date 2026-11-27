@@ -251,14 +251,13 @@ fn parse_struct(
                 Some(text) => Ok(render::format_ptr(ptr) + &text),
                 // Go panics for a struct type without a formatter. We keep the
                 // event printable with a lossless-ish fallback instead.
-                None => {
-                    let _ = dump_hex;
-                    Ok(format!(
-                        "{}({})",
-                        render::format_ptr(ptr),
-                        pretty_byte_slice(payload)
-                    ))
-                }
+                // `format_buffer` already parenthesises its output, so just
+                // concatenate (C-s7: the fallback must honour `dump_hex`).
+                None => Ok(format!(
+                    "{}{}",
+                    render::format_ptr(ptr),
+                    render::format_buffer(payload, dump_hex)
+                )),
             }
         }
     }
@@ -312,7 +311,8 @@ fn parse_iovec(ptr: u64, cur: &mut ArgsCursor<'_>) -> Result<String> {
     for i in 0..read_count {
         // `Arg_Iovec_Fix`: [idx][len][base u64][buflen u64]; Go's binary.Read
         // consumes 16 payload bytes regardless of the declared len.
-        let _ = cur.next_arg_str_header()?;
+        // Header consumed, values unused (mirrors Go's binary.Read).
+        let (_index, _len) = cur.next_arg_str_header()?;
         let fix = cur.next_bytes(16)?;
         let base = u64::from_le_bytes(fix[0..8].try_into().expect("8 bytes"));
         let buflen = u64::from_le_bytes(fix[8..16].try_into().expect("8 bytes"));
@@ -333,8 +333,7 @@ fn parse_iovec(ptr: u64, cur: &mut ArgsCursor<'_>) -> Result<String> {
 fn parse_msghdr(ptr: u64, cur: &mut ArgsCursor<'_>) -> Result<String> {
     // `Arg_Msghdr` = index + len + `syscall.Msghdr` (56 bytes); the struct read
     // is unconditional in Go, with the length only validated separately.
-    let (_, len) = cur.next_arg_str_header()?;
-    let _ = len;
+    let (_, _len) = cur.next_arg_str_header()?;
     let raw = cur.next_bytes(SIZEOF_MSGHDR as usize)?;
     let name = u64::from_le_bytes(raw[0..8].try_into().expect("8 bytes"));
     let namelen = u32::from_le_bytes(raw[8..12].try_into().expect("4 bytes"));
@@ -350,7 +349,8 @@ fn parse_msghdr(ptr: u64, cur: &mut ArgsCursor<'_>) -> Result<String> {
     let iov_count = (iovlen as usize).min(MAX_IOV_COUNT as usize);
     let mut iov_parts = Vec::with_capacity(iov_count);
     for i in 0..iov_count {
-        let _ = cur.next_arg_str_header()?;
+        // Header consumed, values unused (mirrors Go's binary.Read).
+        let (_index, _len) = cur.next_arg_str_header()?;
         let fix = cur.next_bytes(SIZEOF_IOVEC as usize)?;
         let base = u64::from_le_bytes(fix[0..8].try_into().expect("8 bytes"));
         let buflen = u64::from_le_bytes(fix[8..16].try_into().expect("8 bytes"));
@@ -501,6 +501,27 @@ mod tests {
         assert_eq!(
             out,
             "0x10(\n0000  68 69 00 78                                      |hi.x            |\n)"
+        );
+    }
+
+    /// A struct argtype without a formatter hits the lossless fallback in
+    /// `parse_struct`; it must still honour `dump_hex` (C-s7).
+    #[test]
+    fn struct_without_formatter_fallbacks_to_pretty_or_hexdump() {
+        let tlvs = prefixed(1, b"hi\x00x");
+        // No formatter is registered for this name, so `format_struct` returns
+        // None and the fallback renders the raw payload.
+        let at = ArgType::new("no_such_formatter", TYPE_STRUCT, 9000, 0);
+
+        let mut cur = ArgsCursor::new(&tlvs);
+        let out = parse_value(&at, 0x20, &mut cur, true, false).unwrap();
+        assert_eq!(out, "0x20(hi\\x00x)");
+
+        let mut cur = ArgsCursor::new(&tlvs);
+        let out = parse_value(&at, 0x20, &mut cur, true, true).unwrap();
+        assert_eq!(
+            out,
+            "0x20(\n0000  68 69 00 78                                      |hi.x            |\n)"
         );
     }
 

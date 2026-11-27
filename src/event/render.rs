@@ -50,7 +50,11 @@ pub fn render_point_args(
     let mut parts = Vec::with_capacity(args.len());
     for pa in args {
         let (_, reg) = cur.next_raw_borrow(ARG_REG_VALUE_LEN)?;
-        let ptr = u64::from_le_bytes(reg.try_into().expect("Arg_reg value is 8 bytes"));
+        // FFI boundary: never panic on a malformed payload; surface as error.
+        let ptr = u64::from_le_bytes(
+            reg.try_into()
+                .map_err(|_| anyhow!("Arg_reg payload is not 8 bytes"))?,
+        );
         let value = parse_point_arg(pa, ptr, cur, render_point, dump_hex)?;
         parts.push(format!("{}={}", pa.name, value));
     }
@@ -288,5 +292,25 @@ mod tests {
         ));
         let line = render_uprobe_event(&mut e, &point).unwrap();
         assert_eq!(line, "[40|30|app] myhook(arg_0=42) LR:0xa PC:0xc SP:0xb");
+    }
+
+    /// A cursor too short for the leading `Arg_reg` TLV must produce an Err
+    /// (underflow), never a panic from `try_into().expect`.
+    #[test]
+    fn render_point_args_short_cursor_returns_err_not_panic() {
+        init_argtypes();
+        let mut cur = ArgsCursor::new(&[0u8; 2]); // index + 1 byte, not 8
+        let pa = PointArg::new_uprobe("arg_0", get_arg_type_by_name("int").type_index, 0);
+        let err = render_point_args(&[pa], &mut cur, EBPF_UPROBE_ENTER, false).unwrap_err();
+        assert!(format!("{err:#}").contains("args underflow"), "{err:#}");
+    }
+
+    #[test]
+    fn render_point_args_empty_args_renders_parens() {
+        let mut cur = ArgsCursor::new(&[]);
+        assert_eq!(
+            render_point_args(&[], &mut cur, EBPF_SYS_ENTER, false).unwrap(),
+            "()"
+        );
     }
 }

@@ -94,6 +94,8 @@ static __always_inline u32 probe_stack_warp(struct pt_regs* ctx, u32 point_key) 
     int ctx_index = 0;
     op_ctx_t* op_ctx = bpf_map_lookup_elem(&op_ctx_map, &ctx_index);
     if (unlikely(op_ctx == NULL)) return 0;
+    // 上游缺陷：dev/master 用指针本身的大小（只清前 8 字节）。
+    // 此处刻意按解引用后的结构体大小清零整个结构体，勿“修复”回指针大小。
     __builtin_memset((void *)op_ctx, 0, sizeof(*op_ctx));
 
     op_ctx->reg_0 = saved_regs.regs[0];

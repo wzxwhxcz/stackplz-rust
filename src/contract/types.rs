@@ -49,6 +49,12 @@ pub struct EventContext {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CommonFilter {
+    /// Wire-layout offset 0 (legacy field). The C side `common_filter_t` no
+    /// longer reads it — register bit width is decided from the target, not
+    /// this byte. Rust writes 0 here everywhere (`write_common_filter`,
+    /// `to_common_filter_bytes`, `stack_probe`). Layout pinned by
+    /// `tests/ebpf_sources.rs:944-948` (C size/offset asserts) and by
+    /// `src/config/syscall.rs` `to_common_filter_bytes` byte-order asserts.
     pub is_32bit: u32,
     pub trace_mode: u32,
     pub trace_uid_group: u32,

@@ -11,7 +11,7 @@
 
 use crate::config::global::GlobalConfig;
 use crate::config::syscall_select::SyscallSelection;
-use crate::config::{load_syscall_config, SyscallConfig, SyscallPointTable, TargetConfig};
+use crate::config::{SyscallConfig, SyscallPointTable, TargetConfig};
 use crate::module::SyscallTracepointModule;
 use anyhow::{anyhow, Context, Result};
 use std::sync::Arc;
@@ -43,9 +43,8 @@ pub fn load_point_table(global: &GlobalConfig) -> Result<SyscallPointTable> {
         }
     }
 
-    // Also honour the typed loader when a YAML table is given (dev only reads
-    // JSON, but `load_syscall_config` exists and accepts both).
-    let _ = load_syscall_config;
+    // No YAML support here: dev only reads JSON config files; `load_syscall_config`
+    // (YAML-capable) is used by other paths, not this one.
 
     SyscallPointTable::embedded()
 }

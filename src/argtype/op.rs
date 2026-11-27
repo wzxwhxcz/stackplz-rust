@@ -156,6 +156,15 @@ fn opm() -> &'static Mutex<OpManager> {
     })
 }
 
+/// Lock the global op manager. A poisoned lock means an accessor panicked
+/// while holding it; recover the guard instead of unwrap-panicking (err-no-
+/// unwrap-prod).
+fn opm_guard() -> std::sync::MutexGuard<'static, OpManager> {
+    opm()
+        .lock()
+        .expect("op manager lock poisoned: an accessor panicked while holding it")
+}
+
 /// Register the 34 `OPC_*` singletons in Go source order (op_helper.go:268-301).
 /// Each gets a unique index 0..=33 because their names are all distinct.
 fn register_singletons(mgr: &mut OpManager) {
@@ -276,27 +285,27 @@ singleton_index!(opc_save_ptr_string16, 33);
 
 /// `GetALLOpList` — the full `{index: BaseOpConfig}` map for BPF `op_list`.
 pub fn get_all_op_list() -> HashMap<u32, WireOpConfig> {
-    opm().lock().unwrap().get_op_list()
+    opm_guard().get_op_list()
 }
 
 /// `(this *OpManager) AddOp` — dedup-register an op, return its index.
 pub fn add_op(op: OpConfig) -> u32 {
-    opm().lock().unwrap().add_op(op)
+    opm_guard().add_op(op)
 }
 
 /// `(this *OpManager) Count`.
 pub fn count() -> u32 {
-    opm().lock().unwrap().count()
+    opm_guard().count()
 }
 
 /// `(this *OpManager) GetOp` — clone of the op at `index`. Panics if absent.
 pub fn get_op(index: u32) -> OpConfig {
-    opm().lock().unwrap().get_op(index).clone()
+    opm_guard().get_op(index).clone()
 }
 
 /// `(this *OpManager) GetOpInfo` — debug string.
 pub fn get_op_info(index: u32) -> String {
-    opm().lock().unwrap().get_op_info(index)
+    opm_guard().get_op_info(index)
 }
 
 /// `Add_READ_SAVE_REG(value)` — three-in-one: SET_REG_INDEX / READ_REG / SAVE_REG.

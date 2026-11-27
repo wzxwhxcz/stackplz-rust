@@ -159,6 +159,11 @@ impl<'a> ArgsCursor<'a> {
         let mut elems = Vec::with_capacity(count as usize);
         for _ in 0..count {
             let sz = self.read_i32()?;
+            // `sz` is read as a LE i32, but the kernel writes the magic length
+            // as a u32 bit pattern; `sz as u32` is a bit-reinterpretation that
+            // keeps all 32 bits, so the comparison holds whether the magic
+            // would sign-interpret as negative or not. This depends on
+            // STRARR_MAGIC_LEN (u32) matching the kernel's on-wire value.
             if (sz as u32) == STRARR_MAGIC_LEN {
                 // Truncated element: the kernel writes the magic and stops.
                 elems.push(StrArrElem {
@@ -197,7 +202,13 @@ impl<'a> ArgsCursor<'a> {
     }
 
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        if self.pos + n > self.buf.len() {
+        // checked_add: on 32-bit, `pos + n` could wrap around and pass the
+        // bounds check even though the range is invalid (num-overflow-explicit).
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or_else(|| anyhow!("args length overflow: pos {} + {}", self.pos, n))?;
+        if end > self.buf.len() {
             return Err(anyhow!(
                 "args underflow: need {} bytes at {} (len {})",
                 n,
@@ -205,8 +216,8 @@ impl<'a> ArgsCursor<'a> {
                 self.buf.len()
             ));
         }
-        let s = &self.buf[self.pos..self.pos + n];
-        self.pos += n;
+        let s = &self.buf[self.pos..end];
+        self.pos = end;
         Ok(s)
     }
 }
@@ -332,5 +343,16 @@ mod tests {
         let mut c = ArgsCursor::new(&blob);
         // index (1 byte) ok, then i32 needs 4 bytes -> underflow.
         assert!(c.next_length_prefixed().is_err());
+    }
+
+    #[test]
+    fn read_bytes_overflow_n_returns_err_not_panic() {
+        let blob = vec![0u8; 4];
+        let mut c = ArgsCursor::new(&blob);
+        // `usize::MAX` makes `pos + n` wrap on 32-bit and exceed the buffer on
+        // 64-bit; either way it must be Err, never a panic.
+        assert!(c.read_bytes(usize::MAX).is_err());
+        assert_eq!(c.read_bytes(4).unwrap().len(), 4);
+        assert!(c.read_bytes(5).is_err());
     }
 }

@@ -162,13 +162,9 @@ fn resolve_target(global: &mut GlobalConfig, target: &mut TargetConfig) -> Resul
     // (`root.go:209-250`, the `default:` arm is `root.go:223-249`).
     for name in &package_names {
         let info = package_by_name(name)?;
-        if info.uid != 1000 {
-            // dev excludes the system uid from the whitelist (`root.go:244-246`).
-            if !filters.uid_whitelist.contains(&info.uid) {
-                // Recorded for the error/verbose path; the module lists are
-                // built from the CLI lists exactly as upstream does.
-            }
-        }
+        // dev skips packages owned by the system uid (1000): they are never added
+        // to the whitelist (`root.go:244-246`). Nothing is recorded or mutated here;
+        // the module lists are built from the CLI lists exactly as upstream does.
         if target.uid == 0 {
             target.uid = u64::from(info.uid);
         }

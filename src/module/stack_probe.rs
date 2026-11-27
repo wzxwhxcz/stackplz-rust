@@ -131,6 +131,21 @@ impl StackProbeModule {
         // 3. `common_filter` (key 0): trace mode, `-n` uid groups, kill signals.
         //    Report W17: `trace_uid_group` is the configured value (0 by
         //    default), no longer a hard-coded 0xFF.
+        //
+        //    Default-deny safety: `write_common_filter` always writes
+        //    `no_filter_allow = 0` (`src/ebpf/bpf_common.rs:300`), so
+        //    `should_trace()` keeps the whitelist-style default deny. That is
+        //    safe only because this module runs when the user explicitly
+        //    configured filters: `src/cli/mod.rs` starts the stack module only
+        //    when it sees uprobe hook points (-w/-c), and `StackConfig`'s
+        //    uid/pid/tid/tname lists always come from explicit CLI filters
+        //    (`uid_whitelist` etc.), never from defaults. If the user configured
+        //    no filter at all, they should use the syscall module instead: its
+        //    `to_common_filter_bytes()` writes `no_filter_allow = 1` when
+        //    `has_no_user_filter()` (`src/config/syscall.rs:226-229`).
+        //    See `ebpf/common/filtering.h:109-115`: only
+        //    `no_filter_allow == 1` falls back to master's "0 = no filtering";
+        //    writing 0 here means no fallback → default deny.
         bpf_common::linux::write_common_filter(
             &obj,
             false,

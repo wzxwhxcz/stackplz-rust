@@ -261,28 +261,33 @@ use std::sync::Mutex;
 
 static FILTER_HELPER: Lazy<Mutex<FilterHelper>> = Lazy::new(|| Mutex::new(FilterHelper::new()));
 
+/// Lock the global filter helper. A poisoned lock means an accessor panicked
+/// while holding it; recover the guard instead of unwrap-panicking (err-no-
+/// unwrap-prod).
+fn filter_helper() -> std::sync::MutexGuard<'static, FilterHelper> {
+    FILTER_HELPER
+        .lock()
+        .expect("filter helper lock poisoned: an accessor panicked while holding it")
+}
+
 /// Get filter index by filter string (global API)
 pub fn get_filter_index(filter: &str) -> Option<u32> {
-    FILTER_HELPER.lock().unwrap().get_filter_index(filter)
+    filter_helper().get_filter_index(filter)
 }
 
 /// Add filter (global API)
 pub fn add_filter(filter: &str) -> Result<u32, String> {
-    FILTER_HELPER.lock().unwrap().add_filter(filter)
+    filter_helper().add_filter(filter)
 }
 
 /// Get all filters (global API)
 pub fn get_filters() -> Vec<ArgFilter> {
-    FILTER_HELPER.lock().unwrap().get_filters().to_vec()
+    filter_helper().get_filters().to_vec()
 }
 
 /// Get filter by name (global API)
 pub fn get_filter_by_name(name: &str) -> Option<ArgFilter> {
-    FILTER_HELPER
-        .lock()
-        .unwrap()
-        .get_filter_by_name(name)
-        .cloned()
+    filter_helper().get_filter_by_name(name).cloned()
 }
 
 #[cfg(test)]
@@ -331,5 +336,20 @@ mod tests {
         let filter = &helper.get_filters()[0];
         assert!(filter.matches("f0"));
         assert!(!filter.matches("f1"));
+    }
+
+    /// Roundtrip through all four global accessors (each goes through
+    /// `filter_helper`, covering the expect paths). Index values depend on what
+    /// other tests registered concurrently in the global helper, so assert
+    /// consistency, not an absolute index.
+    #[test]
+    fn global_filter_api_roundtrip() {
+        assert_eq!(get_filter_index("eq:1"), None);
+        let idx = add_filter("eq:1").expect("add_filter succeeds");
+        assert!(idx >= 1);
+        assert_eq!(get_filter_index("eq:1"), Some(idx));
+        assert!(!get_filters().is_empty());
+        let f = get_filter_by_name(&format!("f{}", idx - 1)).expect("filter found by name");
+        assert_eq!(f.filter_str, "eq:1");
     }
 }

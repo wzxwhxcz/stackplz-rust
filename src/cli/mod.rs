@@ -121,7 +121,8 @@ fn run_func(global: &GlobalConfig, target: &TargetConfig) -> Result<(), RunError
         crate::config::syscall_select::select(&mut table, &global.syscall, &global.no_syscall)
             .map_err(|e| RunError::Usage(e.to_string()))?;
 
-    let has_uprobe_points = !global.hook_point.is_empty() || stack_cmd::has_uprobe_config(global);
+    let has_uprobe_points = !global.hook_point.is_empty()
+        || stack_cmd::has_uprobe_config(global).map_err(|e| RunError::Usage(e.to_string()))?;
 
     // Dev order: syscall before stack, and a syscall run does not fall back to
     // stack hook points.

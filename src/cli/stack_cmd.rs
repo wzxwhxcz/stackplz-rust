@@ -23,18 +23,17 @@ use std::sync::Arc;
 ///
 /// The module selection in `runFunc` needs to know whether there is a uprobe
 /// hook source before the config files are parsed (`stack.go:parseConfig`).
-pub fn has_uprobe_config(global: &GlobalConfig) -> bool {
-    global.config_files.iter().any(|path| {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| {
-                serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
-            })
-            .map(|kind| kind == "uprobe")
-            .unwrap_or(false)
-    })
+pub fn has_uprobe_config(global: &GlobalConfig) -> Result<bool> {
+    for path in &global.config_files {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("Error when opening file: {path}"))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse {path} as JSON"))?;
+        if value.get("type").and_then(|t| t.as_str()) == Some("uprobe") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Build the [`StackConfig`] carrier from the global flags.
@@ -226,4 +225,62 @@ pub fn run(global: &GlobalConfig, target: &TargetConfig) -> Result<()> {
             .with_context(|| format!("{MODULE_NAME_STACK} module failed"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_cfg_path(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "stackplz-uprobe-cfg-{tag}-{}.json",
+            std::process::id()
+        ));
+        p
+    }
+
+    fn global_with_configs(paths: Vec<std::path::PathBuf>) -> GlobalConfig {
+        GlobalConfig {
+            config_files: paths
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn has_uprobe_config_detects_uprobe_type() {
+        let p = temp_cfg_path("uprobe");
+        std::fs::write(&p, r#"{"type":"uprobe"}"#).unwrap();
+        assert!(has_uprobe_config(&global_with_configs(vec![p.clone()])).unwrap());
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    #[test]
+    fn has_uprobe_config_rejects_other_types() {
+        let p = temp_cfg_path("syscall");
+        std::fs::write(&p, r#"{"type":"syscall"}"#).unwrap();
+        assert!(!has_uprobe_config(&global_with_configs(vec![p.clone()])).unwrap());
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    #[test]
+    fn has_uprobe_config_surfaces_parse_errors_with_path() {
+        let p = temp_cfg_path("badjson");
+        std::fs::write(&p, "not json").unwrap();
+        let err = has_uprobe_config(&global_with_configs(vec![p.clone()])).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(p.to_string_lossy().as_ref()),
+            "error must name the offending path: {err:#}"
+        );
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    #[test]
+    fn has_uprobe_config_surfaces_read_errors() {
+        let p = temp_cfg_path("missing");
+        assert!(has_uprobe_config(&global_with_configs(vec![p])).is_err());
+    }
 }

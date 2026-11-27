@@ -137,6 +137,8 @@ int raw_syscalls_sys_enter(struct bpf_raw_tracepoint_args* ctx) {
     op_ctx_t* op_ctx = bpf_map_lookup_elem(&op_ctx_map, &ctx_index);
     // make ebpf verifier happy
     if (unlikely(op_ctx == NULL)) return 0;
+    // 上游缺陷：dev/master 用指针本身的大小（只清前 8 字节）。
+    // 此处刻意按解引用后的结构体大小清零整个结构体，勿“修复”回指针大小。
     __builtin_memset((void *)op_ctx, 0, sizeof(*op_ctx));
 
     op_ctx->reg_0 = saved_regs.regs[0];
@@ -219,6 +221,8 @@ int raw_syscalls_sys_exit(struct bpf_raw_tracepoint_args* ctx) {
     int ctx_index = 1;
     op_ctx_t* op_ctx = bpf_map_lookup_elem(&op_ctx_map, &ctx_index);
     if (unlikely(op_ctx == NULL)) return 0;
+    // 上游缺陷：dev/master 用指针本身的大小（只清前 8 字节）。
+    // 此处刻意按解引用后的结构体大小清零整个结构体，勿“修复”回指针大小。
     __builtin_memset((void *)op_ctx, 0, sizeof(*op_ctx));
 
     op_ctx->reg_0 = saved_regs.regs[0];

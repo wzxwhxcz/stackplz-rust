@@ -203,14 +203,40 @@ impl StackConfig {
         }
     }
 
+    /// True when the user configured no filter at all (round 14 / R13-5,
+    /// mirrors `SyscallConfig::has_no_user_filter`,
+    /// `src/config/syscall.rs:145-156`).
+    ///
+    /// Used to restore master's "0 = no filtering" semantics on the eBPF
+    /// side: `should_trace()` ends in an unconditional `return 0` (default
+    /// deny), so without this fallback a bare `-w` run (hook points but no
+    /// filter flags) produces zero events while master traced everything
+    /// (report §4.2 / §6.2).
+    ///
+    /// `default_thread_blacklist()` entries are deliberately NOT counted: they
+    /// are applied unconditionally by the user side and are not a user choice.
+    pub fn has_no_user_filter(&self) -> bool {
+        self.uid_whitelist.is_empty()
+            && self.uid_blacklist.is_empty()
+            && self.pid_whitelist.is_empty()
+            && self.pid_blacklist.is_empty()
+            && self.tid_whitelist.is_empty()
+            && self.tid_blacklist.is_empty()
+            && self.tname_whitelist.is_empty()
+            && self.tname_blacklist.is_empty()
+            && self.trace_uid_group == 0
+    }
+
     /// `common_filter` value for this run. Mirrors
     /// `ModuleConfig.GetCommonFilter()` (`config_module.go:983-996`):
     /// `trace_mode` from the config, `trace_uid_group` from the `-n` groups,
     /// `signal`/`tsignal` from `--kill`/`--tkill`.
     ///
-    /// `no_filter_allow` stays `0`: the stack module always has an explicit
-    /// uid-group mask / thread filter, so `should_trace()` must keep dev's
-    /// whitelist-style default deny (see `bpf_common::write_common_filter`).
+    /// `no_filter_allow` is `1` when the user configured no filter at all
+    /// (`has_no_user_filter`), so `should_trace()` falls back to master's
+    /// "0 = no filtering" instead of the whitelist-style default deny —
+    /// round 14 / R13-5 (the old comment claimed the stack module always
+    /// has an explicit filter, which is false for a bare `-w` run).
     /// `is_32bit` is the legacy `common_filter_t` field; the C side now decides
     /// register width per target task (`is_current_task_compat32()`), so this
     /// stays `0` (intentional, report §6.2).
@@ -226,7 +252,7 @@ impl StackConfig {
             trace_uid_group: self.trace_uid_group,
             signal,
             tsignal,
-            no_filter_allow: 0,
+            no_filter_allow: if self.has_no_user_filter() { 1 } else { 0 },
         }
     }
 }
@@ -495,7 +521,10 @@ mod tests {
         assert_eq!(f.trace_mode, TRACE_COMMON);
         assert_eq!(f.signal, 0);
         assert_eq!(f.tsignal, 0);
-        assert_eq!(f.no_filter_allow, 0, "stack keeps dev default-deny");
+        // Round 14 / R13-5: a default config configures NO filter, so the
+        // permissive fallback applies (`no_filter_allow = 1`) — the old
+        // assertion of 0 pinned the bare-`-w`-traces-nothing bug.
+        assert_eq!(f.no_filter_allow, 1, "no filter configured → fallback");
         assert_eq!(f.is_32bit, 0);
 
         let conf = StackConfig {
@@ -511,6 +540,59 @@ mod tests {
         assert_eq!(f.trace_mode, crate::contract::consts::TRACE_ALL);
         assert_eq!(f.signal, 19);
         assert_eq!(f.tsignal, 6);
+        // A `-n` group IS a filter, so the default deny stays (0).
+        assert_eq!(
+            f.no_filter_allow, 0,
+            "a configured group keeps default deny"
+        );
+    }
+
+    /// Round 14 / R13-5: a config with no uid/pid/tid/thread filter must set
+    /// `no_filter_allow = 1`, otherwise the eBPF `should_trace()` default
+    /// deny silently produces zero events on a bare `-w` run while master
+    /// traced everything (report §4.2; mirrors the syscall-side test
+    /// `no_filter_config_requests_permissive_fallback`).
+    #[test]
+    fn no_filter_config_requests_permissive_fallback() {
+        let conf = StackConfig::default();
+        assert!(conf.has_no_user_filter());
+        assert_eq!(conf.common_filter(false, 0, 0).no_filter_allow, 1);
+    }
+
+    /// The default thread blacklist is applied unconditionally by the user side
+    /// and is not a user filter, so it must not disable the fallback.
+    #[test]
+    fn default_thread_blacklist_does_not_count_as_a_filter() {
+        let conf = StackConfig::default();
+        assert!(!conf.default_thread_blacklist().is_empty());
+        assert!(conf.has_no_user_filter());
+    }
+
+    /// Any explicitly configured filter must keep the upstream whitelist-style
+    /// default deny (`no_filter_allow = 0`), so filtering behaviour is unchanged.
+    #[test]
+    fn any_explicit_filter_disables_permissive_fallback() {
+        let mutators: Vec<fn(&mut StackConfig)> = vec![
+            |c| c.uid_whitelist.push(1000),
+            |c| c.uid_blacklist.push(0),
+            |c| c.pid_whitelist.push(1234),
+            |c| c.pid_blacklist.push(1),
+            |c| c.tid_whitelist.push(4321),
+            |c| c.tid_blacklist.push(2),
+            |c| c.tname_whitelist.push("RenderThread".to_string()),
+            |c| c.tname_blacklist.push("android.bg".to_string()),
+            |c| c.trace_uid_group = 0b10010,
+        ];
+
+        for mutate in mutators {
+            let mut conf = StackConfig::default();
+            mutate(&mut conf);
+            assert!(
+                !conf.has_no_user_filter(),
+                "a configured filter must disable the permissive fallback"
+            );
+            assert_eq!(conf.common_filter(false, 0, 0).no_filter_allow, 0);
+        }
     }
 
     /// The six `common_list` segments keep dev's offsets and order

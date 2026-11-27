@@ -21,6 +21,7 @@ use crate::config::{
 use crate::module::{StackProbeModule, MODULE_NAME_STACK};
 use crate::util::find_lib;
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// True when `-c/--config` names at least one uprobe config file.
@@ -168,27 +169,40 @@ fn dev_point_to_uprobe_args(
 /// handler saves registers under `UPROBE_ENTER + point_key + 1` on enter and
 /// restores them on exit using the exit point's `enter_key` (`stack.c:59-70`),
 /// so a main point gets `pos + 1` and its companion exit point must keep that
-/// same key, not its own `pos + 1`. The companion is the point that follows a
-/// nonzero `exit_offset` point; a lone `enter_key` without a preceding main
-/// (no exit companion) gets its own `pos + 1`.
+/// same key, not its own `pos + 1`.
+///
+/// Round 14 / R13-3: the companion is paired by its ORIGINAL `enter_key`,
+/// never by adjacency. `parse_hook_point` appends ALL companions at the end
+/// of the list (`[main1, main2, comp1, comp2]`), so the round-12
+/// single-slot `pending_enter_key` (which assumed the companion follows its
+/// main) mis-paired every non-adjacent companion: `comp1` LOADed `main2`'s
+/// registers and `comp2` took the SAVE branch with exit-time registers. A
+/// main's original key is its original `index + 1` (`get_exit_point` stamps
+/// it before the clone) and every companion copies it, so the original key
+/// is the pairing. A companion whose main is gone (orphaned — e.g. its main
+/// was `]s`-bound away before renumber; `update_syscall_point` bails on that
+/// input, so this is defensive only) gets `0`: the C side takes the pass
+/// branch and reads live registers instead of SAVE-ing exit-time ones. The
+/// old code issued a fresh key here (`pos + 1`), which the C side reads as
+/// SAVE — silently wrong data.
 fn renumber_probe_points(probes: &mut [(ProbeConfig, Vec<UprobeArgs>)]) {
     for (_, points) in probes {
-        let mut pending_enter_key = 0u32;
+        // First pass: mains (`exit_offset != 0`) get fresh keys `pos + 1`
+        // and record `original enter_key -> new key`.
+        let mut new_key_by_orig: HashMap<u32, u32> = HashMap::new();
+        for (pos, point) in points.iter().enumerate() {
+            if point.exit_offset != 0 {
+                new_key_by_orig.insert(point.enter_key, pos as u32 + 1);
+            }
+        }
+        // Second pass: mains take `pos + 1`; companions look their main's
+        // new key up by the ORIGINAL enter_key; plain points stay 0.
         for (pos, point) in points.iter_mut().enumerate() {
             point.index = pos as u32;
-            if point.enter_key == 0 && point.exit_offset == 0 {
-                continue;
-            }
             if point.exit_offset != 0 {
-                // Main point: stamp the key its exit companion will reuse.
                 point.enter_key = pos as u32 + 1;
-                pending_enter_key = point.enter_key;
-            } else if pending_enter_key != 0 {
-                // Companion exit point: keep the main point's key.
-                point.enter_key = pending_enter_key;
-                pending_enter_key = 0;
-            } else {
-                point.enter_key = pos as u32 + 1;
+            } else if point.enter_key != 0 {
+                point.enter_key = new_key_by_orig.get(&point.enter_key).copied().unwrap_or(0);
             }
         }
     }
@@ -427,8 +441,9 @@ pub fn run(
 
     // Round 10 / M3 + round 12 / R11-7: every probe gets its own module thread
     // (`module.run()` blocks in its poll loop), so a multi-probe `-c` config no
-    // longer runs only the first probe. The dropped-lines warning is still
-    // presented exactly once via `finish_run`, outside this block.
+    // longer runs only the first probe. Round 14 / R13-2: the dropped-lines
+    // warning is presented exactly once by `run_modules` after its wait loop,
+    // not here — `finish_run` here would print it once per module.
     let result = {
         let jobs: Vec<_> = probes
             .into_iter()
@@ -461,8 +476,12 @@ pub fn run(
         run_jobs_concurrently(jobs, crate::cli::interrupted)
     };
     // Round 7 / F1: the drop counter added in round 6 had no reader, so a
-    // full disk / closed stdout stayed silent. Present it once here.
-    crate::logger::Logger::finish_run(result, &logger)
+    // full disk / closed stdout stayed silent. Round 14 / R13-2: the warning
+    // is NO LONGER presented here — `finish_run` ran once per module, so a
+    // dual-module run printed it twice (the second count including the
+    // first's). Presentation moved to `run_modules`, after its wait loop,
+    // where it runs exactly once for the whole process.
+    result
 }
 
 #[cfg(test)]
@@ -751,7 +770,12 @@ mod tests {
     }
 
     /// The invariant the BPF side relies on: `point.index` equals its position
-    /// in the probe's vec, and a non-zero `enter_key` follows it (`pos + 1`).
+    /// in the probe's vec. Round 14 / R13-3: a lone non-zero `enter_key` (a
+    /// companion whose main is gone — no `exit_offset` point carries that
+    /// key) is an ORPHAN, not a main: it gets `0` (C pass branch, live
+    /// registers), NOT `pos + 1` (C SAVE branch, which would store exit-time
+    /// registers as if they were entry-time ones). The round-12 expectation
+    /// `[1, 0, 3]` pinned the buggy fresh-key behaviour.
     #[test]
     fn renumber_probe_points_aligns_index_and_enter_key() {
         let mut probes: Vec<(ProbeConfig, Vec<UprobeArgs>)> = vec![
@@ -772,11 +796,11 @@ mod tests {
         assert_eq!(idx, vec![0, 1, 2]);
         assert_eq!(
             keys,
-            vec![1, 0, 3],
-            "enter_key follows pos, zeros stay zero"
+            vec![0, 0, 0],
+            "orphaned enter_keys go to 0 (C pass branch), zeros stay zero"
         );
         assert_eq!(probes[1].1[0].index, 0);
-        assert_eq!(probes[1].1[0].enter_key, 1);
+        assert_eq!(probes[1].1[0].enter_key, 0);
     }
 
     /// A companion exit point keeps its main point's `enter_key` (C pairs by
@@ -801,6 +825,43 @@ mod tests {
         let keys: Vec<u32> = points.iter().map(|p| p.enter_key).collect();
         assert_eq!(idx, vec![0, 1, 2, 3, 4]);
         assert_eq!(keys, vec![1, 1, 0, 4, 4]);
+    }
+
+    /// Round 14 / R13-3: the parser's REAL layout is non-adjacent —
+    /// `parse_hook_point` appends ALL companions at the end
+    /// (`[main1, main2, comp1, comp2]`), never interleaved. The round-12
+    /// adjacency assumption mis-paired these: `comp1` LOADed `main2`'s
+    /// registers and `comp2` took the SAVE branch with exit-time registers.
+    /// Pairing must follow the companions' ORIGINAL `enter_key`, so the keys
+    /// stay `[1, 2, 1, 2]`. (The adjacent-layout test above stays as
+    /// regression, but it no longer counts as evidence that the real layout
+    /// is covered.)
+    #[test]
+    fn renumber_probe_points_pairs_non_adjacent_companions_by_original_key() {
+        crate::argtype::init_argtypes();
+        let points = crate::config::point_parser::parse_hook_point(
+            &["foo[ptr]0x20".to_string(), "bar[ptr]0x30".to_string()],
+            "/lib/libc.so",
+            false,
+        )
+        .unwrap();
+        // Real parser layout: mains first, companions appended at the end.
+        assert_eq!(points.len(), 4);
+        assert_eq!(
+            points.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["foo", "bar", "0x20", "0x30"]
+        );
+        let mut probes: Vec<(ProbeConfig, Vec<UprobeArgs>)> = vec![(blank_probe(), points)];
+        renumber_probe_points(&mut probes);
+        let points = &probes[0].1;
+        let idx: Vec<u32> = points.iter().map(|p| p.index).collect();
+        let keys: Vec<u32> = points.iter().map(|p| p.enter_key).collect();
+        assert_eq!(idx, vec![0, 1, 2, 3]);
+        assert_eq!(
+            keys,
+            vec![1, 2, 1, 2],
+            "each companion keeps its own main's key"
+        );
     }
 
     /// Scenario A: a 3-point dev file produces one probe per point; each
@@ -842,7 +903,9 @@ mod tests {
     /// Scenario B: `dispatch_w_points` keeps stale indexes on the remaining
     /// `-w` points (e.g. `openat` at index 1 after a bound `write` was
     /// removed); the `-w` branch renumbers them to 0..m-1 and remaps
-    /// `enter_key`.
+    /// `enter_key`. Round 14 / R13-3: the stale keys here are orphans (no
+    /// `exit_offset` main carries them), so they go to `0` (C pass branch),
+    /// not to `pos + 1` (C SAVE branch) as round 12 pinned.
     #[test]
     fn build_probes_renumbers_w_points_remaining() {
         let w_points = Some((
@@ -860,7 +923,7 @@ mod tests {
         let idx: Vec<u32> = points.iter().map(|p| p.index).collect();
         let keys: Vec<u32> = points.iter().map(|p| p.enter_key).collect();
         assert_eq!(idx, vec![0, 1, 2]);
-        assert_eq!(keys, vec![1, 0, 3]);
+        assert_eq!(keys, vec![0, 0, 0]);
     }
 
     /// Two dev files must not collide: every probe keeps the invariant

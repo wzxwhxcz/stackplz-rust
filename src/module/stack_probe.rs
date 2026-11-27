@@ -135,20 +135,17 @@ impl StackProbeModule {
         //    Report W17: `trace_uid_group` is the configured value (0 by
         //    default), no longer a hard-coded 0xFF.
         //
-        //    Default-deny safety: `write_common_filter` always writes
-        //    `no_filter_allow = 0` (`src/ebpf/bpf_common.rs:300`), so
-        //    `should_trace()` keeps the whitelist-style default deny. That is
-        //    safe only because this module runs when the user explicitly
-        //    configured filters: `src/cli/mod.rs` starts the stack module only
-        //    when it sees uprobe hook points (-w/-c), and `StackConfig`'s
-        //    uid/pid/tid/tname lists always come from explicit CLI filters
-        //    (`uid_whitelist` etc.), never from defaults. If the user configured
-        //    no filter at all, they should use the syscall module instead: its
-        //    `to_common_filter_bytes()` writes `no_filter_allow = 1` when
-        //    `has_no_user_filter()` (`src/config/syscall.rs:226-229`).
-        //    See `ebpf/common/filtering.h:109-115`: only
-        //    `no_filter_allow == 1` falls back to master's "0 = no filtering";
-        //    writing 0 here means no fallback → default deny.
+        //    Round 14 / R13-5: `no_filter_allow` follows
+        //    `conf.has_no_user_filter()` — a bare `-w` run (hook points but
+        //    no filter flags) must fall back to master's "0 = no filtering",
+        //    or `should_trace()`'s default deny silently produces zero
+        //    events. The old comment claimed this module only runs when the
+        //    user explicitly configured filters ("the user should use the
+        //    syscall module instead") — false: the module starts when it
+        //    sees hook points (`-w`/`-c`), and nothing forces a filter
+        //    alongside them. See `ebpf/common/filtering.h:109-115`: only
+        //    `no_filter_allow == 1` falls back; writing 0 means no fallback
+        //    → default deny.
         bpf_common::linux::write_common_filter(
             &obj,
             false,
@@ -156,6 +153,7 @@ impl StackProbeModule {
             conf.trace_uid_group,
             kill_signal,
             tkill_signal,
+            conf.has_no_user_filter(),
         )?;
         logger.println(&format!(
             "{NAME}\tcommon_filter written (trace_mode={}, trace_uid_group=0x{:x}, signal={kill_signal}, tsignal={tkill_signal})",
@@ -336,8 +334,10 @@ impl StackProbeModule {
             crate::cli::interrupted,
         );
         logger.println(&format!("{NAME}\tshutting down"));
+        // Round 14 / R13-1: the shutdown summary carries the module tag like
+        // the line above (round 12 / R12-1 only fixed the 11 setup lines).
         logger.println(&format!(
-            "TotalLost => {}",
+            "{NAME}\tTotalLost => {}",
             lost_total.load(Ordering::Relaxed)
         ));
         drop(links);

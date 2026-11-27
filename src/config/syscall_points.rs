@@ -327,6 +327,24 @@ impl SyscallPointTable {
         if !point.bind_syscall {
             return Ok(false);
         }
+        // Round 14 / R13-3: a bound main with an exit offset is contradictory
+        // input — the main is traced by the syscall module, but its exit
+        // companion (`get_exit_point`, `bind_syscall == false`) would be
+        // orphaned in the uprobe list, and no module can supply the entry
+        // registers its SAVE branch needs. Bail loudly instead of tracing
+        // exit-time registers as if they were entry-time ones. (No CLI input
+        // currently produces this combination — the `]s` suffix strip leaves
+        // the string ending in `]`, so the exit-offset parse always finds
+        // empty text after it — but the check guards the invariant.)
+        if point.exit_offset != 0 {
+            bail!(
+                "hook point '{}' has both an exit offset (0x{:x}) and a `]s`/`]ss` \
+                 bind: the exit companion would be orphaned (its main is traced \
+                 by the syscall module), so drop the exit offset or the bind",
+                point.name,
+                point.exit_offset
+            );
+        }
         let index = *self
             .by_name
             .get(point.name.as_str())
@@ -626,6 +644,26 @@ mod tests {
             format!("{err:#}").contains("unknown syscall name:nosuchsyscall"),
             "{err:#}"
         );
+    }
+
+    /// Round 14 / R13-3: a `]s`-bound point with an exit offset is
+    /// contradictory input and bails — its exit companion would be orphaned
+    /// (no module can supply the entry registers its SAVE branch needs).
+    /// No CLI input currently produces this combination (the `]s` suffix
+    /// strip leaves the string ending in `]`, so the exit-offset parse finds
+    /// nothing after it), so the point is built synthetically here.
+    #[test]
+    fn update_syscall_point_bound_with_exit_offset_bails() {
+        init_argtypes();
+        let mut table = table();
+        let point = crate::config::UprobeArgs {
+            name: "write".to_string(),
+            bind_syscall: true,
+            exit_offset: 0x40,
+            ..Default::default()
+        };
+        let err = table.update_syscall_point(&point).unwrap_err();
+        assert!(format!("{err:#}").contains("orphaned"), "{err:#}");
     }
 
     /// Round 11 / P1: without the `]s` suffix nothing is bound and the table

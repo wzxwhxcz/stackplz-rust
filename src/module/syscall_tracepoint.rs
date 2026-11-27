@@ -629,8 +629,10 @@ fn poll_until_shutdown<T, E>(
 {
     poll_until_stop(NAME, poll_once, logger, shutdown_pending);
     logger.println(&format!("{NAME}: shutting down"));
+    // Round 14 / R13-1: the shutdown summary carries the module tag like
+    // the line above (round 12 / R12-1 only fixed the setup lines).
     logger.println(&format!(
-        "TotalLost => {}",
+        "{NAME}: TotalLost => {}",
         lost_total.load(Ordering::Relaxed)
     ));
 }

@@ -264,12 +264,13 @@ pub mod linux {
     /// Mirrors Go's `update_common_filter()` (the final `common_filter` write
     /// part) in `stack.go:245-259`.
     ///
-    /// `no_filter_allow` is written as 0 here: the uprobe (`stack`) module always
-    /// sets an explicit uid-group mask / thread filter, so `should_trace()` must
-    /// keep its whitelist-style default deny. The syscall module does **not** use
-    /// this function — it assembles the same bytes with
-    /// `SyscallConfig::to_common_filter_bytes()`, which is the only writer of
-    /// `no_filter_allow = 1` (when the user configured no filter at all).
+    /// `no_filter_allow` is `1` when the user configured no filter at all, so
+    /// `should_trace()` falls back to master's "0 = no filtering" instead of
+    /// the whitelist-style default deny (round 14 / R13-5, mirroring
+    /// `SyscallConfig::to_common_filter_bytes()`). The old comment claimed
+    /// the stack module always has an explicit filter — false for a bare
+    /// `-w` run, which is exactly the case that used to trace nothing.
+    /// The caller passes `StackConfig::has_no_user_filter()`.
     pub fn write_common_filter(
         obj: &Object,
         is_32bit: bool,
@@ -277,6 +278,7 @@ pub mod linux {
         trace_uid_group: u32,
         signal: u32,
         tsignal: u32,
+        no_filter_allow: bool,
     ) -> Result<()> {
         use crate::contract::types::CommonFilter;
         let filter = CommonFilter {
@@ -285,7 +287,7 @@ pub mod linux {
             trace_uid_group,
             signal,
             tsignal,
-            no_filter_allow: 0,
+            no_filter_allow: if no_filter_allow { 1 } else { 0 },
         };
         write_map(obj, "common_filter", &0u32, &filter)
     }

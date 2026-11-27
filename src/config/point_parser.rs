@@ -362,10 +362,28 @@ pub fn parse_hook_point(
             bind_syscall = true;
         }
 
-        // Exit offset after `]`
+        // Regex: (\w+)(\+0x[hex]+)?(\[...\])?
+        // We do a manual parse since the regex is simple.
+        let (symbol_or_off, offset_suffix, args_str, end_pos) = parse_point_regex(&config_str)?;
+
+        // Round 14 / R13-4: the exit offset comes from THIS point's own `]`
+        // (the text just past the parsed point), never from the whole
+        // string's last `]` — `rfind` took the LAST point's offset and
+        // attached it to the first point (`foo[ptr]0x20,bar[ptr]0x30` gave
+        // foo 0x30 and dropped bar). A `,` in the remainder means the
+        // element holds more than one point, which this parser does not
+        // support — bail loudly instead of silently dropping the rest (Go
+        // drops them; this crate fails loud, per R11-3/R12-2). No args group
+        // means no `]` belongs to this point, so no exit offset.
         let mut exit_offset: u64 = 0;
-        if let Some(pos) = config_str.rfind(']') {
-            let after = &config_str[pos + 1..];
+        if args_str.is_some() {
+            let after = &config_str[end_pos..];
+            if after.contains(',') {
+                bail!(
+                    "hook point {config_str:?} holds more than one point (`,` after the first point's `]`): \
+                     use one `-w` element per point"
+                );
+            }
             if !after.is_empty() {
                 exit_read = true;
                 // NOTE: a garbage offset after `]` is silently kept as 0
@@ -375,10 +393,6 @@ pub fn parse_hook_point(
                 }
             }
         }
-
-        // Regex: (\w+)(\+0x[hex]+)?(\[...\])?
-        // We do a manual parse since the regex is simple.
-        let (symbol_or_off, offset_suffix, args_str) = parse_point_regex(&config_str)?;
 
         let mut hook_point = UprobeArgs::new();
         hook_point.bind_syscall = bind_syscall;
@@ -447,8 +461,10 @@ pub fn parse_hook_point(
 }
 
 /// Manual implementation of the regex `(\w+)(\+0x[[:xdigit:]]+)?(\[.+?\])?`.
-/// Returns (symbol, optional_offset_suffix, optional_args).
-fn parse_point_regex(s: &str) -> Result<(String, Option<String>, Option<String>)> {
+/// Returns (symbol, optional_offset_suffix, optional_args, end_pos), where
+/// `end_pos` is the byte index just past the parsed point — the caller reads
+/// the exit offset from `s[end_pos..]`.
+fn parse_point_regex(s: &str) -> Result<(String, Option<String>, Option<String>, usize)> {
     let chars: Vec<char> = s.chars().collect();
     let mut pos = 0;
 
@@ -479,7 +495,9 @@ fn parse_point_regex(s: &str) -> Result<(String, Option<String>, Option<String>)
         None
     };
 
-    // Group 3: optional [...] (non-greedy to the last ])
+    // Group 3: optional [...] (non-greedy to the FIRST `]` — matches Go's
+    // `\[.+?\]`; the old comment said "last", which was wrong: `position`
+    // below returns the first `]`).
     let args = if pos < chars.len() && chars[pos] == '[' {
         // Find the matching ]
         if let Some(end) = chars[pos..].iter().position(|&c| c == ']') {
@@ -493,10 +511,15 @@ fn parse_point_regex(s: &str) -> Result<(String, Option<String>, Option<String>)
         None
     };
 
-    // Allow trailing content (exit offset etc.) — we already parsed it above.
-    let _ = pos;
+    // Trailing content (exit offset etc.) is the caller's job — report where
+    // this point ends so it reads the offset from THIS point's own `]`
+    // (round 14 / R13-4: the old code discarded `pos` and `parse_hook_point`
+    // re-derived it with `rfind(']')`, which took the LAST `]` of the whole
+    // string instead). `pos` is a char index; convert to a byte index (a
+    // char boundary by construction).
+    let end_pos: usize = chars[..pos].iter().map(|c| c.len_utf8()).sum();
 
-    Ok((symbol, offset_suffix, args))
+    Ok((symbol, offset_suffix, args, end_pos))
 }
 
 #[cfg(test)]
@@ -773,5 +796,43 @@ mod tests {
         let points = hp("write[int,int,int]");
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].enter_key, 0);
+    }
+
+    /// Round 14 / R13-4: one `-w` element holding two points bails loudly
+    /// instead of silently mis-attaching the second point's exit offset to
+    /// the first (`foo[ptr]0x20,bar[ptr]0x30` used to give foo 0x30 and drop
+    /// bar; `foo[ptr]0x20,bar[ptr]` used to LOSE foo's own 0x20). All three
+    /// probe shapes from the RSI finding bail.
+    #[test]
+    fn comma_separated_points_in_one_element_bail() {
+        ensure_init();
+        for cfg in [
+            "foo[ptr]0x20,bar[ptr]0x30",
+            "foo[ptr],bar[ptr]",
+            "foo[ptr]0x20,bar[ptr]",
+        ] {
+            let err = parse_hook_point(&[cfg.to_string()], "/lib/libc.so", false).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("more than one point"),
+                "cfg={cfg}: {err:#}"
+            );
+        }
+    }
+
+    /// Round 14 / R13-4: two points as two `-w` elements (the documented
+    /// usage) still parse — each keeps its own exit offset (this is also the
+    /// non-adjacent layout the R13-3 renumber fix pairs by original key).
+    #[test]
+    fn two_elements_each_keep_their_own_exit_offset() {
+        ensure_init();
+        let points = parse_hook_point(
+            &["foo[ptr]0x20".to_string(), "bar[ptr]0x30".to_string()],
+            "/lib/libc.so",
+            false,
+        )
+        .unwrap();
+        assert_eq!(points.len(), 4);
+        assert_eq!(points[0].exit_offset, 0x20);
+        assert_eq!(points[1].exit_offset, 0x30);
     }
 }

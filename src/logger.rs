@@ -77,21 +77,12 @@ impl Logger {
         g.lines_failed
     }
 
-    /// Present [`Logger::failed_lines`] on the CLI exit path (round 7 / F1,
-    /// round 10 / M3): print the warning to stderr whenever lines were lost,
-    /// **before** returning `res` — whether the run succeeded or failed, a
-    /// failing run loses logs too, and that is when the warning matters most.
-    /// `res` is returned unchanged so callers can keep using `?`.
-    pub fn finish_run(res: Result<()>, logger: &Logger) -> Result<()> {
-        if let Some(warning) = Self::dropped_lines_warning(logger.failed_lines()) {
-            eprintln!("{warning}");
-        }
-        res
-    }
-
     /// Present [`Logger::failed_lines`] on the CLI exit path (round 7 / F1):
     /// `None` when nothing was dropped, otherwise the one-line warning the
-    /// caller prints to stderr. Pure, so tests can pin the wording.
+    /// caller prints to stderr. Pure, so tests can pin the wording. The
+    /// single presenter is `run_modules`, after its wait loop (round 14 /
+    /// R13-2): the old per-module `finish_run` helper printed the warning
+    /// once per module, so a dual-module run printed it twice.
     pub fn dropped_lines_warning(failed: u64) -> Option<String> {
         if failed == 0 {
             None
@@ -302,21 +293,6 @@ mod tests {
         let mut n = 0u64;
         Logger::write_line_sinks(None, None, b"line", &mut n);
         assert_eq!(n, 0, "no sink, nothing written, nothing lost");
-    }
-
-    /// M3: the dropped-lines warning must be presented on the error path too —
-    /// `finish_run` runs before the caller returns `res`, and must hand `res`
-    /// back unchanged (the warning wording itself is pinned by
-    /// `dropped_lines_warning_names_the_count`).
-    #[test]
-    fn finish_run_prints_the_warning_on_the_error_path_too() {
-        let logger = Logger::new("", false);
-        let ok: anyhow::Result<()> = Ok(());
-        assert!(Logger::finish_run(ok, &logger).is_ok());
-
-        let err: anyhow::Result<()> = Err(anyhow::anyhow!("module failed"));
-        let e = Logger::finish_run(err, &logger).unwrap_err();
-        assert!(format!("{e:#}").contains("module failed"), "{e:#}");
     }
 
     #[test]

@@ -182,6 +182,16 @@ struct WDispatch {
 /// An exit companion (`get_exit_point`) carries `bind_syscall == false`, so
 /// it always stays in the uprobe list — Go's `GetExitPoint` does not copy
 /// `BindSyscall` either (`config_uprobe.go:26-43`).
+///
+/// Round 14 / R13-3: a bound main with an exit offset is contradictory
+/// input and bails in `update_syscall_point`. The main is traced by the
+/// syscall module, but its exit companion would be orphaned in the uprobe
+/// list, and no module can supply the entry registers the companion's SAVE
+/// branch needs — it would report exit-time registers as if they were
+/// entry-time ones. (No CLI input currently produces that combination — the
+/// `]s` suffix strip leaves the string ending in `]`, so the exit-offset
+/// parse always finds empty text after it — but the check guards the
+/// invariant if the parser ever changes.)
 fn dispatch_w_points(
     global: &GlobalConfig,
     target: &TargetConfig,
@@ -347,9 +357,16 @@ fn run_modules(
     // `start N modules` banner (dev `root.go:417`).
     println!("start {module_count} modules");
 
-    loop {
+    // Round 14 / R13-2: the dropped-lines warning is presented exactly once
+    // here, after the wait loop, for the whole process. Each module's `run()`
+    // used to present it via `finish_run`, so a dual-module run printed it
+    // twice — the second count including the first module's dropped lines.
+    // The loop breaks with the outcome; the warning prints before returning
+    // it, whether the run succeeded or failed (a failing run loses logs too,
+    // and that is when the warning matters most).
+    let outcome = loop {
         if INTERRUPTED.load(Ordering::SeqCst) {
-            return Ok(());
+            break Ok(());
         }
         match rx.recv_timeout(std::time::Duration::from_millis(200)) {
             Ok((name, error)) => {
@@ -360,21 +377,25 @@ fn run_modules(
                     // module ends on its own only through an error or a poll
                     // failure, and neither is a success.
                     INTERRUPTED.store(true, Ordering::SeqCst);
-                    return Err(err);
+                    break Err(err);
                 }
-                return Ok(());
+                break Ok(());
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 // Every module thread ended without sending a completion
                 // (panicked before the send) — not a success: a trace loop
                 // only ends on a signal or a module failure.
-                return Err(RunError::Module(
+                break Err(RunError::Module(
                     "all modules stopped without a signal, [skip it]".into(),
                 ));
             }
         }
+    };
+    if let Some(warning) = crate::logger::Logger::dropped_lines_warning(logger.failed_lines()) {
+        eprintln!("{warning}");
     }
+    outcome
 }
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);

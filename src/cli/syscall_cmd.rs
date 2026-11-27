@@ -125,14 +125,14 @@ pub fn run(
 
     let module = SyscallTracepointModule::new(conf);
     // Round 7 / F1: `run()` takes the logger by value, so clone it and keep
-    // this handle for the drop counter. Round 10 / M3: `finish_run` presents
-    // the warning whether the run succeeded or failed — it prints before
-    // handing `result` back unchanged.
-    let result = module
+    // this handle for the drop counter. Round 14 / R13-2: the dropped-lines
+    // warning is NO LONGER presented here — `finish_run` ran once per
+    // module, so a dual-module run printed it twice. Presentation moved to
+    // `run_modules`, after its wait loop, where it runs exactly once.
+    module
         .run(logger.clone(), resume)
         .map_err(|e| anyhow!("{e:#}"))
-        .context("syscall module failed");
-    crate::logger::Logger::finish_run(result, &logger)
+        .context("syscall module failed")
 }
 
 #[cfg(test)]

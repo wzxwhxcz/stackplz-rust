@@ -4,7 +4,7 @@
 //! carriers are `StackUprobeConfig` (`config_module.go:23`) and `UprobeArgs`
 //! (`config_uprobe.go:9`).
 
-use super::sconfig::{stack_filter_from, HookConfig, SConfig, StackFilter};
+use super::sconfig::{HookConfig, SConfig};
 use crate::contract::consts::{
     PID_BLACKLIST_START, PID_WHITELIST_START, THREAD_NAME_BLACKLIST, THREAD_NAME_WHITELIST,
     TID_BLACKLIST_START, TID_WHITELIST_START, UID_BLACKLIST_START, UID_WHITELIST_START,
@@ -26,14 +26,6 @@ pub const MAX_UPROBE_PROGRAMS: usize = 6;
 /// the maps upstream `MStack.updateFilter()` (`stack.go:381-390`) writes.
 #[derive(Debug, Clone, Default)]
 pub struct StackConfig {
-    pub library: String,
-    pub symbol: String,
-    pub offset: u64,
-    pub reg_name: String,
-    pub config: String,
-    /// `-w/--point` hook configs, e.g. `write[int,buf:128,int]`.
-    pub hook_points: Vec<String>,
-
     // ---- filter lists (mirrors `ModuleConfig`, dev `config_module.go`) ----
     /// `-u/--uid` whitelist. Dev semantics: a list, so `-u 0` means "root only".
     pub uid_whitelist: Vec<u32>,
@@ -244,12 +236,6 @@ impl ProbeConfig {
         Ok(())
     }
 
-    /// Produce the on-wire `StackFilter` for `filter_map`.
-    /// Master-era `ProbeConfig.GetFilter()` (`origin/master:user/config/config_hook.go:58-66`).
-    pub fn get_filter(&self) -> StackFilter {
-        stack_filter_from(&self.sconfig)
-    }
-
     /// Human-readable hook label, used for log lines.
     /// Master-era `ProbeConfig.Info()` (`origin/master:user/config/config_hook.go`).
     pub fn info(&self) -> String {
@@ -337,28 +323,6 @@ mod tests {
         };
         assert!(p.check().is_ok());
         assert_eq!(p.symbol, "open");
-    }
-
-    #[test]
-    fn get_filter_produces_expected_bytes() {
-        let p = ProbeConfig {
-            sconfig: SConfig {
-                uid: 5,
-                pid: 7,
-                tid_blacklist_mask: 0b1,
-                tid_blacklist: [42, 0, 0, 0, 0],
-                ..Default::default()
-            },
-            lib_name: String::new(),
-            library: String::new(),
-            symbol: "x".into(),
-            offset: 0,
-        };
-        let f = p.get_filter();
-        assert_eq!(f.uid, 5);
-        assert_eq!(f.pid, 7);
-        assert_eq!(f.tid_blacklist_mask, 0b1);
-        assert_eq!(f.tid_blacklist[0], 42);
     }
 
     /// Report W8/W13/W17: by default the stack module writes exactly the 18 dev

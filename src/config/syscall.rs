@@ -1,13 +1,11 @@
 //! `syscall` subcommand config. Mirrors `ModuleConfig` + `SyscallConfig` (`config_module.go`).
 
-use super::sconfig::{syscall_filter_from, HookConfig, SConfig, SyscallFilter};
 use super::syscall_points::SyscallPointTable;
 use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
 
 /// Syscall tracepoint module configuration. Mirrors `ModuleConfig` + `SyscallConfig`.
 #[derive(Debug, Clone)]
 pub struct SyscallConfig {
-    pub sconfig: SConfig,
     /// The syscall point table (embedded `config_syscall_*.json` or a `-c`
     /// override). This is what `update_sysenter_point_args` /
     /// `update_sysexit_point_args` write into the BPF maps — the field whose
@@ -45,7 +43,6 @@ pub struct SyscallConfig {
     pub sys_whitelist: Vec<u32>,
     pub sys_blacklist: Vec<u32>,
     pub dump_hex: bool,
-    pub color: bool,
 }
 
 impl SyscallConfig {
@@ -57,7 +54,6 @@ impl SyscallConfig {
     /// embedded dev table, or a `-c/--config` override).
     pub fn with_table(point_table: SyscallPointTable) -> Self {
         SyscallConfig {
-            sconfig: SConfig::default(),
             point_table,
             trace_mode: TRACE_ALL,
             trace_mode_override: None,
@@ -79,16 +75,7 @@ impl SyscallConfig {
             sys_whitelist: Vec::new(),
             sys_blacklist: Vec::new(),
             dump_hex: false,
-            color: false,
         }
-    }
-
-    /// Produce the on-wire `SyscallFilter` for `filter_map`.
-    /// Master-era `SyscallConfig.GetFilter()` (`origin/master:user/config/config_syscall.go:26-35`).
-    pub fn get_filter(&self) -> SyscallFilter {
-        // One module handles every syscall now (dev model), so the legacy
-        // per-sysno `filter_map` value carries nr = 0.
-        syscall_filter_from(&self.sconfig, 0)
     }
 
     /// Human-readable hook label, used for log lines.
@@ -241,18 +228,6 @@ impl SyscallConfig {
 impl Default for SyscallConfig {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl HookConfig for SyscallConfig {
-    fn sconfig(&self) -> &SConfig {
-        &self.sconfig
-    }
-    fn sconfig_mut(&mut self) -> &mut SConfig {
-        &mut self.sconfig
-    }
-    fn info(&self) -> String {
-        SyscallConfig::info(self)
     }
 }
 

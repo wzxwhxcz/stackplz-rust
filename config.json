@@ -8,14 +8,10 @@
             "disable": false,
             "configs": [
                 {
-                    "stack": true,
-                    "regs": true,
                     "symbols": ["open"],
                     "offsets": []
                 },
                 {
-                    "stack": false,
-                    "regs": true,
                     "symbols": ["read", "send", "recv"],
                     "offsets": []
                 }
@@ -26,8 +22,6 @@
             "disable": false,
             "configs": [
                 {
-                    "stack": true,
-                    "regs": true,
                     "symbols": ["_Z5func1v"],
                     "offsets": ["0xF37C"]
                 }

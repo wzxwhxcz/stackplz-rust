@@ -22,6 +22,9 @@
 //! `--rpc-path`, `--brk`, `--brk-pid`, `--brk-lib`, `--brk-len`, `--dump`,
 //! `--parse`, `--showpc`, `--showtime`, `--showuid`, `--btf`.
 //!
+//! Round 8 removed `--json/-j`, `--color` and `--reg` (review G1/G2/G4)
+//! for the same reason: they were accepted and forwarded but nobody read them.
+//!
 //! `--stack`, `--regs` and `--stack-size` were also removed (review F4): the
 //! eBPF side never emits `UnwindBuf` stack data, so the native unwinder
 //! (`event::parse_stack`) has no production caller. Accepting the flags made
@@ -126,10 +129,6 @@ pub struct Cli {
     #[arg(short = 'w', long = "point", value_name = "POINT")]
     pub point: Vec<String>,
 
-    /// get the offset of reg
-    #[arg(long, default_value = "")]
-    pub reg: String,
-
     /// hook config file (repeatable; syscall or uprobe JSON)
     #[arg(short = 'c', long = "config", value_name = "FILE")]
     pub config: Vec<String>,
@@ -149,14 +148,6 @@ pub struct Cli {
     /// wont logging to terminal when used
     #[arg(short = 'q', long, default_value_t = false)]
     pub quiet: bool,
-
-    /// enable color for log file
-    #[arg(long, default_value_t = false)]
-    pub color: bool,
-
-    /// log event as json format
-    #[arg(short = 'j', long, default_value_t = false)]
-    pub json: bool,
 
     /// save the log to file
     #[arg(short = 'o', long, default_value = "")]
@@ -289,6 +280,10 @@ mod tests {
             "--showpc",
             "--showtime",
             "--showuid",
+            "--json",
+            "-j",
+            "--color",
+            "--reg",
         ] {
             assert!(
                 Cli::try_parse_from(["stackplz", flag, "x"]).is_err()

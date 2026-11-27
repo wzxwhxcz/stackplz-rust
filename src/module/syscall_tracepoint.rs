@@ -446,10 +446,12 @@ impl SyscallTracepointModule {
         let point_table = Arc::new(self.conf.point_table.clone());
         let dump_hex = self.conf.dump_hex;
         let logger_clone = Arc::clone(&logger);
-        // Round 7 / F4: `--auto` resumes the event pid after each event
-        // (Go `event_raw_syscalls.go:72-73`). The manager is owned by this
-        // run loop and moved into the perf callback below.
+        // Round 7 / F4 / G3: before `--auto` resumes the event pid, record it
+        // as stopped when the kill signal is SIGSTOP (Go `event_context.go:185`
+        // records, `event_raw_syscalls.go:72-73` resumes). The manager is owned
+        // by this run loop and moved into the perf callback below.
         let auto_resume = self.conf.auto_resume;
+        let kill_signal = self.conf.kill_signal;
         let mut sig_mgr = crate::signal::SignalManager::new();
         let handle_event = move |_cpu: i32, data: &[u8]| {
             let mut decoded = match crate::contract::decode_perf_record(data) {
@@ -463,6 +465,7 @@ impl SyscallTracepointModule {
             match crate::event::render::render_syscall_event(&point_table, &mut decoded, dump_hex) {
                 Ok(line) => {
                     logger_clone.println(&line);
+                    crate::signal::record_stopped_after_event(&mut sig_mgr, kill_signal, pid);
                     crate::signal::auto_resume_after_event(
                         &mut |pid| {
                             // resume_one prints its own diagnostics; nothing

@@ -139,18 +139,6 @@ pub enum ArgType {
     Buffer,
 }
 
-/// `enum point_flag_e` — per-point behavior flags carried in
-/// `point_arg.point_flag`.
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PointFlag {
-    Forbidden = 0,
-    SysEnterExit,
-    SysEnter,
-    SysExit,
-    UprobeEnterRead,
-}
-
 /// `enum arg_filter_e` — filter rule kind in `arg_filter_t.filter_type`.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -202,55 +190,6 @@ pub enum BufIdx {
     ZeroBuf = 1,
 }
 
-/// arm64 register indices (subset used for the TLV header args 1/2/3 and
-/// register saves). Mirrors `enum arm64_reg_e`.
-#[allow(non_camel_case_types)]
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Arm64Reg {
-    X0 = 0,
-    X1,
-    X2,
-    X3,
-    X4,
-    X5,
-    X6,
-    X7,
-    X8,
-    X9,
-    X10,
-    X11,
-    X12,
-    X13,
-    X14,
-    X15,
-    X16,
-    X17,
-    X18,
-    X19,
-    X20,
-    X21,
-    X22,
-    X23,
-    X24,
-    X25,
-    X26,
-    X27,
-    X28,
-    X29,
-    Lr,
-    Sp,
-    Pc,
-    Max,
-    Index,
-    Abs,
-}
-
-/// Number of general-purpose arm64 registers saved in `ctx_regs_t.regs`
-/// (x0..x28). `sp`/`pc`/`flag` are separate fields. Matches the
-/// `for (i = 0; i < 31; i++)` loop in `stack.c`/`syscall.c`.
-pub const CTX_REGS_LEN: usize = 31;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,11 +240,5 @@ mod tests {
     fn buf_idx_values() {
         assert_eq!(BufIdx::StringBuf as u32, 0);
         assert_eq!(BufIdx::ZeroBuf as u32, 1);
-    }
-
-    #[test]
-    fn ctx_regs_len_is_31() {
-        // The save loop is `for (i = 0; i < 31; i++) saved_regs.regs[i] = ...`.
-        assert_eq!(CTX_REGS_LEN, 31);
     }
 }

@@ -62,15 +62,8 @@ pub fn build_config(
 ) -> Result<SyscallConfig> {
     let mut conf = SyscallConfig::with_table(table);
 
-    // SConfig: the legacy per-module filter struct (still written to
-    // `filter_map` for the old layout, and used for the perf layer).
-    conf.sconfig.uid = target.uid;
-    conf.sconfig.pid = target.pid;
-    conf.sconfig.debug = global.debug;
-
     conf.debug = global.debug;
     conf.dump_hex = global.dump_hex;
-    conf.color = global.color;
     conf.auto_resume = global.auto_resume;
     conf.full_tname = global.full_tname;
     conf.buffer_mb = global.buffer;
@@ -87,10 +80,6 @@ pub fn build_config(
     conf.tid_blacklist = filters.tid_blacklist.all.clone();
     conf.tname_whitelist = filters.tname_whitelist;
     conf.tname_blacklist = filters.tname_blacklist;
-
-    // Legacy 5-entry wire mirror (`struct filter_t.tid_blacklist[5]`).
-    conf.sconfig.tid_blacklist = filters.tid_blacklist.legacy;
-    conf.sconfig.tid_blacklist_mask = filters.tid_blacklist.legacy_mask;
 
     // Syscall selection: whitelist/blacklist + trace mode (`Parse_Syscall`).
     conf.sys_whitelist = selection.whitelist;

@@ -1,3 +1,9 @@
+//! Signal control for stopped processes (mirrors Go `user/event/ievent.go`).
+//!
+//! Event paths do two things, in Go order: record a stopped pid when the kill
+//! signal is SIGSTOP ([`record_stopped_after_event`]), then optionally resume
+//! it under `--auto` ([`auto_resume_after_event`]).
+
 use anyhow::Result;
 use std::collections::HashSet;
 
@@ -92,24 +98,6 @@ impl SignalManager {
         Ok(())
     }
 
-    /// Send a signal to a process
-    #[cfg(target_os = "linux")]
-    pub fn send_signal(&mut self, pid: u32, signal: Signal) -> Result<()> {
-        kill(Pid::from_raw(pid as i32), signal)?;
-
-        // Track stopped processes if SIGSTOP
-        if signal == Signal::SIGSTOP {
-            self.add_stopped(pid);
-        }
-
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    pub fn send_signal(&mut self, _pid: u32, _signal: i32) -> Result<()> {
-        Ok(())
-    }
-
     /// Get count of stopped processes
     pub fn stopped_count(&self) -> usize {
         self.stopped_pids.len()
@@ -133,6 +121,21 @@ impl Default for SignalManager {
 pub fn auto_resume_after_event(resume: &mut dyn FnMut(u32), auto_resume: bool, pid: u32) {
     if auto_resume && pid != 0 {
         resume(pid);
+    }
+}
+
+/// SIGSTOP as the numeric value modules carry (`parse_signal_name("SIGSTOP")`
+/// in `stack_probe.rs`, = Go's `uint32(syscall.SIGSTOP)` on Linux).
+const SIGSTOP_NUM: u32 = 19;
+
+/// Go `event_uprobe.go:58-60` / `event_context.go:185`: before any resume, a
+/// perf event records its pid as stopped iff the kill signal is SIGSTOP and
+/// the pid is real (never 0, which would mean the whole process group).
+/// Called before [`auto_resume_after_event`], mirroring Go's order
+/// (AddStopped before LetItResume).
+pub fn record_stopped_after_event(sig_mgr: &mut SignalManager, kill_signal: u32, pid: u32) {
+    if kill_signal == SIGSTOP_NUM && pid != 0 {
+        sig_mgr.add_stopped(pid);
     }
 }
 
@@ -215,5 +218,103 @@ mod tests {
         assert!(calls.is_empty(), "--auto off must not resume");
         auto_resume_after_event(&mut |pid| calls.push(pid), true, 0);
         assert!(calls.is_empty(), "pid 0 must never resume (process group)");
+    }
+
+    /// Round 8 / G3: `record_stopped_after_event` implements Go's record
+    /// condition — SIGSTOP kill signal and a real (non-zero) pid only.
+    #[test]
+    fn record_stopped_after_event_records_only_sigstop_and_real_pids() {
+        let mut mgr = SignalManager::new();
+        record_stopped_after_event(&mut mgr, 19, 4242); // SIGSTOP
+        assert_eq!(mgr.stopped_count(), 1);
+        record_stopped_after_event(&mut mgr, 19, 4242); // duplicate
+        assert_eq!(mgr.stopped_count(), 1);
+        record_stopped_after_event(&mut mgr, 5, 5151); // SIGTRAP: not recorded
+        assert_eq!(mgr.stopped_count(), 1);
+        record_stopped_after_event(&mut mgr, 19, 0); // pid 0: never recorded
+        assert_eq!(mgr.stopped_count(), 1);
+    }
+
+    /// Round 8 / G3, `--auto` on: record-then-resume calls resume exactly once
+    /// per event and keeps the list empty (the injected resume mirrors
+    /// `resume_one`'s remove-on-success contract).
+    #[test]
+    fn record_then_auto_resume_calls_resume_once_and_keeps_list_empty() {
+        let mut mgr = SignalManager::new();
+        let mut calls: Vec<u32> = Vec::new();
+        for pid in [4242u32, 5151] {
+            record_stopped_after_event(&mut mgr, 19, pid);
+            auto_resume_after_event(
+                &mut |p| {
+                    calls.push(p);
+                    mgr.remove_stopped(p);
+                },
+                true,
+                pid,
+            );
+            assert_eq!(mgr.stopped_count(), 0, "list must stay empty under --auto");
+        }
+        assert_eq!(calls, vec![4242, 5151]);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn proc_state(pid: u32) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat.rsplit(')').next()?.trim_start().chars().next()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_proc_state(pid: u32, ok: impl Fn(char) -> bool) {
+        for _ in 0..200 {
+            if let Some(state) = proc_state(pid) {
+                if ok(state) {
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("pid {pid} never reached the expected /proc state");
+    }
+
+    /// Round 8 / G3, `--auto` off: recorded pids stay in the list until
+    /// `resume_all()` actually SIGCONTs them (real children, state asserted via
+    /// `/proc/<pid>/stat`; `resume_all` tolerates ESRCH on its own).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn resume_all_resumes_real_stopped_pids() {
+        let mut kids = Vec::new();
+        for _ in 0..2 {
+            kids.push(
+                std::process::Command::new("sleep")
+                    .arg("60")
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        let pids: Vec<u32> = kids.iter().map(|k| k.id()).collect();
+
+        for &pid in &pids {
+            kill(Pid::from_raw(pid as i32), Signal::SIGSTOP).expect("stop test child");
+        }
+        for &pid in &pids {
+            wait_for_proc_state(pid, |st| st == 'T');
+        }
+
+        let mut mgr = SignalManager::new();
+        for &pid in &pids {
+            record_stopped_after_event(&mut mgr, 19, pid);
+        }
+        assert_eq!(mgr.stopped_count(), 2);
+
+        mgr.resume_all().expect("resume_all");
+        assert_eq!(mgr.stopped_count(), 0);
+        for &pid in &pids {
+            wait_for_proc_state(pid, |st| st == 'R' || st == 'S');
+        }
+
+        for mut kid in kids {
+            let _ = kid.kill();
+            let _ = kid.wait();
+        }
     }
 }

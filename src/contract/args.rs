@@ -36,20 +36,6 @@ pub struct ArgEntry<'a> {
     pub data: &'a [u8],
 }
 
-/// The three on-wire shapes a TLV entry can take. Mirrors the writers in
-/// `ebpf/common/buffer.h`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArgShape {
-    /// `save_to_submit_buf`: `[index][raw bytes]`. No length prefix; the byte
-    /// count is fixed by the arg's type (caller-supplied).
-    Raw,
-    /// `save_bytes_to_buf` / `save_str_to_buf` / `save_utf16_to_buf`:
-    /// `[index][i32 size][bytes]`.
-    LengthPrefixed,
-    /// `save_str_arr_to_buf`: `[index][u8 count]{[i32 sz][str]...}`.
-    StringArray,
-}
-
 /// A decoded string-array element. `size == STRARR_MAGIC_LEN` means truncated.
 #[derive(Debug, Clone)]
 pub struct StrArrElem<'a> {

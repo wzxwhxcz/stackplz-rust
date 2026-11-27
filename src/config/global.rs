@@ -53,12 +53,9 @@ pub struct GlobalConfig {
     pub hook_point: Vec<String>,
     pub library: String,
     pub library_dirs: Vec<String>,
-    pub reg_name: String,
 
     // ---- output / logging ----
     pub dump_hex: bool,
-    pub fmt_json: bool,
-    pub color: bool,
     pub debug: bool,
     pub quiet: bool,
     pub log_file: String,
@@ -95,10 +92,7 @@ impl GlobalConfig {
             hook_point: cli.point.clone(),
             library: cli.library.clone(),
             library_dirs: cli.libdirs.clone(),
-            reg_name: cli.reg.clone(),
             dump_hex: cli.dumphex,
-            fmt_json: cli.json,
-            color: cli.color,
             debug: cli.debug,
             quiet: cli.quiet,
             log_file: cli.out.clone(),

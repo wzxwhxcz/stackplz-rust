@@ -24,7 +24,7 @@ pub mod enums;
 pub mod types;
 
 // Primary re-exports for convenience.
-pub use args::{ArgEntry, ArgShape, ArgsCursor, StrArrElem};
+pub use args::{ArgEntry, ArgsCursor, StrArrElem};
 pub use consts::{
     ARGS_BUF_SIZE, COMMON_LIST_SEGMENT_STRIDE, MAX_BUF_READ_SIZE, MAX_FILTER_COUNT,
     MAX_OP_COUNT_DEFAULT, MAX_OP_COUNT_STACK, MAX_OP_COUNT_SYSCALL, MAX_PERCPU_BUFSIZE,
@@ -37,9 +37,9 @@ pub use decode::{
     decode_perf_record, PerfRecord, SyscallEnterEvent, SyscallExitEvent, UprobeEnterEvent,
     EVENT_CONTEXT_SIZE,
 };
-pub use enums::{ArgFilterType, ArgType, Arm64Reg, BufIdx, EventId, OpCode, PointFlag, TraceGroup};
+pub use enums::{ArgFilterType, ArgType, BufIdx, EventId, OpCode, TraceGroup};
 pub use types::{
-    ArgFilter, BufT, CommonFilter, ConfigEntry, CtxRegs, EventContext, OpConfig, OpCtx, PointArgs,
+    ArgFilter, BufT, CommonFilter, ConfigEntry, EventContext, OpConfig, OpCtx, PointArgs,
     StackPointArgs, StrBuf, SyscallPointArgs, ThreadName,
 };
 

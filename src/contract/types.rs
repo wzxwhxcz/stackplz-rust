@@ -9,7 +9,6 @@
 use crate::contract::consts::{
     MAX_OP_COUNT_STACK, MAX_OP_COUNT_SYSCALL, MAX_PERCPU_BUFSIZE, MAX_STRCMP_LEN, TASK_COMM_LEN,
 };
-use crate::contract::enums::CTX_REGS_LEN;
 
 /// `event_context_t` — the fixed 56-byte header of every perf record. The TLV
 /// args blob follows immediately after this. Mirrors `event_context` in
@@ -177,28 +176,6 @@ pub struct OpCtx {
     pub reg_0: u64,
 }
 
-/// `ctx_regs_t` — register snapshot persisted between sys_enter and sys_exit
-/// (map `ctx_regs_map`, keyed by u64). 272 bytes (31*8 + 8 + 8 + 8).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct CtxRegs {
-    pub regs: [u64; CTX_REGS_LEN],
-    pub sp: u64,
-    pub pc: u64,
-    pub flag: u64,
-}
-
-impl Default for CtxRegs {
-    fn default() -> Self {
-        Self {
-            regs: [0; CTX_REGS_LEN],
-            sp: 0,
-            pc: 0,
-            flag: 0,
-        }
-    }
-}
-
 /// `point_args_t` — per-hook config (maps `sysenter_point_args` /
 /// `sysexit_point_args` / `uprobe_point_args`). The generic parameter `N` is
 /// `MAX_OP_COUNT` (64 for uprobe, 256 for syscall), so size varies by object.
@@ -335,13 +312,6 @@ mod tests {
         // which is 8-aligned, so it lands at offset 32 (no gap).
         assert_eq!(std::mem::size_of::<OpCtx>(), 72);
         assert_eq!(offset!(OpCtx, read_addr), 32);
-    }
-
-    #[test]
-    fn ctx_regs_is_272_bytes() {
-        assert_eq!(std::mem::size_of::<CtxRegs>(), 272);
-        assert_eq!(std::mem::size_of::<[u64; CTX_REGS_LEN]>(), 31 * 8);
-        assert_eq!(offset!(CtxRegs, sp), 31 * 8);
     }
 
     #[test]

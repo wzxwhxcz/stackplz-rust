@@ -1,9 +1,11 @@
 //! Configuration types. Mirrors package `config` (`user/config/*.go`).
 //!
-//! - `SConfig` / `StackFilter` / `SyscallFilter` => master shape, no dev
-//!   carrier (`origin/master:user/config/iconfig.go:5-46`; kept here for the
-//!   legacy `filter_map` wire layout). Dev writes one shared `CommonFilter`
-//!   (`config_filter.go:18-24`) instead of per-module filter structs.
+//! - `SConfig` => master shape, no dev carrier (`origin/master:user/config/
+//!   iconfig.go:26-35`); kept as the legacy 5-entry `tid_blacklist` carrier for
+//!   the stack side's `legacy_stack_config`. The master-era `filter_map`
+//!   producers (`StackFilter`/`SyscallFilter`/`*_filter_from`/`get_filter`)
+//!   were removed in round 8: the C side has no `filter_map`, dev writes one
+//!   shared `CommonFilter` (`config_filter.go:18-24`).
 //! - `GlobalConfig`  => `config_global.go`
 //! - `TargetConfig`  => master shape, no dev carrier
 //!   (`origin/master:user/config/config_target.go:3-12`); dev resolves the
@@ -50,7 +52,7 @@ pub use global::{GlobalConfig, MAX_LIST_COUNT};
 pub use hook_json::{BaseHookConfig, HookConfig, LibHookConfig};
 pub use point_arg::{PointArg, UprobeArgs, EBPF_SYS_ENTER, EBPF_UPROBE_ENTER};
 pub use point_parser::{parse_arg_type, parse_hook_point};
-pub use sconfig::{SConfig, StackFilter, SyscallFilter, MAX_TID_BLACKLIST_COUNT};
+pub use sconfig::{SConfig, MAX_TID_BLACKLIST_COUNT};
 pub use stack::{ProbeConfig, StackConfig};
 pub use syscall::SyscallConfig;
 pub use syscall_points::{SyscallPoint, SyscallPointOpConfig, SyscallPointTable};

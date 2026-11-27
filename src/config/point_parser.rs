@@ -83,12 +83,7 @@ fn parse_num(s: &str) -> Option<u64> {
 /// `ParseArgType(arg_str, point_arg)` — parse a single arg type string.
 ///
 /// Mirrors `config_module.go:42-259`.
-pub fn parse_arg_type(
-    arg_str: &str,
-    point_arg: &mut PointArg,
-    dump_hex: bool,
-    color: bool,
-) -> Result<()> {
+pub fn parse_arg_type(arg_str: &str, point_arg: &mut PointArg, dump_hex: bool) -> Result<()> {
     let mut to_ptr = false;
     let mut type_name;
     let mut read_op_str;
@@ -193,10 +188,9 @@ pub fn parse_arg_type(
                 let reg = get_reg_index(size_str)?;
                 argtype::r_buffer_reg(reg)
             };
-            // Set dump_hex/color on the registered type
+            // Set dump_hex on the registered type
             crate::argtype::with_type(type_idx, |at| {
                 at.dump_hex = dump_hex;
-                at.color = color;
             });
             point_arg.set_type_index(type_idx);
             point_arg.set_group_type(EBPF_UPROBE_ENTER);
@@ -308,7 +302,6 @@ pub fn parse_hook_point(
     configs: &[String],
     lib_path: &str,
     dump_hex: bool,
-    color: bool,
 ) -> Result<Vec<UprobeArgs>> {
     if lib_path.is_empty() {
         return Err(anyhow!("library is empty, plz set with -l/--lib"));
@@ -389,7 +382,7 @@ pub fn parse_hook_point(
             for (arg_index, arg_str) in args.split(',').enumerate() {
                 let arg_name = format!("arg_{arg_index}");
                 let mut pa = PointArg::new_uprobe(&arg_name, POINTER, arg_index as u32);
-                parse_arg_type(arg_str, &mut pa, dump_hex, color)?;
+                parse_arg_type(arg_str, &mut pa, dump_hex)?;
                 hook_point.point_args.push(pa);
             }
         }
@@ -483,7 +476,7 @@ mod tests {
 
     /// Test helper: parse a single hook point with default flags.
     fn hp(cfg: &str) -> Vec<super::UprobeArgs> {
-        parse_hook_point(&[cfg.to_string()], "/lib/libc.so", false, false).unwrap()
+        parse_hook_point(&[cfg.to_string()], "/lib/libc.so", false).unwrap()
     }
 
     #[test]
@@ -590,13 +583,13 @@ mod tests {
     fn parse_max_six_points() {
         ensure_init();
         let configs: Vec<String> = (0..7).map(|i| format!("sym{i}[int]")).collect();
-        let result = parse_hook_point(&configs, "/lib/libc.so", false, false);
+        let result = parse_hook_point(&configs, "/lib/libc.so", false);
         assert!(result.is_err());
     }
 
     #[test]
     fn empty_lib_errors() {
-        let result = parse_hook_point(&["test[int]".to_string()], "", false, false);
+        let result = parse_hook_point(&["test[int]".to_string()], "", false);
         assert!(result.is_err());
     }
 

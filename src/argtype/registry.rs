@@ -55,7 +55,6 @@ pub struct ArgType {
 
     // ---- Rendering flags (Phase 3) ----
     pub dump_hex: bool,
-    pub color: bool,
 }
 
 impl ArgType {
@@ -75,7 +74,6 @@ impl ArgType {
             array_len: 0,
             array_type_index: None,
             dump_hex: false,
-            color: false,
         }
     }
 

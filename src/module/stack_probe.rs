@@ -9,7 +9,7 @@
 
 use crate::config::{ProbeConfig, SConfig, StackConfig, UprobeArgs};
 use crate::logger::Logger;
-use crate::signal::{auto_resume_after_event, SignalManager};
+use crate::signal::{auto_resume_after_event, record_stopped_after_event, SignalManager};
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
@@ -273,9 +273,10 @@ impl StackProbeModule {
         // `-b/--buffer` in MiB → 4 KiB pages (dev `GlobalConfig.Buffer`).
         let pages = super::perf_pages(conf.buffer_mb)?;
         let lost_logger = logger.clone();
-        // Round 7 / F4: `--auto` resumes the event pid after each event
-        // (Go `event_uprobe.go:77-78`). The manager is owned by this run
-        // loop and moved into the perf callback below.
+        // Round 7 / F4 / G3: before `--auto` resumes the event pid, record it
+        // as stopped when the kill signal is SIGSTOP (Go `event_uprobe.go:58-60`
+        // records, `:77-78` resumes). The manager is owned by this run loop and
+        // moved into the perf callback below.
         let auto_resume = self.auto_resume;
         let mut sig_mgr = SignalManager::new();
         let pb = libbpf_rs::PerfBufferBuilder::new(&events_map)
@@ -284,6 +285,7 @@ impl StackProbeModule {
                 match render_uprobe_event(data, &hook_points) {
                     Ok((line, pid)) => {
                         render_logger.println(&line);
+                        record_stopped_after_event(&mut sig_mgr, kill_signal, pid);
                         auto_resume_after_event(
                             &mut |pid| {
                                 // resume_one prints its own diagnostics;
@@ -506,7 +508,6 @@ mod tests {
             pid: 4242,
             tid_blacklist_mask: 0b101,
             tid_blacklist: [11, 22, 33, 0, 0],
-            ..Default::default()
         };
         let conf = legacy_stack_config(&sconfig);
         assert_eq!(conf.uid_whitelist, vec![1000]);

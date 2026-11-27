@@ -13,8 +13,8 @@
 //!       "library": "bionic/libc.so",
 //!       "disable": false,
 //!       "configs": [
-//!         { "stack": true, "regs": true, "symbols": ["open"], "offsets": [] },
-//!         { "stack": false, "regs": true, "symbols": ["read"], "offsets": ["0xF37C"] }
+//!         { "symbols": ["open"], "offsets": [] },
+//!         { "symbols": ["read"], "offsets": ["0xF37C"] }
 //!       ]
 //!     }
 //!   ]
@@ -23,14 +23,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One (stack, regs) combination with its symbols and offsets.
-/// Master-era `BaseHookConfig` (`origin/master:cli/cmd/stack.go:28-33`).
+/// Symbols and offsets for one hook point. Unknown fields are rejected so an
+/// old config carrying `"regs"`/`"stack"` fails loudly instead of being
+/// silently ignored (master-era `BaseHookConfig` at
+/// `origin/master:cli/cmd/stack.go:28-33` had those switches, but nothing in
+/// this crate reads them).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BaseHookConfig {
-    #[serde(rename = "stack", default)]
-    pub unwindstack: bool,
-    #[serde(default)]
-    pub regs: bool,
     #[serde(default)]
     pub symbols: Vec<String>,
     #[serde(default)]
@@ -104,8 +104,6 @@ mod tests {
                 library: "libc.so".into(),
                 disable: false,
                 configs: vec![BaseHookConfig {
-                    unwindstack: true,
-                    regs: false,
                     symbols: vec!["open".into()],
                     offsets: vec![],
                 }],
@@ -114,5 +112,16 @@ mod tests {
         let s = serde_json::to_string(&cfg).unwrap();
         let back: HookConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.libs[0].configs[0].symbols, vec!["open"]);
+    }
+
+    /// `deny_unknown_fields` pins the round-8 decision: configs that carry the
+    /// removed `"regs"`/`"stack"` switches fail parsing instead of being
+    /// silently dropped.
+    #[test]
+    fn removed_hook_keys_are_rejected() {
+        for json in [r#"{"regs": true}"#, r#"{"stack": true}"#] {
+            let err = serde_json::from_str::<BaseHookConfig>(json).unwrap_err();
+            assert!(err.to_string().contains("unknown field"), "{err}");
+        }
     }
 }

@@ -6,55 +6,8 @@
 use stackplz::argtype::render::b2s_trim;
 use stackplz::config::hook_json::{hex2int, HookConfig};
 use stackplz::config::sconfig::parse_tid_blacklist;
-use stackplz::config::{ProbeConfig, SConfig, StackFilter, SyscallFilter, MAX_TID_BLACKLIST_COUNT};
+use stackplz::config::{ProbeConfig, SConfig};
 use stackplz::event::{UnwindBuf, UnwindOption};
-
-// ---- filter_t byte-layout contract (mirrors C `struct filter_t`) -----------
-
-#[test]
-fn stack_filter_is_exactly_32_bytes() {
-    assert_eq!(std::mem::size_of::<StackFilter>(), 32);
-}
-
-#[test]
-fn syscall_filter_is_exactly_36_bytes() {
-    assert_eq!(std::mem::size_of::<SyscallFilter>(), 36);
-}
-
-#[test]
-fn stack_filter_serializes_little_endian() {
-    let f = StackFilter {
-        uid: 0xDEADBEEF,
-        pid: 0x11223344,
-        tid_blacklist_mask: 5,
-        tid_blacklist: [1, 2, 3, 4, 5],
-    };
-    let bytes = bytemuck::bytes_of(&f);
-    assert_eq!(&bytes[0..4], 0xDEADBEEFu32.to_le_bytes());
-    assert_eq!(&bytes[4..8], 0x11223344u32.to_le_bytes());
-    assert_eq!(&bytes[8..12], 5u32.to_le_bytes());
-    // 5 * 4 = 20 bytes of blacklist follow at offset 12.
-    assert_eq!(
-        &bytes[12..32],
-        [1u32, 2, 3, 4, 5]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn syscall_filter_has_nr_at_offset_8() {
-    let f = SyscallFilter {
-        uid: 0,
-        pid: 0,
-        nr: 63,
-        tid_blacklist_mask: 0,
-        tid_blacklist: [0; MAX_TID_BLACKLIST_COUNT],
-    };
-    let bytes = bytemuck::bytes_of(&f);
-    assert_eq!(&bytes[8..12], 63u32.to_le_bytes());
-}
 
 #[test]
 fn unwind_option_is_40_bytes() {
@@ -174,8 +127,8 @@ fn b2s_trim_matches_go_b2strim() {
 
 use stackplz::contract::{
     decode_perf_record, ArgFilter, ArgFilterType, ArgsCursor, BufT, CommonFilter, ConfigEntry,
-    CtxRegs, EventContext, EventId, OpCode, PerfRecord, StackPointArgs, SyscallPointArgs,
-    MAX_EVENT_SIZE, MAX_OP_COUNT_STACK, MAX_OP_COUNT_SYSCALL, STRARR_MAGIC_LEN,
+    EventContext, EventId, OpCode, PerfRecord, StackPointArgs, SyscallPointArgs, MAX_EVENT_SIZE,
+    MAX_OP_COUNT_STACK, MAX_OP_COUNT_SYSCALL, STRARR_MAGIC_LEN,
 };
 
 // ---- dev #[repr(C)] struct sizes (mirror ebpf/types.h) --------------------
@@ -200,11 +153,6 @@ fn dev_config_entry_is_8_bytes() {
 #[test]
 fn dev_arg_filter_is_272_bytes() {
     assert_eq!(std::mem::size_of::<ArgFilter>(), 272);
-}
-
-#[test]
-fn dev_ctx_regs_is_272_bytes() {
-    assert_eq!(std::mem::size_of::<CtxRegs>(), 272);
 }
 
 #[test]

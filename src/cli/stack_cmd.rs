@@ -44,7 +44,6 @@ pub fn has_uprobe_config(global: &GlobalConfig) -> Result<bool> {
 pub fn build_stack_config(global: &GlobalConfig, target: &TargetConfig) -> Result<StackConfig> {
     let filters = crate::config::ResolvedFilters::from_globals(global)?;
     Ok(StackConfig {
-        reg_name: global.reg_name.clone(),
         full_tname: global.full_tname,
         buffer_mb: global.buffer,
         uid_whitelist: filters.uid_whitelist,
@@ -61,7 +60,6 @@ pub fn build_stack_config(global: &GlobalConfig, target: &TargetConfig) -> Resul
         // A stack-only run has no `-s`, so dev's `SysCallConf.TraceMode` stays at
         // its zero value, `TRACE_COMMON` (0).
         trace_mode: crate::contract::consts::TRACE_COMMON,
-        ..Default::default()
     })
 }
 
@@ -84,18 +82,15 @@ fn uprobe_point(library: &str, symbol: &str, offset: u64) -> crate::config::Upro
 fn build_probes(
     global: &GlobalConfig,
     target: &TargetConfig,
-    stack_conf: &StackConfig,
 ) -> Result<Vec<(ProbeConfig, Vec<UprobeArgs>)>> {
     let mut probes: Vec<(ProbeConfig, Vec<UprobeArgs>)> = Vec::new();
 
     let legacy_tid = crate::config::ResolvedFilters::from_globals(global)?;
     let sconfig = SConfig {
-        reg_name: stack_conf.reg_name.clone(),
         uid: target.uid,
         pid: target.pid,
         tid_blacklist: legacy_tid.tid_blacklist.legacy,
         tid_blacklist_mask: legacy_tid.tid_blacklist.legacy_mask,
-        debug: global.debug,
     };
 
     // 1. `-w/--point` mode: one library, one probe, many points.
@@ -105,7 +100,6 @@ fn build_probes(
             &global.hook_point,
             &library,
             global.dump_hex,
-            global.color,
         )?;
         let mut probe = ProbeConfig {
             sconfig,
@@ -195,7 +189,7 @@ pub fn run(global: &GlobalConfig, target: &TargetConfig) -> Result<()> {
     crate::argtype::init_argtypes();
 
     let stack_conf = build_stack_config(global, target)?;
-    let probes = build_probes(global, target, &stack_conf)?;
+    let probes = build_probes(global, target)?;
 
     let logger = Arc::new(crate::logger::Logger::new("", true));
     if !global.log_file.is_empty() {
@@ -203,8 +197,7 @@ pub fn run(global: &GlobalConfig, target: &TargetConfig) -> Result<()> {
     }
 
     let lib_path = format!("{}/preload_libs", global.exec_path);
-    for (mut probe, hook_points) in probes {
-        probe.sconfig.debug = global.debug;
+    for (probe, hook_points) in probes {
         logger.println(&format!(
             "{}\thook info:{}",
             MODULE_NAME_STACK,

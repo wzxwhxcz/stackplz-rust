@@ -68,7 +68,7 @@ impl Logger {
     /// Print a line with the configured prefix + optional timestamp.
     /// Mirrors `logger.Println(...)`.
     pub fn println(&self, msg: &str) {
-        self.write_line(msg, true);
+        self.write_line(msg);
     }
 
     /// Total lines dropped by failed writes (terminal + file). Best-effort
@@ -98,7 +98,7 @@ impl Logger {
         }
     }
 
-    fn write_line(&self, msg: &str, _newline: bool) {
+    fn write_line(&self, msg: &str) {
         let line = {
             let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             let mut s = String::new();
@@ -178,9 +178,10 @@ fn local_utc_offset_seconds() -> i64 {
             if time(&mut now) == -1 {
                 return 0;
             }
-            // All-zero `Tm` is valid (ints plus a nullable pointer), but on
-            // failure `localtime_r` leaves it untouched, which would silently
-            // mean UTC; report "no known offset" explicitly instead.
+            // All-zero `Tm` is valid (ints plus a nullable pointer); on
+            // failure `localtime_r` leaves it untouched, so we fall back to
+            // UTC (gmtoff 0) — the best-effort contract above, not an
+            // explicit report.
             let mut lt = std::mem::zeroed::<Tm>();
             if localtime_r(&now, &mut lt).is_null() {
                 return 0;

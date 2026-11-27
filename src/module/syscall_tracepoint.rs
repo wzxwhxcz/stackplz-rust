@@ -8,14 +8,18 @@
 
 use crate::config::SyscallConfig;
 use crate::logger::Logger;
-use anyhow::{bail, Result};
-use std::sync::Arc;
+use crate::signal::{
+    auto_resume_after_event, record_stopped_after_event, spawn_console_resume, SignalManager,
+};
+use anyhow::{bail, Context, Result};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "linux")]
 use {
     crate::contract::decode::HasContext,
     crate::contract::{THREAD_NAME_BLACKLIST, THREAD_NAME_WHITELIST},
-    anyhow::{anyhow, Context},
+    anyhow::anyhow,
     libbpf_rs::{Link, MapCore, MapFlags, Object, ObjectBuilder, PerfBufferBuilder},
     std::time::Duration,
 };
@@ -448,16 +452,19 @@ impl SyscallTracepointModule {
         let logger_clone = Arc::clone(&logger);
         // Round 7 / F4 / G3: before `--auto` resumes the event pid, record it
         // as stopped when the kill signal is SIGSTOP (Go `event_context.go:185`
-        // records, `event_raw_syscalls.go:72-73` resumes). The manager is owned
-        // by this run loop and moved into the perf callback below.
+        // records, `event_raw_syscalls.go:72-73` resumes). Round 9 / H24: the
+        // manager is shared (`Arc<Mutex<…>>`) between this perf callback and
+        // the stdin `c` resume thread spawned below.
         let auto_resume = self.conf.auto_resume;
         let kill_signal = self.conf.kill_signal;
-        let mut sig_mgr = crate::signal::SignalManager::new();
+        let sig_mgr = Arc::new(Mutex::new(SignalManager::new()));
+        let sig_mgr_cb = Arc::clone(&sig_mgr);
+        let sig_mgr_resume = Arc::clone(&sig_mgr_cb);
         let handle_event = move |_cpu: i32, data: &[u8]| {
             let mut decoded = match crate::contract::decode_perf_record(data) {
                 Ok(decoded) => decoded,
                 Err(e) => {
-                    logger_clone.println(&format!("decode error: {e}"));
+                    logger_clone.println(&format!("{e}"));
                     return;
                 }
             };
@@ -465,24 +472,30 @@ impl SyscallTracepointModule {
             match crate::event::render::render_syscall_event(&point_table, &mut decoded, dump_hex) {
                 Ok(line) => {
                     logger_clone.println(&line);
-                    crate::signal::record_stopped_after_event(&mut sig_mgr, kill_signal, pid);
-                    crate::signal::auto_resume_after_event(
+                    {
+                        let mut g = sig_mgr_cb.lock().unwrap_or_else(|p| p.into_inner());
+                        record_stopped_after_event(&mut g, kill_signal, pid);
+                    }
+                    auto_resume_after_event(
                         &mut |pid| {
                             // resume_one prints its own diagnostics; nothing
                             // to propagate from a perf callback.
-                            let _ = sig_mgr.resume_one(pid);
+                            let mut g = sig_mgr_resume.lock().unwrap_or_else(|p| p.into_inner());
+                            let _ = g.resume_one(pid);
                         },
                         auto_resume,
                         pid,
                     );
                 }
-                Err(e) => logger_clone.println(&format!("decode error: {e}")),
+                Err(e) => logger_clone.println(&format!("{e}")),
             }
         };
 
         let lost_logger = Arc::clone(&logger);
-        let handle_lost = move |_cpu: i32, count: u64| {
-            lost_logger.println(&format!("Lost {count} events"));
+        let lost_total = Arc::new(AtomicU64::new(0));
+        let lost_total_cb = Arc::clone(&lost_total);
+        let handle_lost = move |cpu: i32, count: u64| {
+            account_lost(&lost_total_cb, &lost_logger, cpu, count);
         };
 
         let perf = PerfBufferBuilder::new(&map)
@@ -494,16 +507,47 @@ impl SyscallTracepointModule {
 
         logger.println(&format!("{}: polling events (Ctrl-C to stop)", NAME));
 
-        while !crate::cli::interrupted() {
-            if let Err(e) = perf.poll(Duration::from_millis(100)) {
-                logger.println(&format!("poll error: {}", e));
-                break;
-            }
-        }
+        // Round 9 / H24: stdin `c` resumes stopped pids (Go `root.go:429`).
+        // One module runs at a time, so one spawn per run() is correct.
+        spawn_console_resume(Arc::clone(&sig_mgr));
+
+        // Round 9 / H1: a poll failure fails the module (`?`), never exits
+        // cleanly as `Ok(())` like the old swallowed-`break` version.
+        poll_loop(|| perf.poll(Duration::from_millis(100)), &logger)?;
 
         logger.println(&format!("{}: shutting down", NAME));
+        logger.println(&format!(
+            "TotalLost => {}",
+            lost_total.load(Ordering::Relaxed)
+        ));
         Ok(())
     }
+}
+
+/// Shared perf-loss accounting (Round 9 / H2): add `count` to the running
+/// total and log the per-CPU line. Both modules print the accumulated total
+/// at shutdown (`TotalLost => N`, mirroring Go). The per-batch line is shared
+/// verbatim by both modules now (stack previously prefixed `{NAME}\t`,
+/// syscall previously printed `Lost {count} events`).
+pub(crate) fn account_lost(total: &AtomicU64, logger: &Logger, cpu: i32, count: u64) {
+    total.fetch_add(count, Ordering::Relaxed);
+    logger.println(&format!("lost {count} samples on CPU {cpu}"));
+}
+
+/// Shared perf poll loop (Round 9 / H1): poll until Ctrl-C. A poll error
+/// fails the module instead of exiting cleanly as `Ok(())` — the old syscall
+/// loop swallowed it with `break`, unlike the stack module's `?`.
+pub(crate) fn poll_loop<T, E>(
+    mut poll_once: impl FnMut() -> Result<T, E>,
+    _logger: &Logger,
+) -> Result<()>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    while !crate::cli::interrupted() {
+        poll_once().map_err(|e| anyhow::Error::new(e).context("perf poll failed"))?;
+    }
+    Ok(())
 }
 
 /// Serialize `arg_filter_t` (272 bytes) for the `arg_filter` map.
@@ -547,7 +591,7 @@ impl PointArgsSide {
 
 #[cfg(test)]
 mod tests {
-    use super::{PointArgsSide, SyscallTracepointModule};
+    use super::{account_lost, poll_loop, PointArgsSide, SyscallTracepointModule};
     use crate::config::{SyscallConfig, SyscallPointTable};
 
     /// Report W1/F1: the module config must carry the real point table, and the
@@ -636,5 +680,38 @@ mod tests {
             !ops.is_empty(),
             "op_list must contain the ops the point table references"
         );
+    }
+
+    /// H1: a poll failure must fail the module (non-zero exit), never exit
+    /// cleanly as `Ok(())` like the old swallowed-`break` version.
+    #[test]
+    fn poll_failure_propagates_as_module_error() {
+        #[derive(Debug)]
+        struct FakePollError;
+        impl std::fmt::Display for FakePollError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "fake ring failure")
+            }
+        }
+        impl std::error::Error for FakePollError {}
+
+        let logger = crate::logger::Logger::new("", false);
+        assert!(!crate::cli::interrupted(), "Ctrl-C must be clear in tests");
+        let err = poll_loop(|| Err::<(), FakePollError>(FakePollError), &logger)
+            .expect_err("poll failure must propagate as an error");
+        // anyhow's context wraps the source: `to_string()` shows only the
+        // outer "perf poll failed", so assert on the full chain instead.
+        assert!(format!("{err:#}").contains("fake ring failure"), "{err:#}");
+    }
+
+    /// H2: lost batches accumulate into one total (Go `TotalLost => N`).
+    #[test]
+    fn lost_samples_accumulate_into_total() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let total = AtomicU64::new(0);
+        let logger = crate::logger::Logger::new("", false);
+        account_lost(&total, &logger, 3, 7);
+        account_lost(&total, &logger, 3, 3);
+        assert_eq!(total.load(Ordering::Relaxed), 10);
     }
 }

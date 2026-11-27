@@ -11,11 +11,13 @@ use std::collections::HashSet;
 use nix::sys::signal::{kill, Signal};
 #[cfg(target_os = "linux")]
 use nix::unistd::Pid;
+use std::sync::{Arc, Mutex};
 
 /// Manages stopped processes/threads for signal control.
 ///
-/// Single-threaded by design (the module run loop owns it), so it needs no
-/// interior mutability: `&mut self` is the whole synchronisation.
+/// Shared between the perf-event callbacks and the console-resume thread as an
+/// `Arc<Mutex<SignalManager>>`: `&mut self` under the lock is the whole
+/// synchronisation.
 pub struct SignalManager {
     stopped_pids: HashSet<u32>,
 }
@@ -139,27 +141,51 @@ pub fn record_stopped_after_event(sig_mgr: &mut SignalManager, kill_signal: u32,
     }
 }
 
-/// Parse signal name string to Signal enum
-#[cfg(target_os = "linux")]
-pub fn parse_signal(sig_name: &str) -> Option<Signal> {
-    match sig_name.to_uppercase().as_str() {
-        "SIGSTOP" => Some(Signal::SIGSTOP),
-        "SIGCONT" => Some(Signal::SIGCONT),
-        "SIGABRT" => Some(Signal::SIGABRT),
-        "SIGTRAP" => Some(Signal::SIGTRAP),
-        "SIGTERM" => Some(Signal::SIGTERM),
-        "SIGKILL" => Some(Signal::SIGKILL),
-        "SIGINT" => Some(Signal::SIGINT),
-        "SIGUSR1" => Some(Signal::SIGUSR1),
-        "SIGUSR2" => Some(Signal::SIGUSR2),
-        _ => None,
+/// Dispatch one console line, mirroring Go `cli/cmd/root.go:429`: a trimmed
+/// `"c"` resumes all stopped pids (Go's `event.LetItRun()`); any other line
+/// (including empty) does nothing. Pure, so tests can drive it without the
+/// stdin thread. Returns true iff the line triggered a resume.
+pub fn handle_console_line(line: &str, mgr: &mut SignalManager) -> bool {
+    if line.trim() == "c" {
+        let _ = mgr.resume_all();
+        true
+    } else {
+        false
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn parse_signal(_sig_name: &str) -> Option<i32> {
-    None
+/// Spawn the console-resume thread reading stdin, mirroring Go
+/// `cli/cmd/root.go:421-437`: on a scanner error we send ourselves SIGTERM
+/// (as Go does); on EOF the thread quietly ends — Go busy-spins on EOF
+/// instead, which is deliberately not reproduced.
+///
+/// `shortcut: non-interactive stdin (pipe/file) hits EOF immediately, so the
+/// thread exits and console resume is unavailable; upgrade to a tty check if
+/// that matters.`
+#[cfg(target_os = "linux")]
+pub fn spawn_console_resume(mgr: Arc<Mutex<SignalManager>>) {
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match stdin.read_line(&mut line) {
+                Ok(0) => return, // EOF: end the thread (documented deviation)
+                Ok(_) => {
+                    let mut g = mgr.lock().unwrap_or_else(|p| p.into_inner());
+                    handle_console_line(&line, &mut g);
+                }
+                Err(_) => {
+                    let _ = kill(Pid::this(), Signal::SIGTERM);
+                    return;
+                }
+            }
+        }
+    });
 }
+
+#[cfg(not(target_os = "linux"))]
+pub fn spawn_console_resume(_mgr: Arc<Mutex<SignalManager>>) {}
 
 #[cfg(test)]
 mod tests {
@@ -187,15 +213,31 @@ mod tests {
         assert_eq!(mgr.stopped_count(), 0);
     }
 
+    /// Round 9 / H8: the hard-coded SIGSTOP number must agree with the signal
+    /// name table (`--kill SIGSTOP` recording must not silently drift from
+    /// `parse_signal_name`'s table).
     #[test]
-    #[cfg(target_os = "linux")]
-    fn test_parse_signal() {
-        assert_eq!(parse_signal("SIGSTOP"), Some(Signal::SIGSTOP));
-        assert_eq!(parse_signal("sigstop"), Some(Signal::SIGSTOP));
-        assert_eq!(parse_signal("SIGCONT"), Some(Signal::SIGCONT));
-        assert_eq!(parse_signal("SIGABRT"), Some(Signal::SIGABRT));
-        assert_eq!(parse_signal("SIGTRAP"), Some(Signal::SIGTRAP));
-        assert_eq!(parse_signal("INVALID"), None);
+    fn sigstop_num_matches_signal_table() {
+        assert_eq!(
+            SIGSTOP_NUM,
+            crate::module::stack_probe::parse_signal_name("SIGSTOP")
+        );
+    }
+
+    /// Round 9 / H24: `"c"` dispatches a resume (list drains), `"x"` and
+    /// empty lines do nothing; the return value says whether it resumed.
+    #[test]
+    fn handle_console_line_resumes_on_c_and_ignores_others() {
+        let mut mgr = SignalManager::new();
+        mgr.add_stopped(4242);
+
+        assert!(!handle_console_line("x", &mut mgr));
+        assert!(!handle_console_line("", &mut mgr));
+        assert!(!handle_console_line("  c extra", &mut mgr));
+        assert_eq!(mgr.stopped_count(), 1);
+
+        assert!(handle_console_line("c", &mut mgr));
+        assert_eq!(mgr.stopped_count(), 0);
     }
 
     /// Round 7 / F4: `--auto` resumes the event pid exactly once per event;
@@ -307,6 +349,53 @@ mod tests {
         assert_eq!(mgr.stopped_count(), 2);
 
         mgr.resume_all().expect("resume_all");
+        assert_eq!(mgr.stopped_count(), 0);
+        for &pid in &pids {
+            wait_for_proc_state(pid, |st| st == 'R' || st == 'S');
+        }
+
+        for mut kid in kids {
+            let _ = kid.kill();
+            let _ = kid.wait();
+        }
+    }
+
+    /// Round 9 / H24: the console dispatch (`handle_console_line`) is what
+    /// the stdin `"c"` thread calls; a non-`"c"` line must leave real stopped
+    /// children in T, `"c"` must resume them to R/S.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn handle_console_line_resumes_real_stopped_pids() {
+        let mut kids = Vec::new();
+        for _ in 0..2 {
+            kids.push(
+                std::process::Command::new("sleep")
+                    .arg("60")
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        let pids: Vec<u32> = kids.iter().map(|k| k.id()).collect();
+
+        for &pid in &pids {
+            kill(Pid::from_raw(pid as i32), Signal::SIGSTOP).expect("stop test child");
+        }
+        for &pid in &pids {
+            wait_for_proc_state(pid, |st| st == 'T');
+        }
+
+        let mut mgr = SignalManager::new();
+        for &pid in &pids {
+            record_stopped_after_event(&mut mgr, 19, pid);
+        }
+        assert_eq!(mgr.stopped_count(), 2);
+
+        assert!(!handle_console_line("x", &mut mgr));
+        for &pid in &pids {
+            wait_for_proc_state(pid, |st| st == 'T');
+        }
+
+        assert!(handle_console_line("c", &mut mgr));
         assert_eq!(mgr.stopped_count(), 0);
         for &pid in &pids {
             wait_for_proc_state(pid, |st| st == 'R' || st == 'S');

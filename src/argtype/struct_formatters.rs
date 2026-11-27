@@ -41,7 +41,7 @@ fn be_u16_at(d: &[u8], off: usize) -> Option<u16> {
 }
 
 /// Go `%x` on a signed value keeps the sign (`-42` -> `-2a`).
-fn hex_i64(v: i64) -> String {
+pub(crate) fn hex_i64(v: i64) -> String {
     if v < 0 {
         format!("-{:x}", v.unsigned_abs())
     } else {
@@ -103,9 +103,9 @@ pub fn format_struct(name: &str, d: &[u8]) -> Option<String> {
         }
         "siginfo" => {
             let fields = vec![
-                format!("si_signo=0x{:x}", i32_at(d, 0)?),
-                format!("si_errno=0x{:x}", i32_at(d, 4)?),
-                format!("si_code=0x{:x}", i32_at(d, 8)?),
+                format!("si_signo=0x{}", hex_i64(i32_at(d, 0)? as i64)),
+                format!("si_errno=0x{}", hex_i64(i32_at(d, 4)? as i64)),
+                format!("si_code=0x{}", hex_i64(i32_at(d, 8)? as i64)),
                 format!("sifields=0x{:x}", u64_at(d, 16)?),
             ];
             Some(braced(&fields))
@@ -177,11 +177,11 @@ pub fn format_struct(name: &str, d: &[u8]) -> Option<String> {
                 format!("frsize={}", i64_at(d, 72)?),
                 format!("flags={}", i64_at(d, 80)?),
                 format!(
-                    "spare=0x{:x},0x{:x},0x{:x},0x{:x}",
-                    i64_at(d, 88)?,
-                    i64_at(d, 96)?,
-                    i64_at(d, 104)?,
-                    i64_at(d, 112)?
+                    "spare=0x{},0x{},0x{},0x{}",
+                    hex_i64(i64_at(d, 88)?),
+                    hex_i64(i64_at(d, 96)?),
+                    hex_i64(i64_at(d, 104)?),
+                    hex_i64(i64_at(d, 112)?)
                 ),
             ];
             Some(braced(&fields))
@@ -291,8 +291,9 @@ fn green_hex_dump(d: &[u8]) -> String {
 /// Go branches on the *host-endian* `Family` (`syscall.RawSockaddrUnix` embeds
 /// `Family int16` and `Path [108]int8`). The `AF_INET6` branch re-serialises the
 /// struct big-endian and re-reads fields from that buffer (an upstream quirk:
-/// `Family` is read back LE while `Port`/`Flowinfo`/`Scope_id` are BE), so the
-/// byte swaps below reproduce those exact steps.
+/// `Family` is read back LE while `Port`/`Flowinfo` are BE and `Scope_id` is
+/// LE — `binary.Read(buf, binary.LittleEndian, &sockaddr6.Scope_id)`,
+/// `config_struct.go:562`), so the byte swaps below reproduce those exact steps.
 fn sockaddr(d: &[u8]) -> Option<String> {
     if d.len() < 110 {
         return None;
@@ -320,8 +321,17 @@ fn sockaddr(d: &[u8]) -> Option<String> {
             let flowinfo =
                 u32::from_be_bytes([*buf.get(4)?, *buf.get(5)?, *buf.get(6)?, *buf.get(7)?]);
             let addr = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&buf[8..24]).ok()?);
+            // Scope_id is read back little-endian (Go `config_struct.go:562`),
+            // unlike Port/Flowinfo above which are BE.
             let scope_id =
-                u32::from_be_bytes([*buf.get(24)?, *buf.get(25)?, *buf.get(26)?, *buf.get(27)?]);
+                u32::from_le_bytes([*buf.get(24)?, *buf.get(25)?, *buf.get(26)?, *buf.get(27)?]);
+            // Go prints `net.IP(sockaddr6.Addr[:]).String()`, which calls
+            // `To4()` first: a v4-mapped address prints as dotted-quad IPv4,
+            // a pure v6 address keeps its v6 form.
+            let addr = match addr.to_ipv4_mapped() {
+                Some(v4) => v4.to_string(),
+                None => addr.to_string(),
+            };
             format!(
                 "(family=AF_INET6, port={port}, flowinfo={flowinfo}, addr={addr}, scope_id={scope_id})"
             )
@@ -428,5 +438,54 @@ mod tests {
     fn utf16_string_from_render_dependency_exists() {
         // sanity: the formatter uses render::b2s_trim
         assert_eq!(super::cstr(b"abc\0\0"), "abc");
+    }
+
+    /// H9: siginfo's int32 fields keep the sign in hex, like Go `%x`.
+    #[test]
+    fn siginfo_signed_hex_matches_go() {
+        let mut d = [0u8; 32];
+        d[8..12].copy_from_slice(&(-2i32).to_le_bytes()); // si_code = -2
+        let s = format_struct("siginfo", &d).unwrap();
+        assert!(s.contains("si_code=0x-2"), "{s}");
+        // positive controls stay unsigned hex
+        d[0..4].copy_from_slice(&5i32.to_le_bytes());
+        d[4..8].copy_from_slice(&0i32.to_le_bytes());
+        d[8..12].copy_from_slice(&0i32.to_le_bytes());
+        let s = format_struct("siginfo", &d).unwrap();
+        assert!(s.contains("si_signo=0x5"), "{s}");
+        assert!(s.contains("si_errno=0x0"), "{s}");
+        assert!(s.contains("si_code=0x0"), "{s}");
+    }
+
+    /// H9: statfs spare ([4]int64) keeps the sign in hex, like Go `%x`.
+    #[test]
+    fn statfs_spare_signed_hex_matches_go() {
+        let mut d = [0u8; 128];
+        d[88..96].copy_from_slice(&(-1i64).to_le_bytes());
+        let s = format_struct("statfs", &d).unwrap();
+        assert!(s.contains("spare=0x-1,0x0,0x0,0x0"), "{s}");
+    }
+
+    /// H10/H11: AF_INET6 scope_id is read LE (01 02 03 04 -> 67305985) and
+    /// v4-mapped addresses print as dotted-quad IPv4 (Go `net.IP.String()`).
+    #[test]
+    fn sockaddr_inet6_scope_and_v4mapped_match_go() {
+        let mut d = [0u8; 110];
+        d[0..2].copy_from_slice(&10u16.to_le_bytes()); // AF_INET6
+        d[2..4].copy_from_slice(&[0x1f, 0x90]); // port BE 8080
+        d[8..24].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 1, 2, 3, 4]); // ::ffff:1.2.3.4
+        d[24..28].copy_from_slice(&[1, 2, 3, 4]); // scope_id LE
+        assert_eq!(
+            format_struct("sockaddr", &d).unwrap(),
+            "(family=AF_INET6, port=8080, flowinfo=0, addr=1.2.3.4, scope_id=67305985)"
+        );
+        // pure v6 stays in v6 form
+        let mut d = [0u8; 110];
+        d[0..2].copy_from_slice(&10u16.to_le_bytes());
+        d[23] = 1; // addr = ::1
+        assert_eq!(
+            format_struct("sockaddr", &d).unwrap(),
+            "(family=AF_INET6, port=0, flowinfo=0, addr=::1, scope_id=0)"
+        );
     }
 }

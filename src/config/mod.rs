@@ -21,6 +21,7 @@
 //! - JSON DTOs       => `hook_json.rs` (master shape, no dev carrier:
 //!   `origin/master:cli/cmd/stack.go:28-50`)
 
+pub mod base0;
 pub mod file_parser;
 pub mod filter;
 pub mod global;

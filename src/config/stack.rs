@@ -69,6 +69,21 @@ pub struct StackConfig {
 }
 
 impl StackConfig {
+    /// Default-constructed config with the CLI buffer default filled in.
+    /// Mirrors `SyscallConfig::with_table` (`config/syscall.rs`), which sets
+    /// `buffer_mb: 8` (the `-b/--buffer` default, `cli/args.rs`). H12: a
+    /// bare `StackConfig::default()` leaves `buffer_mb` at 0, which only
+    /// fails later at runtime (`perf_pages` bails "buffer size must be at
+    /// least 1 MiB") — build from here when no CLI value overrides it. The
+    /// only real caller (`cli/stack_cmd.rs:build_stack_config`) fills
+    /// `buffer_mb` from `global.buffer`, so it is unaffected.
+    pub fn with_defaults() -> Self {
+        Self {
+            buffer_mb: 8,
+            ..Default::default()
+        }
+    }
+
     /// The default thread blacklist for this run.
     /// Mirrors `ModuleConfig.DefaultThreadBlacklist()`
     /// (`config_module.go:809-836`): the 18 dev entries (including the
@@ -502,5 +517,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(conf.child_parent_pairs(), vec![(11, 11), (22, 22)]);
+    }
+
+    /// H12: `with_defaults()` carries the CLI buffer default (`buffer_mb`
+    /// 8, like `SyscallConfig::with_table`); a bare `Default` leaves it 0,
+    /// which is the footgun this constructor closes.
+    #[test]
+    fn with_defaults_carries_the_cli_buffer_default() {
+        assert_eq!(StackConfig::default().buffer_mb, 0);
+        let conf = StackConfig::with_defaults();
+        assert_eq!(conf.buffer_mb, 8);
     }
 }

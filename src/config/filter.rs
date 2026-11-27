@@ -3,6 +3,7 @@
 //! This module implements the filter parsing logic from config_filter.go,
 //! supporting various filter types: equal, greater, less, whitelist, blacklist, etc.
 
+use crate::config::base0::parse_base0_u64;
 use crate::contract::MAX_STRCMP_LEN;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
@@ -100,11 +101,13 @@ impl FilterHelper {
         self.filters.iter().find(|f| f.matches(filter_name))
     }
 
-    /// Get filter index by filter string
-    pub fn get_filter_index(&self, filter: &str) -> Option<u32> {
+    /// Get filter index by filter name (e.g., `"f0"`), like Go's
+    /// `GetFilterIndex` (`config_filter.go:178-180`), which looks the filter
+    /// up by name via `GetFilterByName` — not by its filter string (H20).
+    pub fn get_filter_index(&self, filter_name: &str) -> Option<u32> {
         self.filters
             .iter()
-            .find(|f| f.filter_str == filter)
+            .find(|f| f.matches(filter_name))
             .map(|f| f.filter_index)
     }
 
@@ -160,29 +163,36 @@ impl FilterHelper {
                     .map_err(|e| format!("Failed to parse IPv4 address: {}", e))?;
                 let octets = ipv4.octets();
 
-                // Convert to big-endian u32, then swap to little-endian with shift
+                // Convert to big-endian u32, then to the LE-shifted form Go
+                // computes (`config_filter.go:115-119`: BE-put the u32 into 8
+                // bytes, LE-read it back, shift right by `Str_len` — the same
+                // shape as the bx branch below).
                 let big_endian_u32 = u32::from_be_bytes(octets);
-                arg_filter.str_len = 0; // No shift for full IP
-                arg_filter.num_val = big_endian_u32 as u64;
-
-                // Convert big-endian to little-endian representation
-                let be_bytes = big_endian_u32.to_be_bytes();
-                let le_u64 = u64::from_le_bytes([
-                    be_bytes[0],
-                    be_bytes[1],
-                    be_bytes[2],
-                    be_bytes[3],
-                    0,
-                    0,
-                    0,
-                    0,
-                ]);
-                arg_filter.num_val = le_u64 >> arg_filter.str_len;
+                // H19: Go's `Str_len = (8 - len(ipv4_addr)) * 8`; a full IPv4
+                // address is 4 bytes, so this is 32, not 0 — the eBPF mask
+                // comparison (`ebpf/utils.h:216`) only compares the low 32
+                // bits of the 8-byte read. (The old `0` plus the comment "No
+                // shift for full IP" were both wrong.)
+                arg_filter.str_len = (8 - 4) * 8;
+                let be_u64 = (big_endian_u32 as u64).to_be_bytes();
+                arg_filter.num_val = u64::from_le_bytes(be_u64) >> arg_filter.str_len;
             }
             "bx" | "bufhex" => {
-                // Hex buffer filter
+                // Hex buffer filter. The input is always hex (H17): strip one
+                // optional "0x" prefix first, then parse as hex. Go
+                // (`config_filter.go:128`) prepends "0x" before base-0
+                // parsing, so a bare `deadbeef` means 0xdeadbeef; accepting a
+                // redundant `0x` prefix here is a convenience beyond Go (Go's
+                // `hex.DecodeString("0x…")` rejects it), kept so
+                // `bx:0xdeadbeef` works like `bx:deadbeef`. Do NOT route this
+                // through the shared base-0 parser: bx input is hex-only, so
+                // `0b`/`0o` must not leak in here (H16 stays separate).
+                let hex_str = value_str
+                    .strip_prefix("0x")
+                    .or_else(|| value_str.strip_prefix("0X"))
+                    .unwrap_or(value_str);
                 arg_filter.filter_type = WHITELIST_FILTER;
-                let hex_bytes = hex::decode(value_str)
+                let hex_bytes = hex::decode(hex_str)
                     .map_err(|e| format!("Failed to decode hex string: {}", e))?;
 
                 if hex_bytes.len() > 8 {
@@ -190,7 +200,8 @@ impl FilterHelper {
                 }
 
                 arg_filter.str_len = ((8 - hex_bytes.len()) * 8) as u32;
-                arg_filter.num_val = parse_num(value_str)?;
+                arg_filter.num_val = u64::from_str_radix(hex_str, 16)
+                    .map_err(|e| format!("Failed to parse hex number: {}", e))?;
 
                 // Convert big-endian to little-endian with shift
                 let be_u64 = arg_filter.num_val.to_be_bytes();
@@ -243,16 +254,11 @@ impl FilterHelper {
     }
 }
 
-/// Parse numeric string (supports decimal, hex with 0x prefix, octal with 0 prefix)
+/// Parse a numeric string like Go `strconv.ParseUint(s, 0, 64)` (H16): the
+/// shared base-0 parser accepts `0x` hex, `0b` binary, `0o`/leading-`0`
+/// octal, decimal, and Go-style underscores.
 fn parse_num(s: &str) -> Result<u64, String> {
-    if s.starts_with("0x") || s.starts_with("0X") {
-        u64::from_str_radix(&s[2..], 16).map_err(|e| format!("Failed to parse hex number: {}", e))
-    } else if s.starts_with("0") && s.len() > 1 {
-        u64::from_str_radix(&s[1..], 8).map_err(|e| format!("Failed to parse octal number: {}", e))
-    } else {
-        s.parse::<u64>()
-            .map_err(|e| format!("Failed to parse decimal number: {}", e))
-    }
+    parse_base0_u64(s).map_err(|e| format!("Failed to parse number: {e}"))
 }
 
 // Global filter helper instance
@@ -263,16 +269,16 @@ static FILTER_HELPER: Lazy<Mutex<FilterHelper>> = Lazy::new(|| Mutex::new(Filter
 
 /// Lock the global filter helper. A poisoned lock means an accessor panicked
 /// while holding it; recover the guard instead of unwrap-panicking (err-no-
-/// unwrap-prod).
+/// unwrap-prod). (H18: the old code said this but called `.expect()`, which
+/// panics on a poisoned lock — the opposite of what the comment promised.)
 fn filter_helper() -> std::sync::MutexGuard<'static, FilterHelper> {
-    FILTER_HELPER
-        .lock()
-        .expect("filter helper lock poisoned: an accessor panicked while holding it")
+    FILTER_HELPER.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Get filter index by filter string (global API)
-pub fn get_filter_index(filter: &str) -> Option<u32> {
-    filter_helper().get_filter_index(filter)
+/// Get filter index by filter name (e.g., `"f0"`), like Go's `GetFilterIndex`
+/// (H20). Passing a filter string such as `"eq:100"` returns `None`.
+pub fn get_filter_index(filter_name: &str) -> Option<u32> {
+    filter_helper().get_filter_index(filter_name)
 }
 
 /// Add filter (global API)
@@ -339,17 +345,106 @@ mod tests {
     }
 
     /// Roundtrip through all four global accessors (each goes through
-    /// `filter_helper`, covering the expect paths). Index values depend on what
+    /// `filter_helper`, covering the recover paths). Index values depend on what
     /// other tests registered concurrently in the global helper, so assert
-    /// consistency, not an absolute index.
+    /// consistency, not an absolute index. H20: `get_filter_index` looks up
+    /// by name (`"f0"`), like Go's `GetFilterIndex` — a filter string such as
+    /// `"eq:1"` is not a name and returns `None`.
     #[test]
     fn global_filter_api_roundtrip() {
         assert_eq!(get_filter_index("eq:1"), None);
         let idx = add_filter("eq:1").expect("add_filter succeeds");
         assert!(idx >= 1);
-        assert_eq!(get_filter_index("eq:1"), Some(idx));
+        assert_eq!(get_filter_index("eq:1"), None);
+        let name = format!("f{}", idx - 1);
+        assert_eq!(get_filter_index(&name), Some(idx));
         assert!(!get_filters().is_empty());
-        let f = get_filter_by_name(&format!("f{}", idx - 1)).expect("filter found by name");
+        let f = get_filter_by_name(&name).expect("filter found by name");
         assert_eq!(f.filter_str, "eq:1");
+    }
+
+    /// H16: `eq`/`gt`/`lt` accept Go base-0 literals — `0b`/`0o`/underscores
+    /// and leading-`0` octal — via the shared `parse_base0_u64`; `"08"` is
+    /// still rejected (illegal octal under Go base-0, same as H13).
+    #[test]
+    fn numeric_filters_accept_base0_literals() {
+        let mut helper = FilterHelper::new();
+        helper.add_filter("eq:0b101").unwrap();
+        assert_eq!(helper.get_filters()[0].num_val, 5);
+        helper.add_filter("eq:0o17").unwrap();
+        assert_eq!(helper.get_filters()[1].num_val, 15);
+        helper.add_filter("eq:1_000").unwrap();
+        assert_eq!(helper.get_filters()[2].num_val, 1000);
+        helper.add_filter("eq:010").unwrap();
+        assert_eq!(helper.get_filters()[3].num_val, 8);
+        assert!(helper.add_filter("eq:08").is_err());
+    }
+
+    /// H17 + H19: bx and addr share the eBPF mask comparison
+    /// (`ebpf/utils.h:216`), so both are checked here against Go's numbers:
+    /// `bx:deadbeef` → `0xefbeadde` with `str_len` 32, `addr:1.2.3.4` →
+    /// `0x04030201` with `str_len` 32. The two fixes do not overlap (bx had
+    /// the right mask but the wrong value source; addr had the right value
+    /// but the wrong mask).
+    #[test]
+    fn bx_filter_matches_go_hex_values() {
+        let mut helper = FilterHelper::new();
+        helper.add_filter("bx:deadbeef").unwrap();
+        let f = &helper.get_filters()[0];
+        assert_eq!(f.num_val, 0xefbeadde);
+        assert_eq!(f.str_len, 32);
+
+        // A redundant "0x" prefix parses to the same value.
+        helper.add_filter("bx:0xdeadbeef").unwrap();
+        let f = &helper.get_filters()[1];
+        assert_eq!(f.num_val, 0xefbeadde);
+        assert_eq!(f.str_len, 32);
+
+        helper.add_filter("bx:1234").unwrap();
+        let f = &helper.get_filters()[2];
+        assert_eq!(f.num_val, 0x3412);
+        assert_eq!(f.str_len, 48);
+
+        helper.add_filter("bx:00ff").unwrap();
+        let f = &helper.get_filters()[3];
+        assert_eq!(f.num_val, 0xff00);
+        assert_eq!(f.str_len, 48);
+
+        helper.add_filter("bx:ff").unwrap();
+        let f = &helper.get_filters()[4];
+        assert_eq!(f.num_val, 0xff);
+        assert_eq!(f.str_len, 56);
+
+        helper.add_filter("bx:00").unwrap();
+        assert_eq!(helper.get_filters()[5].num_val, 0x00);
+
+        assert!(helper.add_filter("bx:zz").is_err());
+    }
+
+    /// H19: `addr:1.2.3.4` keeps `num_val == 0x04030201` but now carries
+    /// `str_len == 32`, so the eBPF mask only compares the low 32 bits (an
+    /// IP followed by nonzero bytes still matches, like Go).
+    #[test]
+    fn addr_filter_uses_go_str_len_32() {
+        let mut helper = FilterHelper::new();
+        helper.add_filter("addr:1.2.3.4").unwrap();
+        let f = &helper.get_filters()[0];
+        assert_eq!(f.str_len, 32);
+        assert_eq!(f.num_val, 0x04030201);
+    }
+
+    /// H18: poisoning the global lock (an accessor panicking while holding
+    /// it) must not make later accessors panic — `filter_helper()` recovers
+    /// the guard, as its comment promises.
+    #[test]
+    fn poisoned_filter_helper_lock_recovers() {
+        let t = std::thread::spawn(|| {
+            let _guard = FILTER_HELPER.lock().unwrap();
+            panic!("boom while holding the filter lock");
+        });
+        assert!(t.join().is_err());
+        // Accessors must recover the guard, not panic on the poisoned lock.
+        let _ = get_filters();
+        assert!(add_filter("eq:4242").is_ok());
     }
 }

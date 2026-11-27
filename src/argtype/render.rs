@@ -13,12 +13,37 @@ use super::consts::*;
 use crate::util::hexdump::{hex_dump_pure, pretty_byte_slice};
 
 /// `util.B2STrim` (`user/util/helper.go:261`): trim NUL bytes from both ends,
-/// then whitespace from both ends.
+/// then whitespace from both ends. Go's `string([]byte)` keeps invalid UTF-8
+/// bytes verbatim; a Rust `String` cannot hold them, so they are escaped as
+/// `\xNN` here (valid UTF-8 passes through unchanged).
 pub fn b2s_trim(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
+    from_bytes_lossless(bytes)
         .trim_matches('\0')
         .trim()
         .to_string()
+}
+
+/// Convert bytes to a `String`, replacing invalid UTF-8 sequences with `\xNN`
+/// escapes instead of U+FFFD (`from_utf8_lossy`).
+fn from_bytes_lossless(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(valid) => {
+                out.push_str(valid);
+                break;
+            }
+            Err(e) => {
+                let up = e.valid_up_to();
+                out.push_str(std::str::from_utf8(&rest[..up]).expect("valid prefix"));
+                let bad = rest[up];
+                out.push_str(&format!("\\x{bad:02x}"));
+                rest = &rest[up + 1..];
+            }
+        }
+    }
+    out
 }
 
 /// `utf16leToUtf8` (`user/argtype/config_struct.go:161`): decode UTF-16LE up to
@@ -90,7 +115,15 @@ pub fn format_num(base_type: u32, format_type: u32, ptr: u64) -> String {
         TYPE_UINT8 => u64::from(ptr as u8).to_string(),
         TYPE_UINT16 => u64::from(ptr as u16).to_string(),
         TYPE_UINT32 => u64::from(ptr as u32).to_string(),
-        TYPE_UINT64 => unsigned_with_format(ptr, format_type),
+        TYPE_UINT64 => {
+            // Go's ARG_UINT64 (argtype_base.go:463-487) formats OCT/BIN via
+            // `strconv.FormatInt(int64(v), 8/2)`, so values >= 2^63 wrap to
+            // negative; hex/dec keep the u64 as-is.
+            match format_type {
+                FORMAT_OCT | FORMAT_BIN => signed_with_format(ptr as i64, format_type),
+                _ => unsigned_with_format(ptr, format_type),
+            }
+        }
         _ => unsigned_with_format(ptr, format_type),
     }
 }
@@ -150,6 +183,46 @@ mod tests {
         assert_eq!(b2s_trim(b"  hi  "), "hi");
         assert_eq!(b2s_trim(b"\x00\x00"), "");
         assert_eq!(b2s_trim(b"a\tb"), "a\tb");
+    }
+
+    /// H6: invalid UTF-8 bytes are escaped `\xNN` (Go keeps them raw; a Rust
+    /// String cannot), valid non-ASCII text passes through unchanged.
+    #[test]
+    fn b2s_trim_escapes_invalid_utf8() {
+        assert_eq!(b2s_trim(b"a\xffb"), "a\\xffb");
+        assert_eq!(b2s_trim(b"\xff hi"), "\\xff hi");
+        assert_eq!(b2s_trim(b"\x00\xff"), "\\xff");
+        assert_eq!(b2s_trim(b"\xff\x00"), "\\xff");
+        assert_eq!(b2s_trim("中文".as_bytes()), "中文");
+        // still trims NUL/whitespace around valid text
+        assert_eq!(b2s_trim(b"hello\x00\x00"), "hello");
+        assert_eq!(b2s_trim(b"  hi  "), "hi");
+    }
+
+    /// H5: TYPE_UINT64 OCT/BIN wrap to int64 like Go's FormatInt(int64(v)).
+    #[test]
+    fn uint64_oct_bin_wrap_like_go() {
+        assert_eq!(format_num(TYPE_UINT64, FORMAT_OCT, u64::MAX), "0o0-1");
+        assert_eq!(format_num(TYPE_UINT64, FORMAT_BIN, u64::MAX), "0b-1");
+        assert_eq!(
+            format_num(TYPE_UINT64, FORMAT_OCT, 0x8000_0000_0000_0000),
+            "0o-1000000000000000000000"
+        );
+        assert_eq!(
+            format_num(TYPE_UINT64, FORMAT_BIN, 0x8000_0000_0000_0000),
+            format!("0b-1{}", "0".repeat(63))
+        );
+        // controls: hex/dec keep u64, small OCT unaffected
+        assert_eq!(
+            format_num(TYPE_UINT64, FORMAT_HEX, u64::MAX),
+            "0xffffffffffffffff"
+        );
+        assert_eq!(
+            format_num(TYPE_UINT64, FORMAT_NUM, u64::MAX),
+            "18446744073709551615"
+        );
+        assert_eq!(format_num(TYPE_UINT64, FORMAT_OCT, 42), "0o052");
+        assert_eq!(format_num(TYPE_UINT64, FORMAT_BIN, 42), "0b101010");
     }
 
     #[test]

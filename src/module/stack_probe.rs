@@ -9,9 +9,13 @@
 
 use crate::config::{ProbeConfig, SConfig, StackConfig, UprobeArgs};
 use crate::logger::Logger;
-use crate::signal::{auto_resume_after_event, record_stopped_after_event, SignalManager};
-use anyhow::{anyhow, Result};
-use std::sync::Arc;
+use crate::module::syscall_tracepoint::account_lost;
+use crate::signal::{
+    auto_resume_after_event, record_stopped_after_event, spawn_console_resume, SignalManager,
+};
+use anyhow::{anyhow, bail, Result};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "linux")]
 use libbpf_rs::MapCore;
@@ -273,36 +277,50 @@ impl StackProbeModule {
         // `-b/--buffer` in MiB → 4 KiB pages (dev `GlobalConfig.Buffer`).
         let pages = super::perf_pages(conf.buffer_mb)?;
         let lost_logger = logger.clone();
+        let lost_total = Arc::new(AtomicU64::new(0));
+        let lost_total_cb = Arc::clone(&lost_total);
         // Round 7 / F4 / G3: before `--auto` resumes the event pid, record it
         // as stopped when the kill signal is SIGSTOP (Go `event_uprobe.go:58-60`
-        // records, `:77-78` resumes). The manager is owned by this run loop and
-        // moved into the perf callback below.
+        // records, `:77-78` resumes). Round 9 / H24: the manager is shared
+        // (`Arc<Mutex<…>>`) between this perf callback and the stdin `c`
+        // resume thread spawned below.
         let auto_resume = self.auto_resume;
-        let mut sig_mgr = SignalManager::new();
+        let sig_mgr = Arc::new(Mutex::new(SignalManager::new()));
+        let sig_mgr_cb = Arc::clone(&sig_mgr);
+        let sig_mgr_resume = Arc::clone(&sig_mgr_cb);
         let pb = libbpf_rs::PerfBufferBuilder::new(&events_map)
             .pages(pages)
             .sample_cb(move |_cpu: i32, data: &[u8]| {
                 match render_uprobe_event(data, &hook_points) {
                     Ok((line, pid)) => {
                         render_logger.println(&line);
-                        record_stopped_after_event(&mut sig_mgr, kill_signal, pid);
+                        {
+                            let mut g = sig_mgr_cb.lock().unwrap_or_else(|p| p.into_inner());
+                            record_stopped_after_event(&mut g, kill_signal, pid);
+                        }
                         auto_resume_after_event(
                             &mut |pid| {
                                 // resume_one prints its own diagnostics;
                                 // nothing to propagate from a perf callback.
-                                let _ = sig_mgr.resume_one(pid);
+                                let mut g =
+                                    sig_mgr_resume.lock().unwrap_or_else(|p| p.into_inner());
+                                let _ = g.resume_one(pid);
                             },
                             auto_resume,
                             pid,
                         );
                     }
-                    Err(e) => render_logger.println(&format!("{NAME}\tdecode error: {e}")),
+                    Err(e) => render_logger.println(&format!("{NAME}\t{e}")),
                 }
             })
             .lost_cb(move |cpu: i32, count: u64| {
-                lost_logger.println(&format!("{NAME}\tlost {count} samples on CPU {cpu}"));
+                account_lost(&lost_total_cb, &lost_logger, cpu, count);
             })
             .build()?;
+
+        // Round 9 / H24: stdin `c` resumes stopped pids (Go `root.go:429`).
+        // One module runs at a time, so one spawn per run() is correct.
+        spawn_console_resume(Arc::clone(&sig_mgr));
 
         // Ctrl-C must end the trace loop here too (the syscall module polls its
         // own `running` flag); without this the only exit was a poll error,
@@ -311,6 +329,10 @@ impl StackProbeModule {
             pb.poll(std::time::Duration::from_millis(100))?;
         }
         logger.println(&format!("{NAME}\tshutting down"));
+        logger.println(&format!(
+            "TotalLost => {}",
+            lost_total.load(Ordering::Relaxed)
+        ));
         drop(links);
         Ok(())
     }
@@ -379,7 +401,10 @@ fn render_uprobe_event(raw: &[u8], hook_points: &[UprobeArgs]) -> Result<(String
             let line = crate::event::render::render_uprobe_event(&mut e, point)?;
             Ok((line, pid))
         }
-        _ => Ok((format!("non-uprobe event ({} bytes)", raw.len()), 0)),
+        _ => bail!(
+            "non-uprobe event in the uprobe stream ({} bytes)",
+            raw.len()
+        ),
     }
 }
 
@@ -634,5 +659,65 @@ mod tests {
         let entries = effective.thread_filter_entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1, crate::contract::consts::THREAD_NAME_WHITELIST);
+    }
+
+    /// Round 9 / H4 helpers: a minimal raw perf record (`EventContext` +
+    /// fixed-prefix TLVs) for one event id.
+    #[cfg(target_os = "linux")]
+    fn foreign_raw_record(eventid: u32, first_u32: u32) -> Vec<u8> {
+        use crate::contract::types::EventContext;
+        fn tlv_u32(raw: &mut Vec<u8>, idx: u8, v: u32) {
+            raw.push(idx);
+            raw.extend_from_slice(&v.to_le_bytes());
+        }
+        fn tlv_u64(raw: &mut Vec<u8>, idx: u8, v: u64) {
+            raw.push(idx);
+            raw.extend_from_slice(&v.to_le_bytes());
+        }
+        let ctx = EventContext {
+            ts: 0x1000,
+            eventid,
+            host_tid: 1,
+            host_pid: 2,
+            tid: 3,
+            pid: 4,
+            uid: 5,
+            comm: [0u8; 16],
+            argnum: 0,
+            padding: [0; 7],
+        };
+        let mut raw = bytemuck::bytes_of(&ctx).to_vec();
+        tlv_u32(&mut raw, 0, first_u32);
+        tlv_u64(&mut raw, 1, 0xa);
+        tlv_u64(&mut raw, 2, 0xb);
+        tlv_u64(&mut raw, 3, 0xc);
+        raw
+    }
+
+    /// Round 9 / H4: a syscall record in the uprobe stream fails (bails),
+    /// exactly like an uprobe record fails in the syscall stream — a crossed
+    /// stream is a failure on both sides, never a benign log line.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn foreign_syscall_record_fails_in_uprobe_stream() {
+        let raw = foreign_raw_record(456, 63); // SYSCALL_ENTER, sysno 63
+        let err = render_uprobe_event(&raw, &[]).unwrap_err();
+        assert!(format!("{err:#}").contains("non-uprobe event"), "{err:#}");
+    }
+
+    /// Round 9 / H4 (syscall side of the pair): an uprobe record in the
+    /// syscall stream fails too. `render.rs` itself is untouched; this test
+    /// locks the pair from the stack side.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn foreign_uprobe_record_fails_in_syscall_stream() {
+        let raw = foreign_raw_record(458, 1); // UPROBE_ENTER, point_key 1
+        let mut rec = crate::contract::decode::decode_perf_record(&raw).unwrap();
+        let table = crate::config::SyscallPointTable::empty();
+        let err = crate::event::render::render_syscall_event(&table, &mut rec, false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("uprobe event in the syscall stream"),
+            "{err:#}"
+        );
     }
 }

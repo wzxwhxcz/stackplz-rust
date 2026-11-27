@@ -4,6 +4,8 @@
 //! Parses strings like `write[int,buf:128,int]` into [`UprobeArgs`] with
 //! configured [`PointArg`]s.
 
+use super::base0::parse_base0_u64;
+use super::filter::get_filter_by_name;
 use super::point_arg::*;
 use super::stack::MAX_UPROBE_PROGRAMS;
 use crate::argtype::{
@@ -15,6 +17,7 @@ use anyhow::{anyhow, bail, Result};
 /// arm64 register name → index. Mirrors `common/const_forarm64.go:GetRegIndex`.
 /// aarch64 register names → sample index. Mirrors `RegsNameMap`
 /// (`user/common/const.go:107-140`): x0..x29 = 0..29, lr = 30, sp = 31, pc = 32.
+/// Go looks names up exactly, so `"x01"` is not a name (unlike `"x1"`).
 fn aarch64_reg_index(name: &str) -> Option<u32> {
     let index = match name {
         "lr" => 30,
@@ -22,6 +25,9 @@ fn aarch64_reg_index(name: &str) -> Option<u32> {
         "pc" => 32,
         _ => {
             let rest = name.strip_prefix('x')?;
+            if rest.len() > 1 && rest.starts_with('0') {
+                return None;
+            }
             let index: u32 = rest.parse().ok()?;
             if index > 29 {
                 return None;
@@ -44,6 +50,9 @@ fn arm_reg_index(name: &str) -> Option<u32> {
         "pc" => 15,
         _ => {
             let rest = name.strip_prefix('r')?;
+            if rest.len() > 1 && rest.starts_with('0') {
+                return None;
+            }
             let index: u32 = rest.parse().ok()?;
             if index > 10 {
                 return None;
@@ -58,26 +67,38 @@ fn arm_reg_index(name: &str) -> Option<u32> {
 /// `GetRegIndex` uses `RegsNameMap` on arm64 and `RegsArmNameMap` on arm
 /// (`user/common/const_forarm64.go:8` / `const_forarm.go:8`).
 ///
-/// The arm names are additionally accepted on 64-bit hosts (after the aarch64
-/// ones, so `sp`/`lr`/`pc` keep their aarch64 indices) because the aarch32
-/// point table is embedded in every build and must stay parseable there.
+/// The 64-bit fallback is restricted to the numbered arm registers
+/// (`r0`..`r10`, H14): the embedded aarch32 table's buf/iovec sizes
+/// reference them (`"size": "r2"` on read/write/readv/writev/vmsplice/
+/// preadv/pwritev/process_vm_readv/process_vm_writev), so those names must
+/// resolve on a 64-bit host too. The aliases `fp`/`ip` are NOT accepted
+/// there: arm `fp` is r11 while the aarch64 frame pointer is x29, and
+/// aarch64 has no `ip` — accepting them would silently read the wrong
+/// register (Go/arm64 rejects both). `sp`/`lr`/`pc` never reach the
+/// fallback — the aarch64 table matches them first.
 fn get_reg_index(name: &str) -> Result<u32> {
     let resolved = if cfg!(target_pointer_width = "32") {
         arm_reg_index(name).or_else(|| aarch64_reg_index(name))
     } else {
-        aarch64_reg_index(name).or_else(|| arm_reg_index(name))
+        aarch64_reg_index(name).or_else(|| arm_reg_index_64(name))
     };
     // A bad register name is user input, not a bug: report it, don't panic.
     resolved.ok_or_else(|| anyhow!("ParseAsReg failed =>{name}<="))
 }
 
-/// Parse a number string that may be hex (0x-prefixed) or decimal.
-fn parse_num(s: &str) -> Option<u64> {
-    if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u64::from_str_radix(rest, 16).ok()
-    } else {
-        s.parse::<u64>().ok()
+/// Numbered arm registers only (`r0`..`r10` → 0..10), for the 64-bit
+/// fallback in [`get_reg_index`]. No `fp`/`ip`/`sp`/`lr`/`pc` aliases —
+/// see the note there.
+fn arm_reg_index_64(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix('r')?;
+    if rest.len() > 1 && rest.starts_with('0') {
+        return None;
     }
+    let index: u32 = rest.parse().ok()?;
+    if index > 10 {
+        return None;
+    }
+    Some(index)
 }
 
 /// `ParseArgType(arg_str, point_arg)` — parse a single arg type string.
@@ -111,14 +132,16 @@ pub fn parse_arg_type(arg_str: &str, point_arg: &mut PointArg, dump_hex: bool) -
         type_name = &type_name[..pos];
         for fname in filter_part.split('.') {
             if !fname.is_empty() {
-                // Phase 2 stub: filter index lookup not yet implemented.
-                // For now, parse as u32 directly. A suffix that does not parse
-                // is a typo in a user-supplied `-w`, so report it instead of
-                // silently losing the filter.
-                let idx = fname
-                    .parse::<u32>()
-                    .map_err(|_| anyhow!("bad filter index {fname} in arg_str:{arg_str}"))?;
-                point_arg.add_filter_index(idx);
+                // H21: Go `config_module.go:74-83` resolves the suffix by
+                // name (`GetFilterIndex("f0")` — by name, like H20). A suffix
+                // with no registered filter is a typo in a user-supplied
+                // `-w`, so report it instead of silently losing the filter.
+                // (The old stub parsed the suffix as a bare u32, which
+                // accepted `.0` — not a legal Go filter name — and rejected
+                // every real `.f0`.)
+                let filter = get_filter_by_name(fname)
+                    .ok_or_else(|| anyhow!("bad filter index {fname} in arg_str:{arg_str}"))?;
+                point_arg.add_filter_index(filter.filter_index);
             }
         }
     }
@@ -162,11 +185,14 @@ pub fn parse_arg_type(arg_str: &str, point_arg: &mut PointArg, dump_hex: bool) -
         }
         "ptr_arr" | "uint_arr" | "int_arr" => {
             // Array: split read_op_str on `:` to get count_str and remaining read_op.
+            // Go `config_module.go:137` parses the count with `ParseUint(..., 0, 32)`
+            // (base-0 — H13).
             let (count_str, remaining) = split_first_colon(read_op_str);
             read_op_str = remaining;
-            let size = count_str
-                .parse::<u32>()
-                .map_err(|_| anyhow!("parse {type_name} arg_str:{arg_str} failed"))?;
+            let size = parse_base0_u64(count_str)
+                .ok()
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| anyhow!("parse {type_name} arg_str:{arg_str} failed"))?;
             let base = match type_name {
                 "int_arr" => r_num_array(INT, size),
                 "uint_arr" => r_num_array(UINT, size),
@@ -176,12 +202,18 @@ pub fn parse_arg_type(arg_str: &str, point_arg: &mut PointArg, dump_hex: bool) -
             point_arg.set_group_type(EBPF_UPROBE_ENTER);
         }
         "buf" => {
-            // Buffer: default 256, or :size or :reg or :size:read_op
+            // Buffer: default 256, or :size or :reg or :size:read_op. Go
+            // `config_module.go:166` parses the size with `ParseUint(..., 0, 32)`
+            // (base-0); an over-wide or non-numeric size falls through to the
+            // register branch (H13).
             let (size_str, remaining) = split_first_colon(read_op_str);
             read_op_str = remaining;
             let type_idx = if size_str.is_empty() {
                 argtype::r_buffer_len(256)
-            } else if let Ok(size) = size_str.parse::<u32>() {
+            } else if let Some(size) = parse_base0_u64(size_str)
+                .ok()
+                .and_then(|v| u32::try_from(v).ok())
+            {
                 argtype::r_buffer_len(size)
             } else {
                 // Register-based length
@@ -258,7 +290,7 @@ fn compile_read_op(read_op_str: &str, point_arg: &mut PointArg) -> Result<()> {
                 let op = chars[i];
                 let token = &v[start..i];
                 if !token.is_empty() {
-                    if let Some(value) = parse_num(token) {
+                    if let Ok(value) = parse_base0_u64(token) {
                         if !has_first_op {
                             return Err(anyhow!("first op must be reg"));
                         }
@@ -335,7 +367,9 @@ pub fn parse_hook_point(
             let after = &config_str[pos + 1..];
             if !after.is_empty() {
                 exit_read = true;
-                if let Some(n) = parse_num(after) {
+                // NOTE: a garbage offset after `]` is silently kept as 0
+                // (H22, out of scope for this round — Go panics here).
+                if let Ok(n) = parse_base0_u64(after) {
                     exit_offset = n;
                 }
             }
@@ -503,6 +537,86 @@ mod tests {
         assert_eq!(buf_at.size, 128);
         // arg_2 = int
         assert_eq!(points[0].point_args[2].type_index, INT);
+    }
+
+    /// H13: `-w` buf size is base-0 — `"010"` is 8 bytes, not 10;
+    /// `"0x100"` is 256; plain `"10"` stays 10.
+    #[test]
+    fn parse_buf_size_base0() {
+        ensure_init();
+        for (size, expected) in [("010", 8), ("0x100", 256), ("10", 10)] {
+            let points = hp(&format!("write[int,buf:{size},int]"));
+            let buf_at = crate::argtype::get_arg_type(points[0].point_args[1].type_index);
+            assert_eq!(buf_at.size, expected, "size={size}");
+        }
+    }
+
+    /// H13: `-w` array count is base-0 too — `"0x4"` is 4.
+    #[test]
+    fn parse_array_count_base0() {
+        ensure_init();
+        let points = hp("test[int_arr:0x4]");
+        let pa = &points[0].point_args[0];
+        let at = crate::argtype::get_arg_type(pa.type_index);
+        assert_eq!(at.array_len, 4);
+    }
+
+    /// H13: a read-op offset token accepts Go base-0 literals — `0b101`
+    /// parses as 5 (the old hex-or-decimal `parse_num` rejected it and the
+    /// token fell through to a register lookup that failed).
+    #[test]
+    fn parse_read_op_offset_base0() {
+        ensure_init();
+        let points = hp("test[int:sp+0b101]");
+        let pa = &points[0].point_args[0];
+        let offset = pa
+            .extra_op_list
+            .iter()
+            .map(|&idx| crate::argtype::get_op(idx))
+            .find(|op| op.code == crate::contract::enums::OpCode::AddOffset)
+            .expect("an AddOffset op for the 0b101 token");
+        assert_eq!(offset.value, 5);
+    }
+
+    /// H21: a filter suffix resolves by name against the registered
+    /// filters (`int.f0` → the index of `--filter eq:100`, like Go's
+    /// `GetFilterIndex("f0")`). The index is read back from `add_filter`
+    /// rather than hard-coded, because the global helper is shared with
+    /// other tests running in parallel.
+    #[test]
+    fn parse_filter_suffix_by_name() {
+        ensure_init();
+        let idx = crate::config::filter::add_filter("eq:100").unwrap();
+        let points = hp(&format!("write[int.f{},int]", idx - 1));
+        assert_eq!(points[0].point_args[0].filter_index_list, vec![idx]);
+    }
+
+    /// H21: an unregistered filter name, and a bare numeric suffix (`.0`,
+    /// which the old stub accepted but Go rejects — it is not a filter
+    /// name), both fail instead of silently losing the filter.
+    #[test]
+    fn parse_filter_suffix_unknown_name_errors() {
+        ensure_init();
+        assert!(parse_hook_point(&["write[int.f99]".to_string()], "/lib/libc.so", false).is_err());
+        assert!(parse_hook_point(&["write[int.0]".to_string()], "/lib/libc.so", false).is_err());
+    }
+
+    /// H14: same arch-selected register table as `file_parser` — on 64-bit
+    /// the aarch64 table wins and the arm fallback accepts only the numbered
+    /// registers (`"r2"` for the aarch32 table's buf sizes); `"fp"`/`"ip"`
+    /// are rejected.
+    #[test]
+    fn reg_index_is_arch_selected_like_go_build_tags() {
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(get_reg_index("x29").unwrap(), 29);
+            assert_eq!(get_reg_index("sp").unwrap(), 31);
+            assert_eq!(get_reg_index("r2").unwrap(), 2);
+            assert!(get_reg_index("fp").is_err());
+            assert!(get_reg_index("ip").is_err());
+        } else {
+            assert_eq!(get_reg_index("fp").unwrap(), 11);
+            assert_eq!(get_reg_index("x2").unwrap(), 2);
+        }
     }
 
     #[test]

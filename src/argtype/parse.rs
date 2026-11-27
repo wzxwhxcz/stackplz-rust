@@ -22,7 +22,7 @@
 //!
 //! Go turns every malformed record into a `panic` (the whole process dies).
 //! Here every failure is an [`anyhow::Error`]; the module poll callbacks log
-//! `decode error: ...` and keep polling. The rendered text for *well-formed*
+//! the error and keep polling. The rendered text for *well-formed*
 //! values is byte-identical to Go, which the differential oracle
 //! (`~/workspace/stackplz-round4-oracle`) checks case by case.
 //!
@@ -35,7 +35,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use super::consts::*;
 use super::registry::{try_get_arg_type, ArgType};
 use super::render;
-use super::struct_formatters::format_struct;
+use super::struct_formatters::{format_struct, hex_i64};
 use crate::config::point_arg::{PointArg, EBPF_SYS_ALL};
 use crate::contract::args::ArgsCursor;
 use crate::contract::consts::STRARR_MAGIC_LEN;
@@ -372,7 +372,7 @@ fn parse_msghdr(ptr: u64, cur: &mut ArgsCursor<'_>) -> Result<String> {
         format!("iovlen=0x{iovlen:x}"),
         format!("*control=0x{control:x}{control_fmt}"),
         format!("controllen=0x{controllen:x}"),
-        format!("flags=0x{flags:x}"),
+        format!("flags=0x{}", hex_i64(flags as i64)),
     ];
     Ok(format!(
         "{}({})",
@@ -591,6 +591,38 @@ mod tests {
         let mut cur = ArgsCursor::new(&[]);
         let err = parse_point_arg(&pa, 0, &mut cur, EBPF_SYS_ENTER, false).unwrap_err();
         assert!(format!("{err:#}").contains("unknown argtype"), "{err:#}");
+    }
+
+    /// H28: msghdr `flags` is i32, so Go `%x` keeps the sign (`-1` -> `-1`),
+    /// while Rust's bare `{:x}` would print the two's complement.
+    #[test]
+    fn msghdr_flags_signed_hex_matches_go() {
+        // Minimal msghdr TLVs: [idx][len] header, 56-byte raw struct
+        // (flags at offset 48), empty control buffer, iovlen = 0.
+        fn msghdr_tlvs(flags: i32) -> Vec<u8> {
+            let mut raw = [0u8; 56];
+            raw[48..52].copy_from_slice(&flags.to_le_bytes());
+            let mut tlvs = vec![1u8];
+            tlvs.extend_from_slice(&56i32.to_le_bytes());
+            tlvs.extend_from_slice(&raw);
+            tlvs.extend_from_slice(&prefixed(2, b""));
+            tlvs
+        }
+        for (flags, want) in [
+            (-1i32, "flags=0x-1"),
+            (-2i32, "flags=0x-2"),
+            (i32::MIN, "flags=0x-80000000"),
+            (1i32, "flags=0x1"),
+        ] {
+            let out = parse("msghdr", "", EBPF_SYS_ENTER, 0x5000, &msghdr_tlvs(flags)).unwrap();
+            assert_eq!(
+                out,
+                format!(
+                    "0x5000(name=0x0, namelen=0x0, *iov=0x0(\n\t\n), iovlen=0x0, *control=0x0(), controllen=0x0, {want})"
+                ),
+                "flags={flags}"
+            );
+        }
     }
 
     #[test]

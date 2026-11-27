@@ -38,8 +38,11 @@ pub struct BaseHookConfig {
 }
 
 /// A library's full hook config. Master-era `LibHookConfig`
-/// (`origin/master:cli/cmd/stack.go:35-39`).
+/// (`origin/master:cli/cmd/stack.go:35-39`). Unknown fields are rejected, as
+/// for [`BaseHookConfig`] — a stale `"regs"`/`"stack"` key at lib level must
+/// fail loudly instead of being silently ignored (H7, round-8 G9 follow-up).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LibHookConfig {
     pub library: String,
     #[serde(default)]
@@ -49,8 +52,19 @@ pub struct LibHookConfig {
 }
 
 /// Top-level hook config. Master-era `HookConfig`
-/// (`origin/master:cli/cmd/stack.go:41-44`).
+/// (`origin/master:cli/cmd/stack.go:41-44`). Unknown fields are rejected, as
+/// for [`BaseHookConfig`] (H7).
+///
+/// Policy boundary (H7): the six deserialization structs in
+/// `file_parser.rs` (`ParamConfig`, `PointConfig`, `SyscallPointConfig`,
+/// `FileConfig`, `UprobeFileConfig`, `SyscallFileConfig`) deliberately do
+/// NOT deny unknown fields. They mirror Go's `config_file.go`, where
+/// `encoding/json` also ignores unknown keys, and three of them use
+/// `#[serde(flatten)]`, which cannot be combined with
+/// `deny_unknown_fields` uniformly. These three DTOs are a closed
+/// master-era schema with no flattening, so deny applies cleanly here.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookConfig {
     #[serde(rename = "library_dirs", default)]
     pub library_dirs: Vec<String>,
@@ -123,5 +137,21 @@ mod tests {
             let err = serde_json::from_str::<BaseHookConfig>(json).unwrap_err();
             assert!(err.to_string().contains("unknown field"), "{err}");
         }
+    }
+
+    /// H7: the same deny policy at the lib and top levels — an unknown key
+    /// at either level fails with "unknown field" (round-8 G9 only covered
+    /// the point level, `BaseHookConfig`).
+    #[test]
+    fn removed_hook_keys_are_rejected_at_lib_and_top_levels() {
+        let err = serde_json::from_str::<LibHookConfig>(r#"{"library": "libc.so", "regs": true}"#)
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+
+        let err = serde_json::from_str::<HookConfig>(
+            r#"{"library_dirs": [], "libs": [], "stack": true}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
     }
 }

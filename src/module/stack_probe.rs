@@ -9,7 +9,7 @@
 
 use crate::config::{ProbeConfig, SConfig, StackConfig, UprobeArgs};
 use crate::logger::Logger;
-use crate::module::syscall_tracepoint::account_lost;
+use crate::module::syscall_tracepoint::{account_lost, poll_until_stop};
 use crate::signal::{
     auto_resume_after_event, record_stopped_after_event, spawn_console_resume, SignalManager,
 };
@@ -314,7 +314,7 @@ impl StackProbeModule {
                 }
             })
             .lost_cb(move |cpu: i32, count: u64| {
-                account_lost(&lost_total_cb, &lost_logger, cpu, count);
+                account_lost(&lost_total_cb, &lost_logger, NAME, cpu, count);
             })
             .build()?;
 
@@ -322,12 +322,16 @@ impl StackProbeModule {
         // One module runs at a time, so one spawn per run() is correct.
         spawn_console_resume(Arc::clone(&sig_mgr));
 
-        // Ctrl-C must end the trace loop here too (the syscall module polls its
-        // own `running` flag); without this the only exit was a poll error,
-        // which then surfaced as a bogus "module Run failed".
-        while !crate::cli::interrupted() {
-            pb.poll(std::time::Duration::from_millis(100))?;
-        }
+        // Round 10 / K1: a poll error only stops this reader — Go logs it
+        // and shuts down normally (`imodule.go:250-258`); it never fails the
+        // run, so the summary below still prints. (Round 9 / H1 had this as
+        // `?`, which turned one transient read error into a dead session.)
+        poll_until_stop(
+            NAME,
+            || pb.poll(std::time::Duration::from_millis(100)),
+            &logger,
+            crate::cli::interrupted,
+        );
         logger.println(&format!("{NAME}\tshutting down"));
         logger.println(&format!(
             "TotalLost => {}",

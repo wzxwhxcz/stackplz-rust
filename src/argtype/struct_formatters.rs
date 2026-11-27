@@ -314,9 +314,6 @@ fn sockaddr(d: &[u8]) -> Option<String> {
             let mut buf = vec![0u8; 110];
             buf[0..2].copy_from_slice(&family.to_be_bytes());
             buf[2..110].copy_from_slice(path);
-            // `Family` is read back little-endian from that big-endian buffer;
-            // its value is not printed, only used to pick the branch above.
-            let _family_from_be_buffer = u16::from_le_bytes([buf[0], buf[1]]);
             let port = be_u16_at(&buf, 2)?;
             let flowinfo =
                 u32::from_be_bytes([*buf.get(4)?, *buf.get(5)?, *buf.get(6)?, *buf.get(7)?]);

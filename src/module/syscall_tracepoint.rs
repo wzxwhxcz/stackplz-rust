@@ -495,7 +495,7 @@ impl SyscallTracepointModule {
         let lost_total = Arc::new(AtomicU64::new(0));
         let lost_total_cb = Arc::clone(&lost_total);
         let handle_lost = move |cpu: i32, count: u64| {
-            account_lost(&lost_total_cb, &lost_logger, cpu, count);
+            account_lost(&lost_total_cb, &lost_logger, NAME, cpu, count);
         };
 
         let perf = PerfBufferBuilder::new(&map)
@@ -511,32 +511,39 @@ impl SyscallTracepointModule {
         // One module runs at a time, so one spawn per run() is correct.
         spawn_console_resume(Arc::clone(&sig_mgr));
 
-        // Round 9 / H1: a poll failure fails the module (`?`), never exits
-        // cleanly as `Ok(())` like the old swallowed-`break` version.
-        poll_loop(|| perf.poll(Duration::from_millis(100)), &logger)?;
-
-        logger.println(&format!("{}: shutting down", NAME));
-        logger.println(&format!(
-            "TotalLost => {}",
-            lost_total.load(Ordering::Relaxed)
-        ));
+        // Round 10 / K1 (replaces round 9 / H1): a poll failure is not fatal
+        // — Go logs the read error, stops this reader, and shuts down
+        // normally with its TotalLost summary (`imodule.go:250-258`).
+        poll_until_shutdown(
+            || perf.poll(Duration::from_millis(100)),
+            &logger,
+            &lost_total,
+            crate::cli::interrupted,
+        );
         Ok(())
     }
 }
 
-/// Shared perf-loss accounting (Round 9 / H2): add `count` to the running
-/// total and log the per-CPU line. Both modules print the accumulated total
-/// at shutdown (`TotalLost => N`, mirroring Go). The per-batch line is shared
-/// verbatim by both modules now (stack previously prefixed `{NAME}\t`,
-/// syscall previously printed `Lost {count} events`).
-pub(crate) fn account_lost(total: &AtomicU64, logger: &Logger, cpu: i32, count: u64) {
+/// Shared perf-loss accounting (Round 9 / H2, round 10 / I2): add `count` to
+/// the running total and log the per-CPU line. Both modules print the
+/// accumulated total at shutdown (`TotalLost => N`, mirroring Go). The line
+/// carries the module name (Go `imodule.go:261` prints `child.Name()`); the
+/// CPU field has no Go counterpart but is kept — it says which ring filled.
+/// `record_type` (Go's `record.RecordType`) is NOT printed: libbpf-rs 0.27's
+/// lost callback is `FnMut(cpu: i32, count: u64)` — neither it nor the
+/// underlying C `perf_buffer_lost_fn` delivers a record type, so there is
+/// nothing truthful to print here.
+pub(crate) fn account_lost(total: &AtomicU64, logger: &Logger, name: &str, cpu: i32, count: u64) {
     total.fetch_add(count, Ordering::Relaxed);
-    logger.println(&format!("lost {count} samples on CPU {cpu}"));
+    logger.println(&format!("{name}\tlost {count} samples on CPU {cpu}"));
 }
 
-/// Shared perf poll loop (Round 9 / H1): poll until Ctrl-C. A poll error
-/// fails the module instead of exiting cleanly as `Ok(())` — the old syscall
-/// loop swallowed it with `break`, unlike the stack module's `?`.
+/// Shared perf poll loop (Round 9 / H1): poll until Ctrl-C. A poll error is
+/// returned to the caller instead of exiting cleanly as `Ok(())` — the old
+/// syscall loop swallowed it with `break`. The caller decides what an error
+/// means; round 10 / K1 treats it as "stop this reader" (log + normal
+/// shutdown, [`poll_until_stop`]), never as fatal — so this helper keeps
+/// returning `Result` (H1's test depends on it).
 pub(crate) fn poll_loop<T, E>(
     mut poll_once: impl FnMut() -> Result<T, E>,
     _logger: &Logger,
@@ -548,6 +555,53 @@ where
         poll_once().map_err(|e| anyhow::Error::new(e).context("perf poll failed"))?;
     }
     Ok(())
+}
+
+/// Round 10 / K1: poll until Ctrl-C or a read error. A read error only stops
+/// this reader (Go `imodule.go:250-258`) — it is logged and the caller shuts
+/// down normally; it never fails the run. `shutdown_pending` is consulted
+/// only when a poll error actually arrives: an error that races Ctrl-C is
+/// the shutdown interrupting the read (Go's `perf.ErrClosed` equivalent) and
+/// stops silently, so the shutdown log is not polluted with a bogus
+/// "poll error" line. On this platform the handler is installed with plain
+/// `signal()` (glibc: SA_RESTART), so a blocking poll is resumed, not
+/// failed, on Ctrl-C — the loop then exits through the `interrupted()`
+/// check and this branch is normally never taken.
+pub(crate) fn poll_until_stop<T, E>(
+    name: &str,
+    poll_once: impl FnMut() -> Result<T, E>,
+    logger: &Logger,
+    shutdown_pending: impl Fn() -> bool,
+) where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    if let Err(e) = poll_loop(poll_once, logger) {
+        if !shutdown_pending() {
+            logger.println(&format!("{name}\tpoll error, stopping reads: {e:#}"));
+        }
+    }
+}
+
+/// Round 10 / K1: the syscall run-loop tail — poll until Ctrl-C or a read
+/// error, then print the shutdown summary (`shutting down` + `TotalLost`).
+/// A poll error never fails the run: it is logged by [`poll_until_stop`]
+/// and the summary still prints (Go's `Close()` always prints TotalLost).
+/// The stack tail is separate: it prints its own summary format and drops
+/// its attach links after the summary.
+fn poll_until_shutdown<T, E>(
+    poll_once: impl FnMut() -> Result<T, E>,
+    logger: &Logger,
+    lost_total: &AtomicU64,
+    shutdown_pending: impl Fn() -> bool,
+) where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    poll_until_stop(NAME, poll_once, logger, shutdown_pending);
+    logger.println(&format!("{NAME}: shutting down"));
+    logger.println(&format!(
+        "TotalLost => {}",
+        lost_total.load(Ordering::Relaxed)
+    ));
 }
 
 /// Serialize `arg_filter_t` (272 bytes) for the `arg_filter` map.
@@ -591,8 +645,39 @@ impl PointArgsSide {
 
 #[cfg(test)]
 mod tests {
-    use super::{account_lost, poll_loop, PointArgsSide, SyscallTracepointModule};
+    use super::{
+        account_lost, poll_loop, poll_until_shutdown, poll_until_stop, PointArgsSide,
+        SyscallTracepointModule, NAME,
+    };
     use crate::config::{SyscallConfig, SyscallPointTable};
+
+    /// A poll closure that always fails (H1/K1 tests).
+    #[derive(Debug)]
+    struct FakePollError;
+    impl std::fmt::Display for FakePollError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "fake ring failure")
+        }
+    }
+    impl std::error::Error for FakePollError {}
+
+    /// K1/I2: a logger that writes to a temp file (quiet: no terminal
+    /// output), so tests can assert on the exact log lines. Returns the
+    /// logger and the path to read back; the caller removes the file.
+    /// `tag` must be unique per test (tests run in parallel in one process).
+    fn capturing_logger(tag: &str) -> (crate::logger::Logger, std::path::PathBuf) {
+        let logger = crate::logger::Logger::new("", false);
+        let file_name = format!("stackplz-test-{tag}-{}.log", std::process::id());
+        let dir = std::env::temp_dir();
+        logger
+            .set_out_file(dir.to_str().unwrap(), &file_name, true)
+            .expect("test log file must open");
+        (logger, dir.join(file_name))
+    }
+
+    fn read_log(path: &std::path::Path) -> String {
+        std::fs::read_to_string(path).expect("test log file must be readable")
+    }
 
     /// Report W1/F1: the module config must carry the real point table, and the
     /// maps must be derivable from it. This test does not load eBPF (no root /
@@ -682,19 +767,12 @@ mod tests {
         );
     }
 
-    /// H1: a poll failure must fail the module (non-zero exit), never exit
-    /// cleanly as `Ok(())` like the old swallowed-`break` version.
+    /// H1: `poll_loop` must propagate a poll failure as an error, never
+    /// swallow it as `Ok(())` like the old swallowed-`break` version.
+    /// (Round 10 / K1 keeps this `poll_loop` behavior — the call site is
+    /// what changed, not the loop itself.)
     #[test]
     fn poll_failure_propagates_as_module_error() {
-        #[derive(Debug)]
-        struct FakePollError;
-        impl std::fmt::Display for FakePollError {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "fake ring failure")
-            }
-        }
-        impl std::error::Error for FakePollError {}
-
         let logger = crate::logger::Logger::new("", false);
         assert!(!crate::cli::interrupted(), "Ctrl-C must be clear in tests");
         let err = poll_loop(|| Err::<(), FakePollError>(FakePollError), &logger)
@@ -704,14 +782,94 @@ mod tests {
         assert!(format!("{err:#}").contains("fake ring failure"), "{err:#}");
     }
 
-    /// H2: lost batches accumulate into one total (Go `TotalLost => N`).
+    /// K1(a): an immediately failing poll stops the reads, logs the error,
+    /// and still prints the shutdown summary — the run ends normally, not
+    /// as a fatal module error (round 9 / H1 behavior). Old code returned
+    /// `Err` here and never printed `TotalLost`.
+    #[test]
+    fn poll_error_stops_reads_and_still_prints_total_lost() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let (logger, path) = capturing_logger("k1-immediate-fail");
+        let lost_total = AtomicU64::new(0);
+        poll_until_shutdown(
+            || Err::<(), FakePollError>(FakePollError),
+            &logger,
+            &lost_total,
+            || false,
+        );
+        let log = read_log(&path);
+        assert!(log.contains("poll error, stopping reads"), "{log}");
+        assert!(log.contains("fake ring failure"), "{log}");
+        assert!(log.contains("shutting down"), "{log}");
+        assert!(log.contains("TotalLost => 0"), "{log}");
+        assert_eq!(lost_total.load(Ordering::Relaxed), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// K1(b): a poll that succeeds twice and then fails processes the first
+    /// two polls and stops after the third — reads stop, they do not keep
+    /// retrying, and the summary still prints.
+    #[test]
+    fn poll_error_after_two_events_stops_reading() {
+        use std::cell::Cell;
+        use std::sync::atomic::AtomicU64;
+        let (logger, path) = capturing_logger("k1-two-then-fail");
+        let lost_total = AtomicU64::new(0);
+        let calls = Cell::new(0u32);
+        poll_until_shutdown(
+            || {
+                let n = calls.get();
+                calls.set(n + 1);
+                if n < 2 {
+                    Ok::<(), FakePollError>(())
+                } else {
+                    Err(FakePollError)
+                }
+            },
+            &logger,
+            &lost_total,
+            || false,
+        );
+        assert_eq!(calls.get(), 3, "two good polls, then the failing one");
+        let log = read_log(&path);
+        assert!(log.contains("poll error, stopping reads"), "{log}");
+        assert!(log.contains("fake ring failure"), "{log}");
+        assert!(log.contains("TotalLost => 0"), "{log}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// K1(c): a poll error that arrives while shutdown is already pending is
+    /// the shutdown racing the read (Go's `perf.ErrClosed` equivalent) — it
+    /// stops silently, with no misleading "poll error" line; the summary
+    /// still prints.
+    #[test]
+    fn poll_error_while_shutting_down_is_silent() {
+        let (logger, path) = capturing_logger("k1-shutdown-pending");
+        poll_until_stop(
+            NAME,
+            || Err::<(), FakePollError>(FakePollError),
+            &logger,
+            || true,
+        );
+        let log = read_log(&path);
+        assert!(!log.contains("poll error"), "{log}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// H2 / I2: lost batches accumulate into one total (Go `TotalLost => N`),
+    /// and each per-batch line names the module (Go prints `child.Name()`).
     #[test]
     fn lost_samples_accumulate_into_total() {
         use std::sync::atomic::{AtomicU64, Ordering};
         let total = AtomicU64::new(0);
-        let logger = crate::logger::Logger::new("", false);
-        account_lost(&total, &logger, 3, 7);
-        account_lost(&total, &logger, 3, 3);
+        let (logger, path) = capturing_logger("i2-account-lost");
+        account_lost(&total, &logger, NAME, 3, 7);
+        account_lost(&total, &logger, NAME, 3, 3);
         assert_eq!(total.load(Ordering::Relaxed), 10);
+        let log = read_log(&path);
+        assert!(log.contains(NAME), "{log}");
+        assert!(log.contains("lost 7 samples on CPU 3"), "{log}");
+        assert!(log.contains("lost 3 samples on CPU 3"), "{log}");
+        let _ = std::fs::remove_file(&path);
     }
 }

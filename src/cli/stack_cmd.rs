@@ -43,7 +43,7 @@ pub fn has_uprobe_config(global: &GlobalConfig) -> Result<bool> {
 /// (`config_module.go:InitCommonConfig`, `GetCommonFilter`).
 pub fn build_stack_config(global: &GlobalConfig, target: &TargetConfig) -> Result<StackConfig> {
     let filters = crate::config::ResolvedFilters::from_globals(global)?;
-    Ok(StackConfig {
+    let conf = StackConfig {
         full_tname: global.full_tname,
         buffer_mb: global.buffer,
         uid_whitelist: filters.uid_whitelist,
@@ -60,7 +60,9 @@ pub fn build_stack_config(global: &GlobalConfig, target: &TargetConfig) -> Resul
         // A stack-only run has no `-s`, so dev's `SysCallConf.TraceMode` stays at
         // its zero value, `TRACE_COMMON` (0).
         trace_mode: crate::contract::consts::TRACE_COMMON,
-    })
+    };
+    conf.validate()?; // K2: zero buffer_mb fails here, not later at perf_pages.
+    Ok(conf)
 }
 
 /// One attachable uprobe point for a `-c/--config` entry.
@@ -197,32 +199,36 @@ pub fn run(global: &GlobalConfig, target: &TargetConfig) -> Result<()> {
     }
 
     let lib_path = format!("{}/preload_libs", global.exec_path);
-    for (probe, hook_points) in probes {
-        logger.println(&format!(
-            "{}\thook info:{}",
-            MODULE_NAME_STACK,
-            probe.info()
-        ));
+    // Round 10 / M3: run all probes inside one closure so the dropped-lines
+    // warning is presented exactly once, on the success path AND on the
+    // error path (the old code printed it only after a fully successful
+    // loop — a failing `run()` returned through `?` before reaching it).
+    let result = (|| -> Result<()> {
+        for (probe, hook_points) in probes {
+            logger.println(&format!(
+                "{}\thook info:{}",
+                MODULE_NAME_STACK,
+                probe.info()
+            ));
 
-        let module = StackProbeModule::new(probe, lib_path.clone())
-            .with_hook_points(hook_points)
-            .with_signals(
-                stack_conf.kill_signal,
-                stack_conf.tkill_signal,
-                global.auto_resume,
-            )
-            // W17: all filter maps are written from this carrier.
-            .with_stack_config(stack_conf.clone());
-        module
-            .run(logger.clone())
-            .with_context(|| format!("{MODULE_NAME_STACK} module failed"))?;
-    }
+            let module = StackProbeModule::new(probe, lib_path.clone())
+                .with_hook_points(hook_points)
+                .with_signals(
+                    stack_conf.kill_signal,
+                    stack_conf.tkill_signal,
+                    global.auto_resume,
+                )
+                // W17: all filter maps are written from this carrier.
+                .with_stack_config(stack_conf.clone());
+            module
+                .run(logger.clone())
+                .with_context(|| format!("{MODULE_NAME_STACK} module failed"))?;
+        }
+        Ok(())
+    })();
     // Round 7 / F1: the drop counter added in round 6 had no reader, so a
     // full disk / closed stdout stayed silent. Present it once here.
-    if let Some(warning) = crate::logger::Logger::dropped_lines_warning(logger.failed_lines()) {
-        eprintln!("{warning}");
-    }
-    Ok(())
+    crate::logger::Logger::finish_run(result, &logger)
 }
 
 #[cfg(test)]

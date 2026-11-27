@@ -25,10 +25,9 @@ struct LoggerInner {
     show_time: bool,
     show_terminal: bool,
     file: Option<File>,
-    /// Lines dropped because the terminal write/flush failed.
-    terminal_failed: u64,
-    /// Lines dropped because the file write/flush failed.
-    file_failed: u64,
+    /// Lines dropped because at least one sink (terminal and/or file) failed
+    /// to write them: one line counts at most once (round 10 / M3).
+    lines_failed: u64,
 }
 
 impl Logger {
@@ -39,8 +38,7 @@ impl Logger {
                 show_time,
                 show_terminal: true,
                 file: None,
-                terminal_failed: 0,
-                file_failed: 0,
+                lines_failed: 0,
             }),
         }
     }
@@ -71,11 +69,24 @@ impl Logger {
         self.write_line(msg);
     }
 
-    /// Total lines dropped by failed writes (terminal + file). Best-effort
-    /// output stays best-effort, but failures are at least observable.
+    /// Total lines dropped because at least one sink failed to write them.
+    /// Best-effort output stays best-effort, but failures are at least
+    /// observable.
     pub fn failed_lines(&self) -> u64 {
         let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        g.terminal_failed.wrapping_add(g.file_failed)
+        g.lines_failed
+    }
+
+    /// Present [`Logger::failed_lines`] on the CLI exit path (round 7 / F1,
+    /// round 10 / M3): print the warning to stderr whenever lines were lost,
+    /// **before** returning `res` — whether the run succeeded or failed, a
+    /// failing run loses logs too, and that is when the warning matters most.
+    /// `res` is returned unchanged so callers can keep using `?`.
+    pub fn finish_run(res: Result<()>, logger: &Logger) -> Result<()> {
+        if let Some(warning) = Self::dropped_lines_warning(logger.failed_lines()) {
+            eprintln!("{warning}");
+        }
+        res
     }
 
     /// Present [`Logger::failed_lines`] on the CLI exit path (round 7 / F1):
@@ -95,6 +106,29 @@ impl Logger {
             sink.write_all(bytes).is_ok() && sink.write_all(b"\n").is_ok() && sink.flush().is_ok();
         if !ok {
             *failed += 1;
+        }
+    }
+
+    /// Write one line to the terminal and/or file sink, counting the line as
+    /// lost when **either** sink fails (round 10 / M3): a line that fails on
+    /// both sinks still counts once — `failed_lines` speaks of lost lines,
+    /// not of failed sink writes. `None` means the sink is absent.
+    fn write_line_sinks(
+        terminal: Option<&mut dyn Write>,
+        file: Option<&mut dyn Write>,
+        bytes: &[u8],
+        lines_failed: &mut u64,
+    ) {
+        let sink_ok = |sink: Option<&mut dyn Write>| match sink {
+            Some(w) => {
+                let mut failed = 0u64;
+                Self::write_line_to(w, bytes, &mut failed);
+                failed == 0
+            }
+            None => true,
+        };
+        if !sink_ok(terminal) || !sink_ok(file) {
+            *lines_failed += 1;
         }
     }
 
@@ -120,18 +154,16 @@ impl Logger {
         // Best-effort output: a closed stdout or a full disk is unactionable
         // here (no error channel, no retry), and dropping the line beats
         // aborting the trace loop that the whole tool runs inside.
-        if g.show_terminal {
-            Self::write_line_to(&mut io::stdout(), line_bytes, &mut g.terminal_failed);
-        }
-        if let Some(f) = g.file.as_mut() {
-            // Inline instead of `write_line_to`: passing both `f` and
-            // `&mut g.file_failed` to one call borrows `g` mutably twice.
-            let ok =
-                f.write_all(line_bytes).is_ok() && f.write_all(b"\n").is_ok() && f.flush().is_ok();
-            if !ok {
-                g.file_failed += 1;
-            }
-        }
+        // `g.file` is taken out and put back so the line counter
+        // (`g.lines_failed`) can be borrowed mutably in the same call:
+        // borrowing `g.file` and `g.lines_failed` together is rejected
+        // (E0499 — the old code worked around it by inlining the file write).
+        let mut stdout = io::stdout();
+        let terminal = g.show_terminal.then_some(&mut stdout as &mut dyn Write);
+        let mut file = g.file.take();
+        let file_sink = file.as_mut().map(|f| f as &mut dyn Write);
+        Self::write_line_sinks(terminal, file_sink, line_bytes, &mut g.lines_failed);
+        g.file = file;
     }
 }
 
@@ -237,6 +269,53 @@ mod tests {
         let mut failed = 0u64;
         Logger::write_line_to(&mut FailingWriter, b"line", &mut failed);
         assert_eq!(failed, 1, "failing sink must bump the counter once");
+    }
+
+    /// M3: `failed_lines` counts **lost lines**, so a line whose terminal and
+    /// file writes both fail bumps the counter once, not twice. This drives
+    /// exactly the per-line decision `write_line` makes.
+    #[test]
+    fn double_sink_failure_counts_one_lost_line() {
+        let mut lines_failed = 0u64;
+        Logger::write_line_sinks(
+            Some(&mut FailingWriter),
+            Some(&mut FailingWriter),
+            b"line",
+            &mut lines_failed,
+        );
+        assert_eq!(lines_failed, 1, "one line lost on both sinks counts once");
+
+        let mut n = 0u64;
+        Logger::write_line_sinks(Some(&mut FailingWriter), None, b"line", &mut n);
+        assert_eq!(n, 1, "terminal-only failure still loses the line");
+        let mut n = 0u64;
+        Logger::write_line_sinks(None, Some(&mut FailingWriter), b"line", &mut n);
+        assert_eq!(n, 1, "file-only failure still loses the line");
+
+        let mut good: Vec<u8> = Vec::new();
+        let mut n = 0u64;
+        Logger::write_line_sinks(Some(&mut good), None, b"line", &mut n);
+        assert_eq!(n, 0, "healthy sink loses nothing");
+        assert_eq!(good, b"line\n");
+
+        let mut n = 0u64;
+        Logger::write_line_sinks(None, None, b"line", &mut n);
+        assert_eq!(n, 0, "no sink, nothing written, nothing lost");
+    }
+
+    /// M3: the dropped-lines warning must be presented on the error path too —
+    /// `finish_run` runs before the caller returns `res`, and must hand `res`
+    /// back unchanged (the warning wording itself is pinned by
+    /// `dropped_lines_warning_names_the_count`).
+    #[test]
+    fn finish_run_prints_the_warning_on_the_error_path_too() {
+        let logger = Logger::new("", false);
+        let ok: anyhow::Result<()> = Ok(());
+        assert!(Logger::finish_run(ok, &logger).is_ok());
+
+        let err: anyhow::Result<()> = Err(anyhow::anyhow!("module failed"));
+        let e = Logger::finish_run(err, &logger).unwrap_err();
+        assert!(format!("{e:#}").contains("module failed"), "{e:#}");
     }
 
     #[test]

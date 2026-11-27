@@ -31,6 +31,7 @@ use crate::argtype::consts::{INT, POINTER, UINT, UINT64};
 /// Parameter configuration in a point definition.
 /// Mirrors `ParamConfig` in config_file.go:11-20.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParamConfig {
     /// Parameter name (optional, defaults to "a0", "a1", etc.)
     #[serde(default)]
@@ -68,6 +69,7 @@ pub struct ParamConfig {
 /// Hook point configuration.
 /// Mirrors `PointConfig` in config_file.go:22-26.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PointConfig {
     /// Symbol or function name
     pub name: String,
@@ -95,6 +97,7 @@ pub struct SyscallPointConfig {
 /// File configuration base trait.
 /// Mirrors `IFileConfig` + `FileConfig` in config_file.go:33-43.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileConfig {
     /// Config type: "syscall" or "uprobe"
     #[serde(rename = "type")]
@@ -589,11 +592,16 @@ mod tests {
     /// H15: a flags format warns (once per format per process) but still
     /// loads as a plain integer — the shipped syscall tables carry these
     /// formats, so rejecting would make the embedded table unloadable.
+    /// The warn-once flag is process-global (`WARNED_FORMATS`), and tests
+    /// that build point args from the embedded table (which carries
+    /// `access_flags`) can warn first — so the mechanism is probed with a
+    /// format no other test uses, instead of asserting first-call ownership
+    /// of the shared `access_flags` entry (round 10: flaky in full runs).
     #[test]
     fn flags_format_warns_once_and_still_loads_as_integer() {
         ensure_init();
-        assert!(warn_flags_format_once("access_flags"));
-        assert!(!warn_flags_format_once("access_flags"));
+        assert!(warn_flags_format_once("access_flags_probe_only"));
+        assert!(!warn_flags_format_once("access_flags_probe_only"));
         let pa = param("int", "", "inotify_flags")
             .get_point_arg(0, EBPF_SYS_ENTER)
             .unwrap();
@@ -660,5 +668,62 @@ points:
         assert_eq!(config.points[0].point.params.len(), 3);
         assert_eq!(config.points[0].point.params[0].name, "fd");
         assert_eq!(config.points[0].point.params[0].type_name, "int");
+    }
+
+    /// J1: unknown keys in the three non-flattening DTOs are rejected instead
+    /// of silently dropped — a typo like `regg` used to load fine and run with
+    /// defaults. The error text names the offending key.
+    #[test]
+    fn unknown_fields_rejected_in_param_point_file_configs() {
+        let err = serde_yaml::from_str::<ParamConfig>("name: x\ntype: int\nregg: x3").unwrap_err();
+        assert!(err.to_string().contains("regg"), "{err}");
+        let err = serde_json::from_str::<PointConfig>(
+            r#"{"name":"n","signal":"enter","params":[],"nrr":1}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("nrr"), "{err}");
+        let err =
+            serde_json::from_str::<FileConfig>(r#"{"type":"syscall","extra":1}"#).unwrap_err();
+        assert!(err.to_string().contains("extra"), "{err}");
+    }
+
+    /// J1: the shipped syscall tables only use known keys (top level
+    /// `points`/`type`, point `name`/`nr`/`params`, param
+    /// `name`/`type`/`more`/`format`/`size`), so they still load under
+    /// `deny_unknown_fields`.
+    #[test]
+    fn shipped_syscall_tables_load_with_deny_unknown_fields() {
+        use crate::config::syscall_points::{SYSCALL_CONFIG_AARCH32, SYSCALL_CONFIG_AARCH64};
+        for text in [SYSCALL_CONFIG_AARCH64, SYSCALL_CONFIG_AARCH32] {
+            let file: SyscallFileConfig = serde_json::from_str(text)
+                .unwrap_or_else(|e| panic!("shipped table failed to parse: {e}"));
+            assert_eq!(file.base.config_type, "syscall");
+            assert!(!file.points.is_empty());
+        }
+    }
+
+    /// J1: the shipped uprobe file shape (top level `type`/`library`/
+    /// `points`, point `name`/`signal`/`params`, param `type`/`filter`/
+    /// `reg`/`more`/`format`/`size`/`read_op`) loads under
+    /// `deny_unknown_fields` — the key sets match the upstream Go test
+    /// fixtures (`tests/config_uprobe_test*.json`, audited 2026-11-27).
+    /// Unknown keys inside a flattened struct are silently dropped by serde
+    /// (verified by probe: `bogus_top`/`nrr` parse as Ok), so the three
+    /// flatten structs stay loose by design — see `hook_json.rs`.
+    #[test]
+    fn shipped_uprobe_shape_loads_with_deny_unknown_fields() {
+        let file: UprobeFileConfig = serde_json::from_str(
+            r#"{"type":"uprobe","library":"libc.so","points":[
+                {"name":"open","signal":"enter","params":[
+                    {"type":"str","filter":["==/etc/passwd"]},
+                    {"type":"int","reg":"x3","more":"all"}
+                ]}
+            ]}"#,
+        )
+        .expect("uprobe file shape must parse");
+        assert_eq!(file.base.config_type, "uprobe");
+        assert_eq!(file.library, "libc.so");
+        assert_eq!(file.points.len(), 1);
+        assert_eq!(file.points[0].params.len(), 2);
     }
 }

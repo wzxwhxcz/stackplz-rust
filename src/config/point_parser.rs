@@ -204,19 +204,20 @@ pub fn parse_arg_type(arg_str: &str, point_arg: &mut PointArg, dump_hex: bool) -
         "buf" => {
             // Buffer: default 256, or :size or :reg or :size:read_op. Go
             // `config_module.go:166` parses the size with `ParseUint(..., 0, 32)`
-            // (base-0); an over-wide or non-numeric size falls through to the
-            // register branch (H13).
+            // (base-0); a non-numeric size falls through to the register branch.
+            // A valid base-0 number that overflows u32 is a size error — Go
+            // misreports it as `ParseAsReg failed`, we say `too large` (I3).
             let (size_str, remaining) = split_first_colon(read_op_str);
             read_op_str = remaining;
             let type_idx = if size_str.is_empty() {
                 argtype::r_buffer_len(256)
-            } else if let Some(size) = parse_base0_u64(size_str)
-                .ok()
-                .and_then(|v| u32::try_from(v).ok())
-            {
-                argtype::r_buffer_len(size)
+            } else if let Ok(size) = parse_base0_u64(size_str) {
+                match u32::try_from(size) {
+                    Ok(size) => argtype::r_buffer_len(size),
+                    Err(_) => bail!("buf size too large: {size_str}"),
+                }
             } else {
-                // Register-based length
+                // Register-based length (non-numeric size)
                 let reg = get_reg_index(size_str)?;
                 argtype::r_buffer_reg(reg)
             };
@@ -549,6 +550,37 @@ mod tests {
             let buf_at = crate::argtype::get_arg_type(points[0].point_args[1].type_index);
             assert_eq!(buf_at.size, expected, "size={size}");
         }
+    }
+
+    /// I3: a valid base-0 buf size that overflows u32 is reported as a size
+    /// error (`too large`), not misdiagnosed as a bad register name. Go
+    /// (`config_module.go:170-177`) falls through to the register branch on
+    /// overflow and reports `ParseAsReg failed`; we divert only the overflow
+    /// case to a truthful message.
+    #[test]
+    fn buf_size_overflow_reports_too_large_not_reg() {
+        ensure_init();
+        let err = parse_hook_point(
+            &["write[int,buf:0x100000000,int]".to_string()],
+            "/lib/libc.so",
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+        assert!(!err.to_string().contains("ParseAsReg"), "{err}");
+    }
+
+    /// I3: a non-numeric size (`sp`) still takes the register branch — the
+    /// register-based buffer type has size 0 and its length op comes from the
+    /// register, unchanged from before.
+    #[test]
+    fn buf_size_register_name_still_uses_register_branch() {
+        ensure_init();
+        let points = hp("write[int,buf:sp,int]");
+        let pa = &points[0].point_args[1];
+        assert!(pa.is_buffer());
+        let at = crate::argtype::get_arg_type(pa.type_index);
+        assert_eq!(at.size, 0, "register-based buffer has no fixed size");
     }
 
     /// H13: `-w` array count is base-0 too — `"0x4"` is 4.

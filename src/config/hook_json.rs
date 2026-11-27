@@ -55,14 +55,15 @@ pub struct LibHookConfig {
 /// (`origin/master:cli/cmd/stack.go:41-44`). Unknown fields are rejected, as
 /// for [`BaseHookConfig`] (H7).
 ///
-/// Policy boundary (H7): the six deserialization structs in
+/// Policy boundary (H7/J1): the six deserialization structs in
 /// `file_parser.rs` (`ParamConfig`, `PointConfig`, `SyscallPointConfig`,
-/// `FileConfig`, `UprobeFileConfig`, `SyscallFileConfig`) deliberately do
-/// NOT deny unknown fields. They mirror Go's `config_file.go`, where
-/// `encoding/json` also ignores unknown keys, and three of them use
-/// `#[serde(flatten)]`, which cannot be combined with
-/// `deny_unknown_fields` uniformly. These three DTOs are a closed
-/// master-era schema with no flattening, so deny applies cleanly here.
+/// `FileConfig`, `UprobeFileConfig`, `SyscallFileConfig`) are not treated
+/// uniformly. The three non-flattening ones (`ParamConfig`, `PointConfig`,
+/// `FileConfig`) carry `#[serde(deny_unknown_fields)]`. The three
+/// flattening ones (`SyscallPointConfig`, `UprobeFileConfig`,
+/// `SyscallFileConfig`) stay loose on purpose: serde cannot combine
+/// `#[serde(flatten)]` with `deny_unknown_fields` (flatten absorbs unknown
+/// keys, so deny silently does nothing).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookConfig {

@@ -229,6 +229,12 @@ fn register_singletons(mgr: &mut OpManager) {
 // index (0..33). Idempotent: the global is registered once on first `opm()`.
 // ---------------------------------------------------------------------------
 
+// NOTE (L1): these indices are Rust-side bookkeeping (template-array
+// subscripts) and are unrelated to the wire values in `OpCode` (written to
+// `op_config_t.code`). Do NOT "align" this order with `OpCode`'s declaration
+// order — the enum values are pinned by `opcode_values_match_c_enum` in
+// `contract/enums.rs`.
+
 macro_rules! singleton_index {
     ($accessor:ident, $idx:literal) => {
         #[allow(clippy::missing_docs_in_private_items)]

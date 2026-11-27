@@ -24,7 +24,6 @@
 use anyhow::{anyhow, bail, Result};
 
 use super::filter::get_filter_by_name;
-use super::point_arg::EBPF_SYS_ENTER;
 use super::syscall_points::{SyscallPoint, SyscallPointTable};
 use crate::argtype::consts::STRING;
 use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
@@ -353,12 +352,14 @@ fn apply_filter_groups(point: &mut SyscallPoint, filter_groups: &[String]) -> Re
             let filter = get_filter_by_name(filter_name)
                 .ok_or_else(|| anyhow!("{} not match any filter", filter_name))?;
             if filter.is_str() {
-                // String filters go to the first string argument that is read
-                // at this point type.
+                // String filters go to the first string argument that `ReadMore()`
+                // (Go `config_module.go:697-703`): either an `all` point type or
+                // the group type (enter). An `all` string arg must win over a
+                // later plain enter one (M1).
                 if let Some(arg) = point
                     .enter_point_args
                     .iter_mut()
-                    .find(|arg| arg.type_index == STRING && arg.point_type == EBPF_SYS_ENTER)
+                    .find(|arg| arg.type_index == STRING && arg.read_more())
                 {
                     arg.add_filter_index(filter.filter_index);
                 }
@@ -391,6 +392,7 @@ mod tests {
     use crate::argtype::init_argtypes;
     #[allow(unused_imports)]
     use crate::config::filter::add_filter as _add_filter;
+    use crate::config::point_arg::EBPF_SYS_ENTER;
 
     fn fresh_table() -> SyscallPointTable {
         init_argtypes();
@@ -551,5 +553,69 @@ mod tests {
         let token = format!("openat:{missing}");
         let err = select(&mut table, &token, "").unwrap_err();
         assert!(err.to_string().contains("not match any filter"), "{err}");
+    }
+
+    /// M1: a string filter attaches to the **first** string arg whose
+    /// `ReadMore()` is true — including an `all` point type, which the old
+    /// `== EBPF_SYS_ENTER` predicate skipped (the filter silently landed
+    /// nowhere).
+    #[test]
+    fn string_filter_attaches_to_all_point_type_arg() {
+        use crate::config::point_arg::{PointArg, EBPF_SYS_ALL};
+        let str_index = crate::config::add_filter("w:/data").unwrap();
+        let mut point = SyscallPoint {
+            nr: 1,
+            name: "with_all_arg".into(),
+            enter_point_args: vec![PointArg {
+                name: "path".into(),
+                reg_index: 0,
+                type_index: STRING,
+                extra_op_list: vec![],
+                filter_index_list: vec![],
+                point_type: EBPF_SYS_ALL,
+                group_type: EBPF_SYS_ENTER,
+            }],
+            exit_point_args: vec![],
+        };
+        apply_filter_groups(&mut point, &[filter_name_of(str_index)]).unwrap();
+        assert_eq!(point.enter_point_args[0].filter_index_list, vec![str_index]);
+    }
+
+    /// M1: with an `all` string arg followed by a plain enter string arg, the
+    /// filter goes to the first (`all`) one — Go hangs it on the first
+    /// `ReadMore()` arg; the old code skipped the `all` arg and picked the
+    /// second.
+    #[test]
+    fn string_filter_prefers_first_all_arg_over_later_enter_arg() {
+        use crate::config::point_arg::{PointArg, EBPF_SYS_ALL};
+        let str_index = crate::config::add_filter("w:/tmp").unwrap();
+        let mut point = SyscallPoint {
+            nr: 2,
+            name: "two_strings".into(),
+            enter_point_args: vec![
+                PointArg {
+                    name: "a_all".into(),
+                    reg_index: 0,
+                    type_index: STRING,
+                    extra_op_list: vec![],
+                    filter_index_list: vec![],
+                    point_type: EBPF_SYS_ALL,
+                    group_type: EBPF_SYS_ENTER,
+                },
+                PointArg {
+                    name: "b_enter".into(),
+                    reg_index: 1,
+                    type_index: STRING,
+                    extra_op_list: vec![],
+                    filter_index_list: vec![],
+                    point_type: EBPF_SYS_ENTER,
+                    group_type: EBPF_SYS_ENTER,
+                },
+            ],
+            exit_point_args: vec![],
+        };
+        apply_filter_groups(&mut point, &[filter_name_of(str_index)]).unwrap();
+        assert_eq!(point.enter_point_args[0].filter_index_list, vec![str_index]);
+        assert!(point.enter_point_args[1].filter_index_list.is_empty());
     }
 }

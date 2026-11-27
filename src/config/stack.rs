@@ -24,7 +24,7 @@ pub const MAX_UPROBE_PROGRAMS: usize = 6;
 /// `--full-tname/-f` and hard-wrote `trace_uid_group = 0xFF`. All of those
 /// filters now live here, and [`crate::module::StackProbeModule`] writes exactly
 /// the maps upstream `MStack.updateFilter()` (`stack.go:381-390`) writes.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct StackConfig {
     // ---- filter lists (mirrors `ModuleConfig`, dev `config_module.go`) ----
     /// `-u/--uid` whitelist. Dev semantics: a list, so `-u 0` means "root only".
@@ -68,20 +68,42 @@ pub struct StackConfig {
     pub tkill_signal: u32,
 }
 
-impl StackConfig {
-    /// Default-constructed config with the CLI buffer default filled in.
-    /// Mirrors `SyscallConfig::with_table` (`config/syscall.rs`), which sets
-    /// `buffer_mb: 8` (the `-b/--buffer` default, `cli/args.rs`). H12: a
-    /// bare `StackConfig::default()` leaves `buffer_mb` at 0, which only
-    /// fails later at runtime (`perf_pages` bails "buffer size must be at
-    /// least 1 MiB") — build from here when no CLI value overrides it. The
-    /// only real caller (`cli/stack_cmd.rs:build_stack_config`) fills
-    /// `buffer_mb` from `global.buffer`, so it is unaffected.
-    pub fn with_defaults() -> Self {
+impl Default for StackConfig {
+    /// K2: a bare `StackConfig::default()` carries the CLI `-b/--buffer`
+    /// default (`buffer_mb: 8`, `cli/args.rs`; mirrors
+    /// `SyscallConfig::with_table`), so building from `Default` can never
+    /// silently produce a zero-size perf ring. A `0` buffer is now only
+    /// reachable explicitly and is rejected by [`StackConfig::validate`].
+    fn default() -> Self {
         Self {
+            uid_whitelist: Vec::new(),
+            uid_blacklist: Vec::new(),
+            pid_whitelist: Vec::new(),
+            pid_blacklist: Vec::new(),
+            tid_whitelist: Vec::new(),
+            tid_blacklist: Vec::new(),
+            tname_whitelist: Vec::new(),
+            tname_blacklist: Vec::new(),
+            full_tname: false,
+            trace_uid_group: 0,
             buffer_mb: 8,
-            ..Default::default()
+            trace_mode: 0,
+            kill_signal: 0,
+            tkill_signal: 0,
         }
+    }
+}
+
+impl StackConfig {
+    /// K2: reject a config whose `buffer_mb` was never set (0). This fails at
+    /// validation time with a message that says the buffer is missing, instead
+    /// of letting `perf_pages` bail later with the generic "buffer size must be
+    /// at least 1 MiB" text far away from the construction point.
+    pub fn validate(&self) -> Result<()> {
+        if self.buffer_mb == 0 {
+            bail!("buffer size is not set: pass -b/--buffer (MiB, default 8)");
+        }
+        Ok(())
     }
 
     /// The default thread blacklist for this run.
@@ -519,13 +541,33 @@ mod tests {
         assert_eq!(conf.child_parent_pairs(), vec![(11, 11), (22, 22)]);
     }
 
-    /// H12: `with_defaults()` carries the CLI buffer default (`buffer_mb`
-    /// 8, like `SyscallConfig::with_table`); a bare `Default` leaves it 0,
-    /// which is the footgun this constructor closes.
+    /// K2: `Default` itself carries the CLI buffer default (8 MiB), and the
+    /// only way to get a `0` buffer is an explicit struct literal, which
+    /// `validate` rejects.
     #[test]
-    fn with_defaults_carries_the_cli_buffer_default() {
-        assert_eq!(StackConfig::default().buffer_mb, 0);
-        let conf = StackConfig::with_defaults();
-        assert_eq!(conf.buffer_mb, 8);
+    fn default_carries_the_cli_buffer_default() {
+        assert_eq!(StackConfig::default().buffer_mb, 8);
+        assert!(StackConfig::default().validate().is_ok());
+    }
+
+    /// K2: `buffer_mb = 0` fails at validation with a message that says the
+    /// buffer was never set — not the late `perf_pages` "at least 1 MiB" text.
+    #[test]
+    fn validate_rejects_zero_buffer_with_clear_message() {
+        let conf = StackConfig {
+            buffer_mb: 0,
+            ..Default::default()
+        };
+        let err = conf.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("buffer"), "{msg}");
+        assert!(
+            msg.contains("not set"),
+            "must say the buffer was left unset: {msg}"
+        );
+        assert!(
+            !msg.contains("1 MiB"),
+            "must not be the perf_pages text: {msg}"
+        );
     }
 }

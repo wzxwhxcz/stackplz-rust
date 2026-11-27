@@ -69,8 +69,9 @@ pub enum OpCode {
 }
 
 // Pins the `transmute` in `OpCode::from_u32`: the variant range is contiguous
-// 233..=266. Inserting/reordering a member moves `SavePtrString16` and makes
-// this a build error instead of silent UB.
+// 233..=266. This only catches additions/removals: swapping two middle members
+// leaves both endpoints fixed and would slip through — the per-variant wire
+// values are pinned by `opcode_values_match_c_enum` in the tests below.
 const _: () = assert!(OpCode::Skip as u32 == 233 && OpCode::SavePtrString16 as u32 == 266);
 
 impl OpCode {
@@ -92,7 +93,7 @@ impl OpCode {
 }
 
 /// `enum arg_type_e` — the *BaseType* category of an argument type. Mirrors the
-/// C enum in `types.h` (41 members). Note this is distinct from the userspace
+/// C enum in `types.h` (40 members). Note this is distinct from the userspace
 /// `TypeIndex` registry (see argtype).
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -216,10 +217,94 @@ mod tests {
         assert_eq!(OpCode::SaveStruct as u32, 233 + 24);
     }
 
+    /// L1: every `OpCode` variant is pinned to its wire value, mirroring
+    /// `ebpf/types.h` `enum op_code_e` (`OP_SKIP = 233` ..
+    /// `OP_SAVE_PTR_STRING16 = 266`). The compile-time assert above only guards
+    /// additions/removals; these asserts are what catch a middle-member swap
+    /// (e.g. `FilterValue` ↔ `SaveString`, which would silently mis-wire the
+    /// kernel VM).
     #[test]
-    fn arg_type_enum_count_matches_c() {
-        // 40 members: None=0 .. Buffer=39.
+    fn opcode_values_match_c_enum() {
+        assert_eq!(OpCode::Skip as u32, 233);
+        assert_eq!(OpCode::ResetCtx as u32, 234);
+        assert_eq!(OpCode::SetRegIndex as u32, 235);
+        assert_eq!(OpCode::SetReadLen as u32, 236);
+        assert_eq!(OpCode::SetReadLenRegValue as u32, 237);
+        assert_eq!(OpCode::SetReadLenPointerValue as u32, 238);
+        assert_eq!(OpCode::SetReadCount as u32, 239);
+        assert_eq!(OpCode::AddOffset as u32, 240);
+        assert_eq!(OpCode::SubOffset as u32, 241);
+        assert_eq!(OpCode::MoveRegValue as u32, 242);
+        assert_eq!(OpCode::MovePointerValue as u32, 243);
+        assert_eq!(OpCode::MoveTmpValue as u32, 244);
+        assert_eq!(OpCode::SetTmpValue as u32, 245);
+        assert_eq!(OpCode::ForBreak as u32, 246);
+        assert_eq!(OpCode::SetBreakCount as u32, 247);
+        assert_eq!(OpCode::SetBreakCountRegValue as u32, 248);
+        assert_eq!(OpCode::SetBreakCountPointerValue as u32, 249);
+        assert_eq!(OpCode::SaveAddr as u32, 250);
+        assert_eq!(OpCode::AddReg as u32, 251);
+        assert_eq!(OpCode::SubReg as u32, 252);
+        assert_eq!(OpCode::ReadReg as u32, 253);
+        assert_eq!(OpCode::SaveReg as u32, 254);
+        assert_eq!(OpCode::ReadPointer as u32, 255);
+        assert_eq!(OpCode::SavePointer as u32, 256);
+        assert_eq!(OpCode::SaveStruct as u32, 257);
+        assert_eq!(OpCode::FilterValue as u32, 258);
+        assert_eq!(OpCode::FilterBuffer as u32, 259);
+        assert_eq!(OpCode::FilterString as u32, 260);
+        assert_eq!(OpCode::SaveString as u32, 261);
+        assert_eq!(OpCode::SavePtrString as u32, 262);
+        assert_eq!(OpCode::ReadStdString as u32, 263);
+        assert_eq!(OpCode::ReadIl2cppString as u32, 264);
+        assert_eq!(OpCode::SaveString16 as u32, 265);
+        assert_eq!(OpCode::SavePtrString16 as u32, 266);
+    }
+
+    /// M2: every `ArgType` variant is pinned to its wire value, mirroring
+    /// `ebpf/types.h` `enum arg_type_e` (`TYPE_NONE = 0` .. `TYPE_BUFFER =
+    /// 39`).
+    #[test]
+    fn arg_type_values_match_c_enum() {
         assert_eq!(ArgType::None as u32, 0);
+        assert_eq!(ArgType::Num as u32, 1);
+        assert_eq!(ArgType::ExpInt as u32, 2);
+        assert_eq!(ArgType::Int as u32, 3);
+        assert_eq!(ArgType::Uint as u32, 4);
+        assert_eq!(ArgType::Int8 as u32, 5);
+        assert_eq!(ArgType::Int16 as u32, 6);
+        assert_eq!(ArgType::Uint8 as u32, 7);
+        assert_eq!(ArgType::Uint16 as u32, 8);
+        assert_eq!(ArgType::Int32 as u32, 9);
+        assert_eq!(ArgType::Uint32 as u32, 10);
+        assert_eq!(ArgType::Int64 as u32, 11);
+        assert_eq!(ArgType::Uint64 as u32, 12);
+        assert_eq!(ArgType::String as u32, 13);
+        assert_eq!(ArgType::StringArr as u32, 14);
+        assert_eq!(ArgType::Pointer as u32, 15);
+        assert_eq!(ArgType::Struct as u32, 16);
+        assert_eq!(ArgType::Timespec as u32, 17);
+        assert_eq!(ArgType::Stat as u32, 18);
+        assert_eq!(ArgType::Statfs as u32, 19);
+        assert_eq!(ArgType::Sigaction as u32, 20);
+        assert_eq!(ArgType::Utsname as u32, 21);
+        assert_eq!(ArgType::Sockaddr as u32, 22);
+        assert_eq!(ArgType::Rusage as u32, 23);
+        assert_eq!(ArgType::Iovec as u32, 24);
+        assert_eq!(ArgType::EpollEvent as u32, 25);
+        assert_eq!(ArgType::Sigset as u32, 26);
+        assert_eq!(ArgType::Pollfd as u32, 27);
+        assert_eq!(ArgType::Sysinfo as u32, 28);
+        assert_eq!(ArgType::Siginfo as u32, 29);
+        assert_eq!(ArgType::Msghdr as u32, 30);
+        assert_eq!(ArgType::Itimerspec as u32, 31);
+        assert_eq!(ArgType::StackT as u32, 32);
+        assert_eq!(ArgType::Timeval as u32, 33);
+        assert_eq!(ArgType::Timezone as u32, 34);
+        assert_eq!(ArgType::PthreadAttr as u32, 35);
+        assert_eq!(ArgType::Array as u32, 36);
+        assert_eq!(ArgType::ArrayInt32 as u32, 37);
+        assert_eq!(ArgType::ArrayUint32 as u32, 38);
         assert_eq!(ArgType::Buffer as u32, 39);
     }
 

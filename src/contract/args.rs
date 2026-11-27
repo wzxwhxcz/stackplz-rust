@@ -3,18 +3,17 @@
 //! After the fixed 56-byte `EventContext` header, a perf record carries a
 //! variable-length **TLV (tag-length-value) args blob** produced by the eBPF
 //! helper functions in `ebpf/common/buffer.h`. Each appended arg starts with a
-//! `u8 index` (the positional arg slot) and one of three payload encodings:
+//! `u8 index` (the positional arg slot) and one of the payload encodings:
 //!
-//! | writer (C)            | on-wire shape                  | used for                |
-//! |-----------------------|--------------------------------|-------------------------|
-//! | `save_to_submit_buf`  | `[index][raw bytes]`           | regs, sysno, fixed nums |
-//! | `save_bytes_to_buf`   | `[index][i32 size][bytes]`     | buffers, structs, utf16 |
-//! | `save_str_to_buf`     | `[index][i32 size][bytes]`     | ASCII strings           |
-//! | `save_str_arr_to_buf` | `[index][u8 count]{[i32 sz][str]...}` | argv/envp           |
+//! | writer (C)           | on-wire shape                  | used for                |
+//! |----------------------|-------------------------------|-------------------------|
+//! | `save_to_submit_buf` | `[index][raw bytes]`          | regs, sysno, fixed nums |
+//! | `save_bytes_to_buf`  | `[index][i32 size][bytes]`    | buffers, structs, utf16 |
+//! | `save_str_to_buf`    | `[index][i32 size][bytes]`    | ASCII strings           |
 //!
-//! For the length-prefixed forms, a `size` of `STRARR_MAGIC_LEN = 0xffff0000`
-//! marks a truncated string-array element (the reader stops iterating that
-//! array's elements at that point).
+//! `save_str_arr_to_buf` (`[index][u8 count]{[i32 sz][str]...}`) has no
+//! reader: it is not emitted by any op in the interpreter, so argv/envp have
+//! no wire shape here (deleted with R11-11; add a reader only with a real op).
 //!
 //! The reader does NOT know each arg's expected width on its own — the fixed
 //! `save_to_submit_buf` entries (sysno=u32, lr/sp/pc=u64) are consumed by the
@@ -22,34 +21,14 @@
 //! module provides a low-level cursor that yields raw `[index] -> &[u8]` slices
 //! plus typed helpers, leaving interpretation to higher layers.
 
-use crate::contract::consts::STRARR_MAGIC_LEN;
 use anyhow::{anyhow, Result};
-
-/// One decoded TLV arg: the index slot plus the raw payload bytes (after the
-/// index byte and any length prefix). The original writer is recoverable from
-/// the shape, but here we keep it minimal: callers know their expected shape.
-#[derive(Debug, Clone)]
-pub struct ArgEntry<'a> {
-    /// The positional arg index (the `[u8 index]` byte).
-    pub index: u8,
-    /// Raw payload bytes following the index (and any length prefix).
-    pub data: &'a [u8],
-}
-
-/// A decoded string-array element. `size == STRARR_MAGIC_LEN` means truncated.
-#[derive(Debug, Clone)]
-pub struct StrArrElem<'a> {
-    pub size: i32,
-    pub bytes: &'a [u8],
-    pub truncated: bool,
-}
 
 /// Low-level TLV cursor over the args blob.
 ///
 /// Construct with [`ArgsCursor::new`] (the slice is everything after the
-/// 56-byte `EventContext` header). Each [`Self::next_raw`] /
-/// [`Self::next_length_prefixed`] / [`Self::next_string_array`] consumes one
-/// entry. There is no requirement that all entries share a shape — the eBPF
+/// 56-byte `EventContext` header). Each [`Self::next_raw_borrow`] /
+/// [`Self::next_length_prefixed`] / [`Self::next_bytes`] consumes one entry.
+/// There is no requirement that all entries share a shape — the eBPF
 /// programs interleave fixed and variable entries; callers consume them in the
 /// order the kernel wrote them (sysno, lr, sp, pc, then argtype-driven args).
 pub struct ArgsCursor<'a> {
@@ -70,31 +49,6 @@ impl<'a> ArgsCursor<'a> {
     /// Wrap the args blob (the bytes after `EventContext`).
     pub fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
-    }
-
-    /// Current byte offset (for diagnostics).
-    pub fn position(&self) -> usize {
-        self.pos
-    }
-
-    /// Bytes remaining unread.
-    pub fn remaining(&self) -> &'a [u8] {
-        &self.buf[self.pos..]
-    }
-
-    /// True if the whole blob has been consumed.
-    pub fn is_empty(&self) -> bool {
-        self.pos >= self.buf.len()
-    }
-
-    /// Consume a `save_to_submit_buf` entry: `[u8 index][raw bytes; n]`.
-    ///
-    /// `n` is the fixed byte count the caller expects for this index (e.g. 4
-    /// for sysno, 8 for a register). Returns the index and the `n` bytes.
-    pub fn next_raw(&mut self, n: usize) -> Result<ArgEntry<'a>> {
-        let index = self.read_u8()?;
-        let data = self.read_bytes(n)?;
-        Ok(ArgEntry { index, data })
     }
 
     /// Consume a `save_to_submit_buf` entry without copying: returns the index
@@ -134,40 +88,6 @@ impl<'a> ArgsCursor<'a> {
         let n = if size < 0 { 0 } else { size as usize };
         let data = self.read_bytes(n)?;
         Ok((index, size, data))
-    }
-
-    /// Consume a `save_str_arr_to_buf` entry: `[u8 index][u8 count]` followed
-    /// by `count` elements of `[i32 sz][bytes; sz]`. An element whose `sz` is
-    /// `STRARR_MAGIC_LEN` is truncated and ends iteration early.
-    pub fn next_string_array(&mut self) -> Result<(u8, Vec<StrArrElem<'a>>)> {
-        let index = self.read_u8()?;
-        let count = self.read_u8()?;
-        let mut elems = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            let sz = self.read_i32()?;
-            // `sz` is read as a LE i32, but the kernel writes the magic length
-            // as a u32 bit pattern; `sz as u32` is a bit-reinterpretation that
-            // keeps all 32 bits, so the comparison holds whether the magic
-            // would sign-interpret as negative or not. This depends on
-            // STRARR_MAGIC_LEN (u32) matching the kernel's on-wire value.
-            if (sz as u32) == STRARR_MAGIC_LEN {
-                // Truncated element: the kernel writes the magic and stops.
-                elems.push(StrArrElem {
-                    size: sz,
-                    bytes: &[],
-                    truncated: true,
-                });
-                break;
-            }
-            let n = if sz < 0 { 0 } else { sz as usize };
-            let bytes = self.read_bytes(n)?;
-            elems.push(StrArrElem {
-                size: sz,
-                bytes,
-                truncated: false,
-            });
-        }
-        Ok((index, elems))
     }
 
     // ---- LE primitives ----------------------------------------------------
@@ -225,15 +145,6 @@ mod tests {
         v
     }
 
-    fn sa_entry(index: u8, elems: &[&[u8]]) -> Vec<u8> {
-        let mut v = vec![index, elems.len() as u8];
-        for e in elems {
-            v.extend_from_slice(&(e.len() as i32).to_le_bytes());
-            v.extend_from_slice(e);
-        }
-        v
-    }
-
     #[test]
     fn raw_entry_roundtrip() {
         // sysno (u32) at index 0, lr (u64) at index 1 — as the kernel emits.
@@ -247,7 +158,8 @@ mod tests {
         let (i1, lr) = c.next_raw_borrow(8).unwrap();
         assert_eq!(i1, 1);
         assert_eq!(u64::from_le_bytes(lr.try_into().unwrap()), 0x4000);
-        assert!(c.is_empty());
+        // Everything consumed: the next read underflows.
+        assert!(c.next_raw_borrow(1).is_err());
     }
 
     #[test]
@@ -270,57 +182,23 @@ mod tests {
         assert_eq!(idx, 5);
         assert_eq!(sz, 0);
         assert!(data.is_empty());
-        assert!(c.is_empty());
-    }
-
-    #[test]
-    fn string_array_roundtrip() {
-        let mut blob = Vec::new();
-        blob.extend_from_slice(&sa_entry(7, &[b"/bin/sh", b"-c", b"ls"]));
-        let mut c = ArgsCursor::new(&blob);
-        let (idx, elems) = c.next_string_array().unwrap();
-        assert_eq!(idx, 7);
-        assert_eq!(elems.len(), 3);
-        assert_eq!(elems[0].bytes, b"/bin/sh");
-        assert_eq!(elems[1].bytes, b"-c");
-        assert_eq!(elems[2].bytes, b"ls");
-        assert!(!elems[0].truncated);
-    }
-
-    #[test]
-    fn string_array_stops_at_truncated_element() {
-        // Kernel writes the STRARR_MAGIC_LEN as the size of a truncated tail
-        // element. The reader must stop and mark it truncated.
-        let mut blob = vec![8u8, 3]; // index=8, count=3
-        blob.extend_from_slice(&7i32.to_le_bytes());
-        blob.extend_from_slice(b"/bin/sh");
-        blob.extend_from_slice(&STRARR_MAGIC_LEN.to_le_bytes());
-        // no further bytes (the magic terminates the array)
-        let mut c = ArgsCursor::new(&blob);
-        let (idx, elems) = c.next_string_array().unwrap();
-        assert_eq!(idx, 8);
-        assert_eq!(elems.len(), 2);
-        assert_eq!(elems[0].bytes, b"/bin/sh");
-        assert!(elems[1].truncated);
+        // Header consumed; nothing left to read.
+        assert!(c.next_length_prefixed().is_err());
     }
 
     #[test]
     fn interleaved_shapes_consume_in_order() {
-        // sysno(raw u32), lr(raw u64), a string(length-prefixed), an argv(array).
+        // sysno(raw u32), lr(raw u64), a string(length-prefixed).
         let mut blob = Vec::new();
         blob.extend_from_slice(&raw_entry(0, &63u32.to_le_bytes()));
         blob.extend_from_slice(&raw_entry(1, &0x10u64.to_le_bytes()));
         blob.extend_from_slice(&lp_entry(4, b"path"));
-        blob.extend_from_slice(&sa_entry(5, &[b"a", b"b"]));
         let mut c = ArgsCursor::new(&blob);
         let _ = c.next_raw_borrow(4).unwrap();
         let _ = c.next_raw_borrow(8).unwrap();
         let (i, _, d) = c.next_length_prefixed().unwrap();
         assert_eq!((i, d), (4, b"path".as_ref()));
-        let (i, e) = c.next_string_array().unwrap();
-        assert_eq!(i, 5);
-        assert_eq!(e.len(), 2);
-        assert!(c.is_empty());
+        assert!(c.next_length_prefixed().is_err());
     }
 
     #[test]

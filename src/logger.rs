@@ -230,6 +230,7 @@ fn local_utc_offset_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn logger_formats_prefix_and_time() {
@@ -333,5 +334,52 @@ mod tests {
             Logger::dropped_lines_warning(7).as_deref(),
             Some("warning: dropped 7 log lines")
         );
+    }
+
+    /// Round 12 / R11-9: one shared Logger with one `set_out_file` call — two
+    /// threads write concurrently (the dual-module `-o` case) and all 100
+    /// lines land intact: no truncation/unlink of the other writer's output,
+    /// no torn lines (the inner Mutex serializes writes).
+    #[test]
+    fn shared_logger_concurrent_writes_keep_all_lines() {
+        let dir =
+            std::env::temp_dir().join(format!("stackplz-logger-shared-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trace.log");
+        let logger = Arc::new(Logger::new("", false));
+        logger
+            .set_out_file(&dir.to_string_lossy(), "trace.log", true)
+            .unwrap();
+
+        let mut handles = Vec::new();
+        for tag in ["A", "B"] {
+            let logger = Arc::clone(&logger);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..50 {
+                    logger.println(&format!("{tag}-{i}"));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content.lines().count(),
+            100,
+            "all 100 lines must be present"
+        );
+        for tag in ["A", "B"] {
+            for i in 0..50 {
+                let want = format!("{tag}-{i}");
+                assert!(
+                    content.lines().any(|l| l == want.as_str()),
+                    "missing intact line {want}"
+                );
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
     }
 }

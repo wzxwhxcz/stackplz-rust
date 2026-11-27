@@ -31,7 +31,7 @@ use crate::config::{GlobalConfig, TargetConfig};
 use args::Cli;
 use clap::Parser;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 /// Exit codes. Upstream dev has two failure classes:
 /// - `panic` on bad input (Go runtime exits **2**),
@@ -248,6 +248,29 @@ impl ModuleKind {
     }
 }
 
+/// Decide what one module-completion message means (round 12 / R11-4): a
+/// trace module never legitimately ends on its own, so an Ok completion is a
+/// failure too — unless we were interrupted (Ctrl-C), the only clean stop.
+/// Pure, so the run_modules wait loop is testable without threads or channels.
+/// Returns `None` when the run should end cleanly, else the error to surface.
+fn handle_module_completion(
+    name: &str,
+    error: Option<String>,
+    interrupt: bool,
+) -> Option<RunError> {
+    if interrupt {
+        return None;
+    }
+    match error {
+        Some(e) => Some(RunError::Module(format!(
+            "{name}\tmodule Run failed, [skip it]. error:{e}"
+        ))),
+        None => Some(RunError::Module(format!(
+            "{name}\tmodule stopped without a signal, [skip it]"
+        ))),
+    }
+}
+
 /// Start every selected module and block until a signal or a module failure.
 ///
 /// Upstream starts the modules from the main goroutine and `os.Exit(1)`s when
@@ -255,6 +278,12 @@ impl ModuleKind {
 /// its own thread (both modules block in their poll loop) and a failure is
 /// forwarded to the main thread, which returns `RunError::Module` — i.e. the
 /// process exits instead of waiting forever (report §4.6 / W18).
+///
+/// Round 12: one shared `Logger` (R11-9: two Loggers on the same `-o` path
+/// truncated/unlinked each other's file), one shared `ConsoleResume`
+/// (R11-5: a single stdin `c` resumes both modules), and every module exit —
+/// Ok or Err — is reported to the wait loop (R11-4: a poll-error Ok exit
+/// used to vanish until the other module finished too).
 fn run_modules(
     modules: Vec<ModuleKind>,
     global: &GlobalConfig,
@@ -264,7 +293,16 @@ fn run_modules(
     w_points: Option<(String, Vec<crate::config::UprobeArgs>)>,
 ) -> Result<(), RunError> {
     install_signal_handler();
-    let (tx, rx) = mpsc::channel::<(String, String)>();
+
+    let logger = Arc::new(crate::logger::Logger::new("", true));
+    if !global.log_file.is_empty() {
+        logger
+            .set_out_file(&global.exec_path, &global.log_file, global.quiet)
+            .map_err(|e| RunError::Module(format!("failed to open log file: {e:#}")))?;
+    }
+    let resume = Arc::new(crate::signal::ConsoleResume::new());
+
+    let (tx, rx) = mpsc::channel::<(String, Option<String>)>();
     let module_count = modules.len();
 
     for kind in modules {
@@ -274,27 +312,37 @@ fn run_modules(
         let table = table.clone();
         let selection = selection.clone();
         let w_points = w_points.clone();
+        let logger = Arc::clone(&logger);
+        let resume = Arc::clone(&resume);
         let name = kind.name();
         std::thread::Builder::new()
             .name(name.to_string())
             .spawn(move || {
                 let result = match kind {
-                    ModuleKind::Syscall => syscall_cmd::run(&global, &target, table, selection),
-                    ModuleKind::Stack => stack_cmd::run(&global, &target, w_points.clone()),
-                };
-                if let Err(e) = result {
-                    if tx.send((name.to_string(), format!("{e:#}"))).is_err() {
-                        // The main loop already returned (e.g. after
-                        // INTERRUPTED), so the receiver is gone and this
-                        // module error would vanish silently. Narrow window:
-                        // only reachable once the receiver is dropped.
-                        eprintln!("module {name} failed after shutdown: {e:#}");
+                    ModuleKind::Syscall => {
+                        syscall_cmd::run(&global, &target, table, selection, logger, resume)
                     }
+                    ModuleKind::Stack => {
+                        stack_cmd::run(&global, &target, w_points.clone(), logger, resume)
+                    }
+                };
+                // Report every exit, Ok or Err (R11-4): the wait loop treats
+                // any non-interrupt completion as a failure.
+                let err = result.err().map(|e| format!("{e:#}"));
+                if let Err(mpsc::SendError((_, Some(e)))) = tx.send((name.to_string(), err)) {
+                    // The main loop already returned (e.g. after
+                    // INTERRUPTED), so the receiver is gone and this module
+                    // error would vanish silently. Narrow window: only
+                    // reachable once the receiver is dropped.
+                    eprintln!("module {name} failed after shutdown: {e}");
                 }
             })
             .map_err(|e| RunError::Module(format!("failed to spawn {name} module: {e}")))?;
     }
     drop(tx);
+
+    // One stdin reader feeding every module's SignalManager (R11-5).
+    crate::signal::spawn_console_resume(resume);
 
     // `start N modules` banner (dev `root.go:417`).
     println!("start {module_count} modules");
@@ -305,17 +353,22 @@ fn run_modules(
         }
         match rx.recv_timeout(std::time::Duration::from_millis(200)) {
             Ok((name, error)) => {
-                // dev: "module Run failed, [skip it]" then os.Exit(1).
-                return Err(RunError::Module(format!(
-                    "{name}\tmodule Run failed, [skip it]. error:{error}"
-                )));
+                if let Some(err) =
+                    handle_module_completion(&name, error, INTERRUPTED.load(Ordering::SeqCst))
+                {
+                    // Stop the other module before returning (R11-4): a trace
+                    // module ends on its own only through an error or a poll
+                    // failure, and neither is a success.
+                    INTERRUPTED.store(true, Ordering::SeqCst);
+                    return Err(err);
+                }
+                return Ok(());
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // Every module thread ended without reporting an error. For a
-                // trace loop that is not a success: both `run()` bodies only
-                // return once their poll loop breaks, so reaching here without
-                // an interrupt means a module stopped on its own.
+                // Every module thread ended without sending a completion
+                // (panicked before the send) — not a success: a trace loop
+                // only ends on a signal or a module failure.
                 return Err(RunError::Module(
                     "all modules stopped without a signal, [skip it]".into(),
                 ));
@@ -488,5 +541,36 @@ mod tests {
         );
         assert_eq!(merge_syscall_spec("", &[]), "");
         assert_eq!(merge_syscall_spec("read", &[]), "read");
+    }
+
+    /// Round 12 / R11-4: a module that exits Ok (the K1 poll-error exit)
+    /// without an interrupt is a failure — the single-module Disconnected
+    /// fact generalizes to either module finishing.
+    #[test]
+    fn ok_module_completion_without_interrupt_is_failure() {
+        let err = handle_module_completion("StackMod", None, false).expect("must fail");
+        let msg = err.message();
+        assert!(msg.contains("StackMod"), "{msg}");
+        assert!(msg.contains("stopped without a signal"), "{msg}");
+    }
+
+    /// Round 12 / R11-4: an error completion keeps dev's exact failure
+    /// wording (`root.go:405`: `module Run failed, [skip it]`).
+    #[test]
+    fn error_module_completion_reports_error_text() {
+        let err = handle_module_completion("SyscallMod", Some("perf poll failed".into()), false)
+            .expect("must fail");
+        let msg = err.message();
+        assert!(msg.contains("SyscallMod"), "{msg}");
+        assert!(msg.contains("module Run failed, [skip it]"), "{msg}");
+        assert!(msg.contains("perf poll failed"), "{msg}");
+    }
+
+    /// Round 12 / R11-4: after Ctrl-C (interrupt) a completion is clean —
+    /// Ok or Err — the process exits 0, not with a module failure.
+    #[test]
+    fn module_completion_after_interrupt_is_clean() {
+        assert!(handle_module_completion("StackMod", None, true).is_none());
+        assert!(handle_module_completion("StackMod", Some("x".into()), true).is_none());
     }
 }

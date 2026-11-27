@@ -389,10 +389,10 @@ pub fn parse_hook_point(
         hook_point.lib_path = lib_path.to_string();
         hook_point.name = symbol_or_off.clone();
 
-        if let Some(rest) = symbol_or_off
-            .strip_prefix("0x")
-            .or_else(|| symbol_or_off.strip_prefix("0X"))
-        {
+        // R11-2 offset policy: only lowercase `0x` marks an offset (matches
+        // `is_offset_marker` in `stack_cmd.rs`); `0X…` falls through to the
+        // symbol path, like Go's `strings.HasPrefix(..., "0x")`.
+        if let Some(rest) = symbol_or_off.strip_prefix("0x") {
             hook_point.offset = u64::from_str_radix(rest, 16)
                 .map_err(|e| anyhow!("parse offset {symbol_or_off} failed: {e}"))?;
             hook_point.symbol = String::new();
@@ -402,10 +402,9 @@ pub fn parse_hook_point(
 
         // Additional +0xNN offset suffix
         if let Some(off_str) = offset_suffix {
-            if let Some(rest) = off_str
-                .strip_prefix("+0x")
-                .or_else(|| off_str.strip_prefix("+0X"))
-            {
+            // Only lowercase +0x is an offset marker (R11-2 policy; the regex
+            // below never produces a +0X suffix either).
+            if let Some(rest) = off_str.strip_prefix("+0x") {
                 hook_point.offset = u64::from_str_radix(rest, 16)
                     .map_err(|e| anyhow!("parse offset suffix {off_str} failed: {e}"))?;
             }
@@ -440,8 +439,6 @@ pub fn parse_hook_point(
                 );
             }
             let exit_point = points[point_idx].get_exit_point(exit_idx);
-            // Mark the original's enter_key
-            points[point_idx].enter_key = points[point_idx].index + 1;
             points.push(exit_point);
         }
     }
@@ -465,11 +462,12 @@ fn parse_point_regex(s: &str) -> Result<(String, Option<String>, Option<String>)
     }
     let symbol: String = chars[start..pos].iter().collect();
 
-    // Group 2: optional +0x[hex]+
+    // Group 2: optional +0x[hex]+ (only lowercase `x` per the R11-2 offset
+    // policy — `+0X` is not an offset marker).
     let offset_suffix = if pos + 3 < chars.len()
         && chars[pos] == '+'
         && chars[pos + 1] == '0'
-        && (chars[pos + 2] == 'x' || chars[pos + 2] == 'X')
+        && chars[pos + 2] == 'x'
     {
         let off_start = pos;
         pos += 3; // skip +0x
@@ -747,5 +745,33 @@ mod tests {
         // Original + exit point = 2
         assert_eq!(points.len(), 2);
         assert_eq!(points[1].offset, 0x40);
+    }
+
+    /// Round 12 / R11-6: the companion exit point copies the main point's
+    /// `enter_key` (`main.Index + 1`), stamped *before* the clone — both points
+    /// must carry 1 here, so the C handler pairs the exit event with the
+    /// registers saved on enter. The old code cloned first (companion got 0)
+    /// and assigned the main point's key afterwards.
+    #[test]
+    fn exit_point_enter_key_matches_main_point() {
+        ensure_init();
+        let points = hp("write[int]0x40");
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].enter_key, 1, "main point enter_key = index + 1");
+        assert_eq!(
+            points[1].enter_key, 1,
+            "companion copies the main enter_key"
+        );
+        assert_eq!(points[1].index, 1);
+    }
+
+    /// Round 12 / R11-6: without an explicit exit offset there is no companion
+    /// point and no `enter_key` is stamped.
+    #[test]
+    fn no_exit_offset_leaves_enter_key_zero() {
+        ensure_init();
+        let points = hp("write[int,int,int]");
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].enter_key, 0);
     }
 }

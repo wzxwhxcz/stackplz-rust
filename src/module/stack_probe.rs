@@ -11,7 +11,7 @@ use crate::config::{ProbeConfig, SConfig, StackConfig, UprobeArgs};
 use crate::logger::Logger;
 use crate::module::syscall_tracepoint::{account_lost, poll_until_stop};
 use crate::signal::{
-    auto_resume_after_event, record_stopped_after_event, spawn_console_resume, SignalManager,
+    auto_resume_after_event, record_stopped_after_event, ConsoleResume, SignalManager,
 };
 use anyhow::{anyhow, bail, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -110,7 +110,7 @@ impl StackProbeModule {
 
     /// Run the module until cancelled / an error occurs.
     #[cfg(target_os = "linux")]
-    pub fn run(self, logger: Arc<Logger>) -> Result<()> {
+    pub fn run(self, logger: Arc<Logger>, resume: Arc<ConsoleResume>) -> Result<()> {
         use crate::ebpf::bpf_common;
 
         let conf = self.effective_stack_config();
@@ -322,8 +322,10 @@ impl StackProbeModule {
             .build()?;
 
         // Round 9 / H24: stdin `c` resumes stopped pids (Go `root.go:429`).
-        // One module runs at a time, so one spawn per run() is correct.
-        spawn_console_resume(Arc::clone(&sig_mgr));
+        // Round 11 / R11-5: the console-resume thread moved up to `run_modules`
+        // — one shared reader for all modules, so one `c` resumes every
+        // module. Register this module's manager with that shared reader.
+        resume.register(Arc::clone(&sig_mgr));
 
         // Round 10 / K1: a poll error only stops this reader — Go logs it
         // and shuts down normally (`imodule.go:250-258`); it never fails the
@@ -345,7 +347,7 @@ impl StackProbeModule {
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub fn run(self, _logger: Arc<Logger>) -> Result<()> {
+    pub fn run(self, _logger: Arc<Logger>, _resume: Arc<ConsoleResume>) -> Result<()> {
         Err(anyhow!(
             "{}: BPF runtime requires Linux (this build targets a non-Linux OS)",
             NAME
@@ -422,55 +424,92 @@ fn render_uprobe_event(
     }
 }
 
+/// Full signal-name table (Go's `util.ParseSignal(name)` lookup map: all 35
+/// names, sorted by signal number; synonyms share one entry — CHLD=CLD,
+/// IO=POLL, IOT=ABRT, SYS=UNUSED). Shared by the lenient [`parse_signal_name`]
+/// and the strict dev-config [`parse_signal_name_strict`].
+pub const SIGNAL_TABLE: [(&str, u32); 35] = [
+    ("HUP", 1),
+    ("INT", 2),
+    ("QUIT", 3),
+    ("ILL", 4),
+    ("TRAP", 5),
+    ("ABRT", 6),
+    ("IOT", 6),
+    ("BUS", 7),
+    ("FPE", 8),
+    ("KILL", 9),
+    ("USR1", 10),
+    ("SEGV", 11),
+    ("USR2", 12),
+    ("PIPE", 13),
+    ("ALRM", 14),
+    ("TERM", 15),
+    ("STKFLT", 16),
+    ("CHLD", 17),
+    ("CLD", 17),
+    ("CONT", 18),
+    ("STOP", 19),
+    ("TSTP", 20),
+    ("TTIN", 21),
+    ("TTOU", 22),
+    ("URG", 23),
+    ("XCPU", 24),
+    ("XFSZ", 25),
+    ("VTALRM", 26),
+    ("PROF", 27),
+    ("WINCH", 28),
+    ("IO", 29),
+    ("POLL", 29),
+    ("PWR", 30),
+    ("SYS", 31),
+    ("UNUSED", 31),
+];
+
+/// Look up a normalized (uppercase, `SIG` prefix stripped) signal name.
+fn signal_from_name(normalized: &str) -> Option<u32> {
+    SIGNAL_TABLE
+        .iter()
+        .find(|(name, _)| *name == normalized)
+        .map(|(_, num)| *num)
+}
+
 /// Parse a signal name (e.g. "SIGSTOP", "SIGABRT") to its numeric value.
 /// Returns 0 for empty/unrecognized strings.
-/// Mirrors Go's `util.ParseSignal(name)`: the full 35-name table, sorted by
-/// signal number. Synonyms share one arm (CHLD=CLD, IO=POLL, IOT=ABRT,
-/// SYS=UNUSED). Unknown names still return 0, exactly like Go (map lookup
-/// miss yields the zero value) — documented upstream behaviour, not an error.
+/// Mirrors Go's `util.ParseSignal(name)`. Unknown names still return 0,
+/// exactly like Go (map lookup miss yields the zero value) — documented
+/// upstream behaviour, not an error.
 pub fn parse_signal_name(name: &str) -> u32 {
     if name.is_empty() {
         return 0;
     }
     let upper = name.to_uppercase();
     let upper = upper.strip_prefix("SIG").unwrap_or(&upper);
-    match upper {
-        "HUP" => 1,
-        "INT" => 2,
-        "QUIT" => 3,
-        "ILL" => 4,
-        "TRAP" => 5,
-        "ABRT" | "IOT" => 6,
-        "BUS" => 7,
-        "FPE" => 8,
-        "KILL" => 9,
-        "USR1" => 10,
-        "SEGV" => 11,
-        "USR2" => 12,
-        "PIPE" => 13,
-        "ALRM" => 14,
-        "TERM" => 15,
-        "STKFLT" => 16,
-        "CHLD" | "CLD" => 17,
-        "CONT" => 18,
-        "STOP" => 19,
-        "TSTP" => 20,
-        "TTIN" => 21,
-        "TTOU" => 22,
-        "URG" => 23,
-        "XCPU" => 24,
-        "XFSZ" => 25,
-        "VTALRM" => 26,
-        "PROF" => 27,
-        "WINCH" => 28,
-        "IO" | "POLL" => 29,
-        "PWR" => 30,
-        "SYS" | "UNUSED" => 31,
-        _ => {
+    match signal_from_name(upper) {
+        Some(num) => num,
+        None => {
             // Try parsing as a raw number.
             name.parse::<u32>().unwrap_or(0)
         }
     }
+}
+
+/// Strict variant for the dev `-c` config (`dev_point_to_uprobe_args`): an
+/// unknown name bails instead of silently meaning no-signal (0). The numeric
+/// fallback and lowercase acceptance are kept (documented extension vs Go).
+pub fn parse_signal_name_strict(name: &str) -> Result<u32> {
+    if name.is_empty() {
+        return Ok(0);
+    }
+    let upper = name.to_uppercase();
+    let upper = upper.strip_prefix("SIG").unwrap_or(&upper);
+    if let Some(num) = signal_from_name(upper) {
+        return Ok(num);
+    }
+    if let Ok(num) = name.parse::<u32>() {
+        return Ok(num);
+    }
+    bail!("unknown signal: {name}");
 }
 
 #[cfg(test)]
@@ -535,6 +574,28 @@ mod tests {
         assert_eq!(parse_signal_name(""), 0);
         assert_eq!(parse_signal_name("SIGUNKNOWN"), 0); // Go's silent 0
         assert_eq!(parse_signal_name("42"), 42); // raw number
+    }
+
+    /// R11-1: the strict dev-config variant shares the same table but bails on
+    /// unknown names instead of returning 0 (CLI `--kill`/`--tkill` keep the
+    /// lenient parse).
+    #[test]
+    fn signal_table_covers_all_35_names_and_strict_rejects_unknown() {
+        assert_eq!(SIGNAL_TABLE.len(), 35);
+        let mut seen = std::collections::HashSet::new();
+        for (name, _) in SIGNAL_TABLE {
+            assert!(seen.insert(name), "duplicate name {name}");
+        }
+        // Strict keeps the lowercase / SIG-prefix / numeric conveniences.
+        assert_eq!(parse_signal_name_strict("sigstop").unwrap(), 19);
+        assert_eq!(parse_signal_name_strict("SIGSTOP").unwrap(), 19);
+        assert_eq!(parse_signal_name_strict("19").unwrap(), 19);
+        assert_eq!(parse_signal_name_strict("").unwrap(), 0);
+        // Unknown name -> loud error, not silent 0.
+        let err = parse_signal_name_strict("SIGBOGUS").unwrap_err();
+        assert!(format!("{err}").contains("unknown signal"), "{err}");
+        // The lenient path is unchanged.
+        assert_eq!(parse_signal_name("SIGBOGUS"), 0);
     }
 
     /// Without `with_stack_config` the module keeps working from the legacy

@@ -235,7 +235,14 @@ impl UprobeArgs {
     }
 
     /// `GetExitPoint(index)` — create a companion exit-point UprobeArgs.
-    pub fn get_exit_point(&self, index: usize) -> UprobeArgs {
+    ///
+    /// Round 12 / R11-6: the enter key is stamped here so the companion copies
+    /// it — Go writes `this.EnterKey = this.Index + 1` before building the exit
+    /// point (`config_uprobe.go:26-35`); the Rust caller used to assign it
+    /// *after* cloning, so the companion got 0 and exit events never paired
+    /// with the registers saved on enter.
+    pub fn get_exit_point(&mut self, index: usize) -> UprobeArgs {
+        self.enter_key = self.index + 1;
         let mut point = UprobeArgs::new();
         point.index = index as u32;
         point.enter_key = self.enter_key;

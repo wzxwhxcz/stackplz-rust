@@ -105,12 +105,10 @@ pub fn run(
     target: &TargetConfig,
     table: SyscallPointTable,
     selection: SyscallSelection,
+    logger: Arc<crate::logger::Logger>,
+    resume: Arc<crate::signal::ConsoleResume>,
 ) -> Result<()> {
     let conf = build_config(global, target, table, selection)?;
-    let logger = Arc::new(crate::logger::Logger::new("syscall_", true));
-    if !global.log_file.is_empty() {
-        logger.set_out_file(&global.exec_path, &global.log_file, global.quiet)?;
-    }
 
     if global.debug {
         logger.println(&format!("SysCallConf:{}", conf.info()));
@@ -119,16 +117,15 @@ pub fn run(
 
     let lib_path = format!("{}/preload_libs", global.exec_path);
     let module = SyscallTracepointModule::new(conf, lib_path);
-    // Round 7 / F1: keep a handle to the logger (`run()` takes ownership) so
-    // the drop counter can be presented on the exit path. Round 10 / M3: the
-    // warning is presented whether the run succeeded or failed — `finish_run`
-    // prints it before handing `result` back unchanged.
-    let report_logger = logger.clone();
+    // Round 7 / F1: `run()` takes the logger by value, so clone it and keep
+    // this handle for the drop counter. Round 10 / M3: `finish_run` presents
+    // the warning whether the run succeeded or failed — it prints before
+    // handing `result` back unchanged.
     let result = module
-        .run(logger)
+        .run(logger.clone(), resume)
         .map_err(|e| anyhow!("{e:#}"))
         .context("syscall module failed");
-    crate::logger::Logger::finish_run(result, &report_logger)
+    crate::logger::Logger::finish_run(result, &logger)
 }
 
 #[cfg(test)]

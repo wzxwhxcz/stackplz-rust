@@ -9,7 +9,7 @@
 use crate::config::SyscallConfig;
 use crate::logger::Logger;
 use crate::signal::{
-    auto_resume_after_event, record_stopped_after_event, spawn_console_resume, SignalManager,
+    auto_resume_after_event, record_stopped_after_event, ConsoleResume, SignalManager,
 };
 use anyhow::{bail, Context, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,7 +39,7 @@ impl SyscallTracepointModule {
 
     /// Run the module until cancelled / an error occurs.
     #[cfg(not(target_os = "linux"))]
-    pub fn run(self, _logger: Arc<Logger>) -> Result<()> {
+    pub fn run(self, _logger: Arc<Logger>, _resume: Arc<ConsoleResume>) -> Result<()> {
         bail!("{}: Linux-only module", NAME)
     }
 
@@ -92,7 +92,7 @@ impl SyscallTracepointModule {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn run(self, logger: Arc<Logger>) -> Result<()> {
+    pub fn run(self, logger: Arc<Logger>, resume: Arc<ConsoleResume>) -> Result<()> {
         logger.println(&format!("{}: starting syscall runtime", NAME));
 
         // Load eBPF object from embedded bytecode
@@ -120,7 +120,7 @@ impl SyscallTracepointModule {
 
         // Set up perf event polling
         logger.println(&format!("{}: starting event polling", NAME));
-        self.poll_events(&mut obj, logger)?;
+        self.poll_events(&mut obj, logger, resume)?;
 
         Ok(())
     }
@@ -262,13 +262,21 @@ impl SyscallTracepointModule {
             return Ok(());
         }
 
+        // R11-10: compute all keys through the shared range-checked helper
+        // (same rejection as the stack side) so a value that would land in the
+        // next segment — e.g. a whitelist uid >= 0x400000 landing in the
+        // blacklist segment — fails loudly here instead of silently flipping
+        // the filter. Previously `item + offset` wrapped (u32::MAX) or spilled
+        // into the blacklist segment without any error.
+        let keys = crate::ebpf::bpf_common::common_list_keys(items, offset)
+            .with_context(|| format!("invalid {name} entries"))?;
+
         let map = obj
             .maps_mut()
             .find(|m| m.name() == "common_list")
             .context("common_list map not found")?;
 
-        for &item in items {
-            let key = item + offset;
+        for key in keys {
             map.update(&key.to_ne_bytes(), &key.to_ne_bytes(), MapFlags::ANY)
                 .with_context(|| format!("failed to update common_list for {}", name))?;
         }
@@ -435,7 +443,12 @@ impl SyscallTracepointModule {
     }
 
     #[cfg(target_os = "linux")]
-    fn poll_events(&self, obj: &mut Object, logger: Arc<Logger>) -> Result<()> {
+    fn poll_events(
+        &self,
+        obj: &mut Object,
+        logger: Arc<Logger>,
+        resume: Arc<ConsoleResume>,
+    ) -> Result<()> {
         let map = obj
             .maps()
             .find(|m| m.name() == "events")
@@ -508,8 +521,10 @@ impl SyscallTracepointModule {
         logger.println(&format!("{}: polling events (Ctrl-C to stop)", NAME));
 
         // Round 9 / H24: stdin `c` resumes stopped pids (Go `root.go:429`).
-        // One module runs at a time, so one spawn per run() is correct.
-        spawn_console_resume(Arc::clone(&sig_mgr));
+        // Round 11 / R11-5: the console-resume thread moved up to `run_modules`
+        // — one shared reader for all modules, so one `c` resumes every
+        // module. Register this module's manager with that shared reader.
+        resume.register(Arc::clone(&sig_mgr));
 
         // Round 10 / K1 (replaces round 9 / H1): a poll failure is not fatal
         // — Go logs the read error, stops this reader, and shuts down

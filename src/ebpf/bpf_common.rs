@@ -134,6 +134,17 @@ pub fn common_list_key(v: u32, offset: u32) -> Result<u32> {
         })
 }
 
+/// Compute every `common_list` key for one segment (`items` + `offset`), each
+/// via [`common_list_key`]. The syscall side calls this before writing the map
+/// (R11-10) so a bad entry fails loudly instead of aliasing into the next
+/// segment; the stack side validates inline in `write_common_list`.
+pub fn common_list_keys(items: &[u32], offset: u32) -> Result<Vec<u32>> {
+    items
+        .iter()
+        .map(|&item| common_list_key(item, offset))
+        .collect()
+}
+
 // ---- Linux-only libbpf-rs glue -------------------------------------------
 
 #[cfg(target_os = "linux")]
@@ -488,6 +499,61 @@ mod tests {
 
         // u32::MAX as a uid would wrap without checked_add.
         assert!(common_list_key(u32::MAX, c::UID_WHITELIST_START).is_err());
+    }
+
+    /// R11-10: the syscall-side list→keys helper (pure half of
+    /// `update_common_list`) rejects the same escapes as the stack-side
+    /// `write_common_list`, and passes legal values through.
+    #[test]
+    fn common_list_keys_maps_valid_items_and_rejects_escapes() {
+        use crate::contract::consts as c;
+
+        // Legal uid values pass through unchanged.
+        assert_eq!(
+            common_list_keys(&[1000, 99999], c::UID_WHITELIST_START).unwrap(),
+            vec![
+                c::UID_WHITELIST_START + 1000,
+                c::UID_WHITELIST_START + 99999
+            ]
+        );
+        // Boundary value (stride - 1) is the last legal key of its segment.
+        assert_eq!(
+            common_list_keys(&[0x3FFFFF], c::PID_WHITELIST_START).unwrap(),
+            vec![c::PID_BLACKLIST_START - 1]
+        );
+        // Empty list -> empty keys.
+        assert_eq!(
+            common_list_keys(&[], c::UID_WHITELIST_START).unwrap(),
+            Vec::<u32>::new()
+        );
+        // A whitelist item >= stride would land in the next (blacklist)
+        // segment — rejected, not silently aliased.
+        assert!(common_list_keys(&[0x400000], c::UID_WHITELIST_START).is_err());
+        // u32::MAX overflows u32 on add.
+        assert!(common_list_keys(&[u32::MAX], c::UID_WHITELIST_START).is_err());
+    }
+
+    /// R11-10 dual-module consistency: the same `-u 5000000` global config is
+    /// rejected by the stack-side write path (`build_stack_config` +
+    /// `write_common_lists` → `common_list_key`) and by the syscall-side keys
+    /// path (`common_list_keys`) — one shared rejection for both modules.
+    #[test]
+    fn uid_5000000_is_rejected_by_both_modules() {
+        use crate::cli::stack_cmd::build_stack_config;
+        use crate::config::{GlobalConfig, TargetConfig};
+        use crate::contract::consts::UID_WHITELIST_START;
+
+        let global = GlobalConfig {
+            uid: "5000000".into(),
+            buffer: 8, // default 8 MiB, required by StackConfig::validate
+            ..Default::default()
+        };
+        let conf = build_stack_config(&global, &TargetConfig::default()).unwrap();
+        assert_eq!(conf.uid_whitelist, vec![5_000_000]);
+        // Stack side: write_common_lists → write_common_list → common_list_key.
+        assert!(common_list_key(5_000_000, UID_WHITELIST_START).is_err());
+        // Syscall side: update_common_list → common_list_keys.
+        assert!(common_list_keys(&[5_000_000], UID_WHITELIST_START).is_err());
     }
 
     /// The two mapped filters keep their parsed values in the wire bytes.

@@ -251,13 +251,14 @@ fn dev_decode_syscall_enter_prefix() {
     args.extend_from_slice(&dev_raw_u64(3, 0x6000)); // pc
     let raw = dev_record(&ctx, &args);
     match decode_perf_record(&raw).unwrap() {
-        PerfRecord::SyscallEnter(e) => {
+        PerfRecord::SyscallEnter(mut e) => {
             assert_eq!(e.sysno, 63);
             assert_eq!(e.lr, 0x4000);
             assert_eq!(e.sp, 0x5000);
             assert_eq!(e.pc, 0x6000);
             assert_eq!(e.context.pid, 40);
-            assert!(e.args.is_empty());
+            // no argtype args appended: the cursor is fully consumed
+            assert!(e.args.next_raw_borrow(1).is_err());
         }
         _ => panic!("expected SyscallEnter"),
     }
@@ -288,9 +289,10 @@ fn dev_decode_syscall_exit_has_no_lr_sp_pc() {
     let args = dev_raw_u32(0, 221);
     let raw = dev_record(&ctx, &args);
     match decode_perf_record(&raw).unwrap() {
-        PerfRecord::SyscallExit(e) => {
+        PerfRecord::SyscallExit(mut e) => {
             assert_eq!(e.sysno, 221);
-            assert!(e.args.is_empty());
+            // no argtype args appended: the cursor is fully consumed
+            assert!(e.args.next_raw_borrow(1).is_err());
         }
         _ => panic!("expected SyscallExit"),
     }
@@ -321,22 +323,6 @@ fn dev_tlv_length_prefixed_string() {
     assert_eq!(idx, 4);
     assert_eq!(sz, 5);
     assert_eq!(data, b"hello");
-}
-
-#[test]
-fn dev_tlv_string_array_with_truncation() {
-    // save_str_arr_to_buf: [idx][u8 count]{[i32 sz][str]} with a truncated
-    // tail element carrying STRARR_MAGIC_LEN.
-    let mut blob = vec![7u8, 3]; // index, count
-    blob.extend_from_slice(&3i32.to_le_bytes());
-    blob.extend_from_slice(b"abc");
-    blob.extend_from_slice(&STRARR_MAGIC_LEN.to_le_bytes());
-    let mut c = ArgsCursor::new(&blob);
-    let (idx, elems) = c.next_string_array().unwrap();
-    assert_eq!(idx, 7);
-    assert_eq!(elems.len(), 2);
-    assert_eq!(elems[0].bytes, b"abc");
-    assert!(elems[1].truncated);
 }
 
 #[test]

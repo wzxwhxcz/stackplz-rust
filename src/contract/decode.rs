@@ -263,13 +263,14 @@ mod tests {
         let raw = raw_buf(&ctx, &args);
         let rec = decode_perf_record(&raw).unwrap();
         match rec {
-            PerfRecord::SyscallEnter(e) => {
+            PerfRecord::SyscallEnter(mut e) => {
                 assert_eq!(e.sysno, 63);
                 assert_eq!(e.lr, 0x4000);
                 assert_eq!(e.sp, 0x5000);
                 assert_eq!(e.pc, 0x6000);
                 assert_eq!(e.context.pid, 4);
-                assert!(e.args.is_empty()); // no argtype args appended
+                // no argtype args appended: the cursor is fully consumed
+                assert!(e.args.next_raw_borrow(1).is_err());
             }
             _ => panic!("expected SyscallEnter"),
         }
@@ -285,9 +286,9 @@ mod tests {
         let raw = raw_buf(&ctx, &args);
         let rec = decode_perf_record(&raw).unwrap();
         match rec {
-            PerfRecord::SyscallExit(e) => {
+            PerfRecord::SyscallExit(mut e) => {
                 assert_eq!(e.sysno, 221);
-                assert!(e.args.is_empty());
+                assert!(e.args.next_raw_borrow(1).is_err());
             }
             _ => panic!("expected SyscallExit"),
         }

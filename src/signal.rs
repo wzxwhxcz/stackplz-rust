@@ -141,6 +141,46 @@ pub fn record_stopped_after_event(sig_mgr: &mut SignalManager, kill_signal: u32,
     }
 }
 
+/// One shared console-resume fan-out for all modules (round 11 / R11-5):
+/// every module registers its `SignalManager` and a single stdin thread calls
+/// [`Self::resume_all`], so one `c` resumes every module's stopped pids —
+/// the per-module `spawn_console_resume` threads raced for the same stdin
+/// line and left the other module's pids frozen.
+pub struct ConsoleResume {
+    managers: Mutex<Vec<Arc<Mutex<SignalManager>>>>,
+}
+
+impl ConsoleResume {
+    pub(crate) fn new() -> Self {
+        Self {
+            managers: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Register a module's manager; later `c` lines resume its stopped pids.
+    pub(crate) fn register(&self, mgr: Arc<Mutex<SignalManager>>) {
+        self.managers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(mgr);
+    }
+
+    /// Resume every registered manager (the `c` fan-out).
+    pub(crate) fn resume_all(&self) {
+        let managers = self.managers.lock().unwrap_or_else(|p| p.into_inner());
+        for mgr in managers.iter() {
+            let mut g = mgr.lock().unwrap_or_else(|p| p.into_inner());
+            let _ = g.resume_all();
+        }
+    }
+}
+
+impl Default for ConsoleResume {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Dispatch one console line, mirroring Go `cli/cmd/root.go:429`: a trimmed
 /// `"c"` resumes all stopped pids (Go's `event.LetItRun()`); any other line
 /// (including empty) does nothing. Pure, so tests can drive it without the
@@ -154,6 +194,15 @@ pub fn handle_console_line(line: &str, mgr: &mut SignalManager) -> bool {
     }
 }
 
+/// Fan one console line out to every registered module manager: `c` resumes
+/// all of them, any other line does nothing. Pure, so tests drive it without
+/// the stdin thread.
+pub fn console_resume_line(resume: &ConsoleResume, line: &str) {
+    if line.trim() == "c" {
+        resume.resume_all();
+    }
+}
+
 /// Spawn the console-resume thread reading stdin, mirroring Go
 /// `cli/cmd/root.go:421-437`: on a scanner error we send ourselves SIGTERM
 /// (as Go does); on EOF the thread quietly ends — Go busy-spins on EOF
@@ -163,7 +212,7 @@ pub fn handle_console_line(line: &str, mgr: &mut SignalManager) -> bool {
 /// thread exits and console resume is unavailable; upgrade to a tty check if
 /// that matters.`
 #[cfg(target_os = "linux")]
-pub fn spawn_console_resume(mgr: Arc<Mutex<SignalManager>>) {
+pub fn spawn_console_resume(resume: Arc<ConsoleResume>) {
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
         let mut line = String::new();
@@ -171,10 +220,7 @@ pub fn spawn_console_resume(mgr: Arc<Mutex<SignalManager>>) {
             line.clear();
             match stdin.read_line(&mut line) {
                 Ok(0) => return, // EOF: end the thread (documented deviation)
-                Ok(_) => {
-                    let mut g = mgr.lock().unwrap_or_else(|p| p.into_inner());
-                    handle_console_line(&line, &mut g);
-                }
+                Ok(_) => console_resume_line(&resume, &line),
                 Err(_) => {
                     let _ = kill(Pid::this(), Signal::SIGTERM);
                     return;
@@ -185,7 +231,7 @@ pub fn spawn_console_resume(mgr: Arc<Mutex<SignalManager>>) {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn spawn_console_resume(_mgr: Arc<Mutex<SignalManager>>) {}
+pub fn spawn_console_resume(_resume: Arc<ConsoleResume>) {}
 
 #[cfg(test)]
 mod tests {
@@ -238,6 +284,28 @@ mod tests {
 
         assert!(handle_console_line("c", &mut mgr));
         assert_eq!(mgr.stopped_count(), 0);
+    }
+
+    /// Round 11 / R11-5: one `c` line fans out to every registered manager —
+    /// the dual-module fix (previously each module had its own stdin thread
+    /// racing for the same line, so only one module resumed).
+    #[test]
+    fn console_resume_line_resumes_all_registered_managers() {
+        let resume = ConsoleResume::new();
+        let m1 = Arc::new(Mutex::new(SignalManager::new()));
+        let m2 = Arc::new(Mutex::new(SignalManager::new()));
+        m1.lock().unwrap().add_stopped(111);
+        m2.lock().unwrap().add_stopped(222);
+        resume.register(Arc::clone(&m1));
+        resume.register(Arc::clone(&m2));
+
+        console_resume_line(&resume, "x");
+        assert_eq!(m1.lock().unwrap().stopped_count(), 1, "non-c line");
+        assert_eq!(m2.lock().unwrap().stopped_count(), 1, "non-c line");
+
+        console_resume_line(&resume, "c");
+        assert_eq!(m1.lock().unwrap().stopped_count(), 0, "both must drain");
+        assert_eq!(m2.lock().unwrap().stopped_count(), 0, "both must drain");
     }
 
     /// Round 7 / F4: `--auto` resumes the event pid exactly once per event;

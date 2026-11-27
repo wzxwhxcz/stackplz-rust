@@ -84,11 +84,6 @@ impl ArgType {
         self.op_list.push(op_index);
     }
 
-    /// `AddOpList(p)` — append all ops from another type.
-    pub fn add_op_list_from(&mut self, other: &ArgType) {
-        self.op_list.extend_from_slice(&other.op_list);
-    }
-
     /// `CleanOpList()`.
     pub fn clean_op_list(&mut self) {
         self.op_list.clear();

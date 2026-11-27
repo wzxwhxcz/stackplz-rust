@@ -127,10 +127,21 @@ pub fn run(
 
     let lib_path = format!("{}/preload_libs", global.exec_path);
     let module = SyscallTracepointModule::new(conf, lib_path);
-    module
+    // Round 7 / F1: keep a handle to the logger (`run()` takes ownership) so
+    // the drop counter can be presented on the normal exit path.
+    let report_logger = logger.clone();
+    let result = module
         .run(logger)
         .map_err(|e| anyhow!("{e:#}"))
-        .context("syscall module failed")
+        .context("syscall module failed");
+    if result.is_ok() {
+        if let Some(warning) =
+            crate::logger::Logger::dropped_lines_warning(report_logger.failed_lines())
+        {
+            eprintln!("{warning}");
+        }
+    }
+    result
 }
 
 #[cfg(test)]

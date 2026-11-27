@@ -24,7 +24,7 @@
 use anyhow::{anyhow, bail, Result};
 
 use super::filter::get_filter_by_name;
-use super::point_arg::{EBPF_SYS_ENTER, EBPF_SYS_EXIT};
+use super::point_arg::EBPF_SYS_ENTER;
 use super::syscall_points::{SyscallPoint, SyscallPointTable};
 use crate::argtype::consts::STRING;
 use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
@@ -382,7 +382,6 @@ fn apply_filter_groups(point: &mut SyscallPoint, filter_groups: &[String]) -> Re
             }
         }
     }
-    let _ = EBPF_SYS_EXIT;
     Ok(())
 }
 

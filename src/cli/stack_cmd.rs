@@ -224,6 +224,11 @@ pub fn run(global: &GlobalConfig, target: &TargetConfig) -> Result<()> {
             .run(logger.clone())
             .with_context(|| format!("{MODULE_NAME_STACK} module failed"))?;
     }
+    // Round 7 / F1: the drop counter added in round 6 had no reader, so a
+    // full disk / closed stdout stayed silent. Present it once here.
+    if let Some(warning) = crate::logger::Logger::dropped_lines_warning(logger.failed_lines()) {
+        eprintln!("{warning}");
+    }
     Ok(())
 }
 

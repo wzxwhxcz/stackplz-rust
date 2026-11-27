@@ -264,12 +264,6 @@ impl SyscallPointTable {
         self.by_name.get(name).map(|&i| &self.points[i])
     }
 
-    pub fn nr_of(&self, name: &str) -> Result<u32> {
-        self.by_name(name)
-            .map(|p| p.nr)
-            .ok_or_else(|| anyhow!("unknown syscall name:{}", name))
-    }
-
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.points.iter().map(|p| p.name.as_str())
     }

@@ -9,6 +9,7 @@
 
 use crate::config::{ProbeConfig, SConfig, StackConfig, UprobeArgs};
 use crate::logger::Logger;
+use crate::signal::{auto_resume_after_event, SignalManager};
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
@@ -272,12 +273,27 @@ impl StackProbeModule {
         // `-b/--buffer` in MiB → 4 KiB pages (dev `GlobalConfig.Buffer`).
         let pages = super::perf_pages(conf.buffer_mb)?;
         let lost_logger = logger.clone();
+        // Round 7 / F4: `--auto` resumes the event pid after each event
+        // (Go `event_uprobe.go:77-78`). The manager is owned by this run
+        // loop and moved into the perf callback below.
+        let auto_resume = self.auto_resume;
+        let mut sig_mgr = SignalManager::new();
         let pb = libbpf_rs::PerfBufferBuilder::new(&events_map)
             .pages(pages)
             .sample_cb(move |_cpu: i32, data: &[u8]| {
-                let rendered = render_uprobe_event(data, &hook_points);
-                match rendered {
-                    Ok(line) => render_logger.println(&line),
+                match render_uprobe_event(data, &hook_points) {
+                    Ok((line, pid)) => {
+                        render_logger.println(&line);
+                        auto_resume_after_event(
+                            &mut |pid| {
+                                // resume_one prints its own diagnostics;
+                                // nothing to propagate from a perf callback.
+                                let _ = sig_mgr.resume_one(pid);
+                            },
+                            auto_resume,
+                            pid,
+                        );
+                    }
                     Err(e) => render_logger.println(&format!("{NAME}\tdecode error: {e}")),
                 }
             })
@@ -342,28 +358,35 @@ fn join_ids(ids: &[u32]) -> String {
         .join(",")
 }
 
-/// Render a raw perf record as a human-readable uprobe event line.
+/// Render a raw perf record as a human-readable uprobe event line, plus the
+/// event pid (`EventContext.pid`) for `--auto` resume (round 7 / F4).
+/// Non-uprobe records carry pid 0, which never resumes.
 ///
 /// Mirrors `UprobeEvent.ParseContext` + `String()` in Go.
 #[cfg(target_os = "linux")]
-fn render_uprobe_event(raw: &[u8], hook_points: &[UprobeArgs]) -> Result<String> {
+fn render_uprobe_event(raw: &[u8], hook_points: &[UprobeArgs]) -> Result<(String, u32)> {
     use crate::contract::decode::{decode_perf_record, PerfRecord};
 
     let rec = decode_perf_record(raw)?;
     match rec {
         PerfRecord::UprobeEnter(mut e) => {
+            let pid = e.context.pid;
             let point = hook_points
                 .get(e.point_key as usize)
                 .ok_or_else(|| anyhow!("point_key {} out of range", e.point_key))?;
-            crate::event::render::render_uprobe_event(&mut e, point)
+            let line = crate::event::render::render_uprobe_event(&mut e, point)?;
+            Ok((line, pid))
         }
-        _ => Ok(format!("non-uprobe event ({} bytes)", raw.len())),
+        _ => Ok((format!("non-uprobe event ({} bytes)", raw.len()), 0)),
     }
 }
 
 /// Parse a signal name (e.g. "SIGSTOP", "SIGABRT") to its numeric value.
 /// Returns 0 for empty/unrecognized strings.
-/// Mirrors Go's `util.ParseSignal(name)` usage.
+/// Mirrors Go's `util.ParseSignal(name)`: the full 35-name table, sorted by
+/// signal number. Synonyms share one arm (CHLD=CLD, IO=POLL, IOT=ABRT,
+/// SYS=UNUSED). Unknown names still return 0, exactly like Go (map lookup
+/// miss yields the zero value) — documented upstream behaviour, not an error.
 pub fn parse_signal_name(name: &str) -> u32 {
     if name.is_empty() {
         return 0;
@@ -371,21 +394,37 @@ pub fn parse_signal_name(name: &str) -> u32 {
     let upper = name.to_uppercase();
     let upper = upper.strip_prefix("SIG").unwrap_or(&upper);
     match upper {
-        "STOP" => 19,
-        "ABRT" => 6,
-        "TRAP" => 5,
-        "KILL" => 9,
+        "HUP" => 1,
         "INT" => 2,
-        "TERM" => 15,
-        "CONT" => 18,
-        "USR1" => 10,
-        "USR2" => 12,
-        "SEGV" => 11,
+        "QUIT" => 3,
+        "ILL" => 4,
+        "TRAP" => 5,
+        "ABRT" | "IOT" => 6,
         "BUS" => 7,
         "FPE" => 8,
-        "ALRM" => 14,
-        "HUP" => 1,
+        "KILL" => 9,
+        "USR1" => 10,
+        "SEGV" => 11,
+        "USR2" => 12,
         "PIPE" => 13,
+        "ALRM" => 14,
+        "TERM" => 15,
+        "STKFLT" => 16,
+        "CHLD" | "CLD" => 17,
+        "CONT" => 18,
+        "STOP" => 19,
+        "TSTP" => 20,
+        "TTIN" => 21,
+        "TTOU" => 22,
+        "URG" => 23,
+        "XCPU" => 24,
+        "XFSZ" => 25,
+        "VTALRM" => 26,
+        "PROF" => 27,
+        "WINCH" => 28,
+        "IO" | "POLL" => 29,
+        "PWR" => 30,
+        "SYS" | "UNUSED" => 31,
         _ => {
             // Try parsing as a raw number.
             name.parse::<u32>().unwrap_or(0)
@@ -409,12 +448,51 @@ mod tests {
 
     #[test]
     fn parse_signal_names() {
-        assert_eq!(parse_signal_name("SIGSTOP"), 19);
-        assert_eq!(parse_signal_name("SIGABRT"), 6);
-        assert_eq!(parse_signal_name("SIGTRAP"), 5);
+        // Go `util.ParseSignal` full table: all 35 names, one assertion each.
+        for (name, num) in [
+            ("HUP", 1),
+            ("INT", 2),
+            ("QUIT", 3),
+            ("ILL", 4),
+            ("TRAP", 5),
+            ("ABRT", 6),
+            ("IOT", 6),
+            ("BUS", 7),
+            ("FPE", 8),
+            ("KILL", 9),
+            ("USR1", 10),
+            ("SEGV", 11),
+            ("USR2", 12),
+            ("PIPE", 13),
+            ("ALRM", 14),
+            ("TERM", 15),
+            ("STKFLT", 16),
+            ("CHLD", 17),
+            ("CLD", 17),
+            ("CONT", 18),
+            ("STOP", 19),
+            ("TSTP", 20),
+            ("TTIN", 21),
+            ("TTOU", 22),
+            ("URG", 23),
+            ("XCPU", 24),
+            ("XFSZ", 25),
+            ("VTALRM", 26),
+            ("PROF", 27),
+            ("WINCH", 28),
+            ("IO", 29),
+            ("POLL", 29),
+            ("PWR", 30),
+            ("SYS", 31),
+            ("UNUSED", 31),
+        ] {
+            assert_eq!(parse_signal_name(name), num, "{name}");
+            assert_eq!(parse_signal_name(&format!("SIG{name}")), num, "SIG{name}");
+        }
         assert_eq!(parse_signal_name("sigstop"), 19); // case-insensitive
+        assert_eq!(parse_signal_name("quit"), 3); // no SIG prefix
         assert_eq!(parse_signal_name(""), 0);
-        assert_eq!(parse_signal_name("SIGUNKNOWN"), 0);
+        assert_eq!(parse_signal_name("SIGUNKNOWN"), 0); // Go's silent 0
         assert_eq!(parse_signal_name("42"), 42); // raw number
     }
 

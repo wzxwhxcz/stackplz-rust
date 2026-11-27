@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 use {
+    crate::contract::decode::HasContext,
     crate::contract::{THREAD_NAME_BLACKLIST, THREAD_NAME_WHITELIST},
     anyhow::{anyhow, Context},
     libbpf_rs::{Link, MapCore, MapFlags, Object, ObjectBuilder, PerfBufferBuilder},
@@ -445,13 +446,34 @@ impl SyscallTracepointModule {
         let point_table = Arc::new(self.conf.point_table.clone());
         let dump_hex = self.conf.dump_hex;
         let logger_clone = Arc::clone(&logger);
+        // Round 7 / F4: `--auto` resumes the event pid after each event
+        // (Go `event_raw_syscalls.go:72-73`). The manager is owned by this
+        // run loop and moved into the perf callback below.
+        let auto_resume = self.conf.auto_resume;
+        let mut sig_mgr = crate::signal::SignalManager::new();
         let handle_event = move |_cpu: i32, data: &[u8]| {
-            let rendered = crate::contract::decode_perf_record(data).and_then(|mut decoded| {
-                crate::event::render::render_syscall_event(&point_table, &mut decoded, dump_hex)
-            });
-            match rendered {
-                Ok(line) => logger_clone.println(&line),
-                Err(e) => logger_clone.println(&format!("decode error: {}", e)),
+            let mut decoded = match crate::contract::decode_perf_record(data) {
+                Ok(decoded) => decoded,
+                Err(e) => {
+                    logger_clone.println(&format!("decode error: {e}"));
+                    return;
+                }
+            };
+            let pid = decoded.context().pid;
+            match crate::event::render::render_syscall_event(&point_table, &mut decoded, dump_hex) {
+                Ok(line) => {
+                    logger_clone.println(&line);
+                    crate::signal::auto_resume_after_event(
+                        &mut |pid| {
+                            // resume_one prints its own diagnostics; nothing
+                            // to propagate from a perf callback.
+                            let _ = sig_mgr.resume_one(pid);
+                        },
+                        auto_resume,
+                        pid,
+                    );
+                }
+                Err(e) => logger_clone.println(&format!("decode error: {e}")),
             }
         };
 

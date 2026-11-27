@@ -67,13 +67,6 @@ impl OpConfig {
         add_op(clone)
     }
 
-    /// `(this *OpConfig) NewPreCode`.
-    pub fn new_pre_code(&self, pre_code: OpCode) -> u32 {
-        let mut clone = self.clone();
-        clone.pre_code = pre_code;
-        add_op(clone)
-    }
-
     /// `(this *OpConfig) NewPostCode`.
     pub fn new_post_code(&self, post_code: OpCode) -> u32 {
         let mut clone = self.clone();

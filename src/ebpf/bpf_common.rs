@@ -158,19 +158,6 @@ pub mod linux {
         Ok(open.load()?)
     }
 
-    /// Write a `#[repr(C)]` filter value into the `filter_map` HASH map at key 0.
-    /// Mirrors `filterMap.Update(unsafe.Pointer(&filter_key), unsafe.Pointer(&filter), ebpf.UpdateAny)`.
-    pub fn write_filter_map<T: bytemuck::Pod>(obj: &Object, filter: &T) -> Result<()> {
-        let map = obj
-            .maps()
-            .find(|m| m.name() == "filter_map")
-            .ok_or_else(|| anyhow!("cannot find filter_map"))?;
-        let key = 0u32.to_ne_bytes();
-        let value_bytes: &[u8] = bytemuck::bytes_of(filter);
-        map.update(&key, value_bytes, MapFlags::ANY)?;
-        Ok(())
-    }
-
     /// Borrow the `*_events` PERF_EVENT_ARRAY map for the perf-reader loop.
     pub fn events_map<'a>(obj: &'a Object, name: &str) -> Result<Map<'a>> {
         obj.maps()
@@ -193,16 +180,6 @@ pub mod linux {
         let key_bytes = bytemuck::bytes_of(key);
         let val_bytes = bytemuck::bytes_of(value);
         map.update(key_bytes, val_bytes, MapFlags::ANY)?;
-        Ok(())
-    }
-
-    /// Write a map entry with raw byte key/value (for maps with non-Pod shapes).
-    pub fn write_map_raw(obj: &Object, map_name: &str, key: &[u8], value: &[u8]) -> Result<()> {
-        let map = obj
-            .maps()
-            .find(|m| m.name() == map_name)
-            .ok_or_else(|| anyhow!("cannot find map: {map_name}"))?;
-        map.update(key, value, MapFlags::ANY)?;
         Ok(())
     }
 

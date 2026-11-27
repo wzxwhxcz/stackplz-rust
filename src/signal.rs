@@ -122,6 +122,20 @@ impl Default for SignalManager {
     }
 }
 
+/// Go `event_uprobe.go:77-78` / `event_raw_syscalls.go:72-73`: after each perf
+/// event, `--auto` resumes that event's pid (`LetItResume(this.Pid)`).
+///
+/// `resume` is injected so tests can count calls; production passes a closure
+/// over [`SignalManager::resume_one`], which already prints its own
+/// diagnostics (so a failed resume needs no error channel here).
+/// `pid == 0` never resumes: `kill(0, SIGCONT)` would signal the whole
+/// process group, and 0 is never a real event pid.
+pub fn auto_resume_after_event(resume: &mut dyn FnMut(u32), auto_resume: bool, pid: u32) {
+    if auto_resume && pid != 0 {
+        resume(pid);
+    }
+}
+
 /// Parse signal name string to Signal enum
 #[cfg(target_os = "linux")]
 pub fn parse_signal(sig_name: &str) -> Option<Signal> {
@@ -179,5 +193,27 @@ mod tests {
         assert_eq!(parse_signal("SIGABRT"), Some(Signal::SIGABRT));
         assert_eq!(parse_signal("SIGTRAP"), Some(Signal::SIGTRAP));
         assert_eq!(parse_signal("INVALID"), None);
+    }
+
+    /// Round 7 / F4: `--auto` resumes the event pid exactly once per event;
+    /// `--auto` off or pid 0 resumes nothing.
+    #[test]
+    fn auto_resume_after_event_calls_resume_once_per_event() {
+        let mut calls: Vec<u32> = Vec::new();
+        auto_resume_after_event(&mut |pid| calls.push(pid), true, 4242);
+        assert_eq!(calls, vec![4242]);
+
+        // A second event resumes its own pid, again exactly once.
+        auto_resume_after_event(&mut |pid| calls.push(pid), true, 5151);
+        assert_eq!(calls, vec![4242, 5151]);
+    }
+
+    #[test]
+    fn auto_resume_after_event_is_a_noop_without_auto_or_pid() {
+        let mut calls: Vec<u32> = Vec::new();
+        auto_resume_after_event(&mut |pid| calls.push(pid), false, 4242);
+        assert!(calls.is_empty(), "--auto off must not resume");
+        auto_resume_after_event(&mut |pid| calls.push(pid), true, 0);
+        assert!(calls.is_empty(), "pid 0 must never resume (process group)");
     }
 }

@@ -71,16 +71,22 @@ impl Logger {
         self.write_line(msg, true);
     }
 
-    /// Print without a trailing newline behavior difference; same as println.
-    pub fn printf(&self, msg: &str) {
-        self.write_line(msg, true);
-    }
-
     /// Total lines dropped by failed writes (terminal + file). Best-effort
     /// output stays best-effort, but failures are at least observable.
     pub fn failed_lines(&self) -> u64 {
         let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.terminal_failed.wrapping_add(g.file_failed)
+    }
+
+    /// Present [`Logger::failed_lines`] on the CLI exit path (round 7 / F1):
+    /// `None` when nothing was dropped, otherwise the one-line warning the
+    /// caller prints to stderr. Pure, so tests can pin the wording.
+    pub fn dropped_lines_warning(failed: u64) -> Option<String> {
+        if failed == 0 {
+            None
+        } else {
+            Some(format!("warning: dropped {failed} log lines"))
+        }
     }
 
     /// Write one line + newline to a sink; bump `failed` when any step fails.
@@ -230,5 +236,22 @@ mod tests {
         let mut failed = 0u64;
         Logger::write_line_to(&mut FailingWriter, b"line", &mut failed);
         assert_eq!(failed, 1, "failing sink must bump the counter once");
+    }
+
+    #[test]
+    fn dropped_lines_warning_is_none_when_nothing_was_dropped() {
+        assert_eq!(Logger::dropped_lines_warning(0), None);
+    }
+
+    #[test]
+    fn dropped_lines_warning_names_the_count() {
+        assert_eq!(
+            Logger::dropped_lines_warning(1).as_deref(),
+            Some("warning: dropped 1 log lines")
+        );
+        assert_eq!(
+            Logger::dropped_lines_warning(7).as_deref(),
+            Some("warning: dropped 7 log lines")
+        );
     }
 }

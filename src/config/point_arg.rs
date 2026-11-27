@@ -71,10 +71,6 @@ impl PointArg {
         self.group_type = group_type;
     }
 
-    pub fn set_point_type(&mut self, point_type: u32) {
-        self.point_type = point_type;
-    }
-
     pub fn add_extra_op(&mut self, op_index: u32) {
         self.extra_op_list.push(op_index);
     }

@@ -185,7 +185,13 @@ fn run_modules(
                     ModuleKind::Stack => stack_cmd::run(&global, &target),
                 };
                 if let Err(e) = result {
-                    let _ = tx.send((name.to_string(), format!("{e:#}")));
+                    if tx.send((name.to_string(), format!("{e:#}"))).is_err() {
+                        // The main loop already returned (e.g. after
+                        // INTERRUPTED), so the receiver is gone and this
+                        // module error would vanish silently. Narrow window:
+                        // only reachable once the receiver is dropped.
+                        eprintln!("module {name} failed after shutdown: {e:#}");
+                    }
                 }
             })
             .map_err(|e| RunError::Module(format!("failed to spawn {name} module: {e}")))?;

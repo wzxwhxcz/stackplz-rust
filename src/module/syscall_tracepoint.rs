@@ -29,12 +29,11 @@ pub const NAME: &str = super::MODULE_NAME_SYSCALL;
 
 pub struct SyscallTracepointModule {
     pub conf: SyscallConfig,
-    pub lib_path: String,
 }
 
 impl SyscallTracepointModule {
-    pub fn new(conf: SyscallConfig, lib_path: String) -> Self {
-        SyscallTracepointModule { conf, lib_path }
+    pub fn new(conf: SyscallConfig) -> Self {
+        SyscallTracepointModule { conf }
     }
 
     /// Run the module until cancelled / an error occurs.
@@ -184,7 +183,7 @@ impl SyscallTracepointModule {
         map.update(&key.to_ne_bytes(), &value, MapFlags::ANY)
             .context("failed to update base_config")?;
 
-        logger.println("updated base_config");
+        logger.println(&format!("{}: updated base_config", NAME));
         Ok(())
     }
 
@@ -245,7 +244,7 @@ impl SyscallTracepointModule {
         map.update(&key.to_ne_bytes(), &value, MapFlags::ANY)
             .context("failed to update common_filter")?;
 
-        logger.println("updated common_filter");
+        logger.println(&format!("{}: updated common_filter", NAME));
         Ok(())
     }
 
@@ -281,7 +280,12 @@ impl SyscallTracepointModule {
                 .with_context(|| format!("failed to update common_list for {}", name))?;
         }
 
-        logger.println(&format!("updated {} ({} items)", name, items.len()));
+        logger.println(&format!(
+            "{}: updated {} ({} items)",
+            NAME,
+            name,
+            items.len()
+        ));
         Ok(())
     }
 
@@ -301,7 +305,7 @@ impl SyscallTracepointModule {
                 .context("failed to update child_parent_map")?;
         }
 
-        logger.println("updated child_parent_map");
+        logger.println(&format!("{}: updated child_parent_map", NAME));
         Ok(())
     }
 
@@ -327,7 +331,7 @@ impl SyscallTracepointModule {
             self.add_thread_filter(&map, name, THREAD_NAME_WHITELIST)?;
         }
 
-        logger.println("updated thread_filter");
+        logger.println(&format!("{}: updated thread_filter", NAME));
         Ok(())
     }
 
@@ -352,7 +356,7 @@ impl SyscallTracepointModule {
         // `opc_filter_string` can look it up on the kernel side.
         let entries = self.arg_filter_entries();
         if entries.is_empty() {
-            logger.println("arg_filter: no -f filters to write");
+            logger.println(&format!("{}: arg_filter: no -f filters to write", NAME));
             return Ok(());
         }
 
@@ -367,7 +371,11 @@ impl SyscallTracepointModule {
                 .with_context(|| format!("failed to update arg_filter {filter_index}"))?;
         }
 
-        logger.println(&format!("arg_filter updated: {} filters", entries.len()));
+        logger.println(&format!(
+            "{}: arg_filter updated: {} filters",
+            NAME,
+            entries.len()
+        ));
         Ok(())
     }
 
@@ -415,7 +423,11 @@ impl SyscallTracepointModule {
                 .with_context(|| format!("failed to update {map_name} for syscall {nr}"))?;
         }
 
-        logger.println(&format!("{map_name} updated: {} entries", entries.len()));
+        logger.println(&format!(
+            "{}: {map_name} updated: {} entries",
+            NAME,
+            entries.len()
+        ));
         Ok(())
     }
 
@@ -438,7 +450,11 @@ impl SyscallTracepointModule {
                 .with_context(|| format!("failed to update op_list for key {op_key}"))?;
         }
 
-        logger.println(&format!("op_list updated: {} entries", op_configs.len()));
+        logger.println(&format!(
+            "{}: op_list updated: {} entries",
+            NAME,
+            op_configs.len()
+        ));
         Ok(())
     }
 
@@ -718,7 +734,7 @@ mod tests {
         let table = SyscallPointTable::embedded().unwrap();
         let expected = table.len();
         let conf = SyscallConfig::with_table(table);
-        let module = SyscallTracepointModule::new(conf, String::new());
+        let module = SyscallTracepointModule::new(conf);
 
         let enter = module.point_args_entries(PointArgsSide::Enter).unwrap();
         let exit = module.point_args_entries(PointArgsSide::Exit).unwrap();
@@ -754,7 +770,7 @@ mod tests {
     fn arg_filter_entries_serialize_the_wire_layout() {
         let _ = crate::config::add_filter("w:/data");
         let table = SyscallPointTable::empty();
-        let module = SyscallTracepointModule::new(SyscallConfig::with_table(table), String::new());
+        let module = SyscallTracepointModule::new(SyscallConfig::with_table(table));
         let entries = module.arg_filter_entries();
         assert!(!entries.is_empty(), "-f filters must reach arg_filter");
         for (index, bytes) in &entries {

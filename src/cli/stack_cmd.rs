@@ -132,6 +132,11 @@ fn dev_point_to_uprobe_args(
             }
         }
         2 => {
+            // R12-2: the same lowercase-`0x`-only gate as the master offsets;
+            // uppercase `0X` must not be silently parsed as hex.
+            if !is_offset_marker(parts[1]) {
+                bail!("offset {} must start with 0x", parts[1]);
+            }
             ua.symbol = parts[0].to_string();
             ua.offset = parse_base0_u64(parts[1])
                 .map_err(|e| anyhow!("parse for {} failed, err:{}", point.name, e))?;
@@ -332,14 +337,25 @@ fn build_probes(
             let library = find_lib(&cfg.library, &target.library_dirs)?;
             for (index, point) in cfg.points.iter().enumerate() {
                 let ua = dev_point_to_uprobe_args(&library, index, point)?;
+                // R12-2: a two-segment `symbol+offset` point carries its own
+                // attach attributes, so its probe is a library-level carrier
+                // like `-w` — `ProbeConfig::check` requires exactly one of
+                // symbol/offset and must not see the pair.
+                let two_segment = point.name.contains('+');
                 let mut probe = ProbeConfig {
                     sconfig: sconfig.clone(),
                     lib_name: String::new(),
                     library: library.clone(),
-                    symbol: ua.symbol.clone(),
-                    offset: ua.offset,
+                    symbol: if two_segment {
+                        String::new()
+                    } else {
+                        ua.symbol.clone()
+                    },
+                    offset: if two_segment { 0 } else { ua.offset },
                 };
-                probe.check()?;
+                if !two_segment {
+                    probe.check()?;
+                }
                 probes.push((probe, vec![ua]));
             }
             continue;
@@ -409,7 +425,6 @@ pub fn run(
     let stack_conf = build_stack_config(global, target)?;
     let probes = build_probes(global, target, w_points)?;
 
-    let lib_path = format!("{}/preload_libs", global.exec_path);
     // Round 10 / M3 + round 12 / R11-7: every probe gets its own module thread
     // (`module.run()` blocks in its poll loop), so a multi-probe `-c` config no
     // longer runs only the first probe. The dropped-lines warning is still
@@ -423,7 +438,7 @@ pub fn run(
                     MODULE_NAME_STACK,
                     probe.info()
                 ));
-                let module = StackProbeModule::new(probe, lib_path.clone())
+                let module = StackProbeModule::new(probe)
                     .with_hook_points(hook_points)
                     .with_signals(
                         stack_conf.kill_signal,
@@ -960,6 +975,32 @@ mod tests {
         assert_eq!(probe.offset, 0);
         assert_eq!(points[0].symbol, "0X10");
         assert_eq!(points[0].offset, 0);
+    }
+
+    /// R12-2: a two-segment dev name `symbol+0xoffset` loads through the full
+    /// dev-file path (the old code copied both into a `ProbeConfig` and
+    /// `check()` rejected the pair with "set symbol or offset, not both").
+    /// The point keeps both attach attributes; the probe is a library-level
+    /// carrier like `-w`.
+    #[test]
+    fn build_probes_dev_two_segment_symbol_offset_loads() {
+        let probes =
+            build_dev_probes("dev-open-off", r#"[{"name": "open+0x10", "params": []}]"#).unwrap();
+        assert_eq!(probes.len(), 1);
+        let (probe, points) = &probes[0];
+        assert_eq!(points[0].symbol, "open");
+        assert_eq!(points[0].offset, 0x10);
+        assert_eq!(probe.symbol, "", "carrier probe carries no symbol");
+        assert_eq!(probe.offset, 0, "carrier probe carries no offset");
+    }
+
+    /// R12-2: uppercase `0X` in a two-segment offset is rejected loudly with
+    /// the master gate wording (it used to be silently hex-parsed).
+    #[test]
+    fn build_probes_dev_uppercase_0x_offset_errors() {
+        let err =
+            build_dev_probes("dev-0X-off", r#"[{"name": "open+0X10", "params": []}]"#).unwrap_err();
+        assert!(format!("{err:#}").contains("must start with 0x"), "{err:#}");
     }
 
     /// R11-3: a master config whose offsets contain an uppercase `0X` entry

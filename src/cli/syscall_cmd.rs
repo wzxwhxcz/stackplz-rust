@@ -111,12 +111,19 @@ pub fn run(
     let conf = build_config(global, target, table, selection)?;
 
     if global.debug {
-        logger.println(&format!("SysCallConf:{}", conf.info()));
-        logger.println(&format!("point table: {} points", conf.point_table.len()));
+        logger.println(&format!(
+            "{}: SysCallConf:{}",
+            crate::module::syscall_tracepoint::NAME,
+            conf.info()
+        ));
+        logger.println(&format!(
+            "{}: point table: {} points",
+            crate::module::syscall_tracepoint::NAME,
+            conf.point_table.len()
+        ));
     }
 
-    let lib_path = format!("{}/preload_libs", global.exec_path);
-    let module = SyscallTracepointModule::new(conf, lib_path);
+    let module = SyscallTracepointModule::new(conf);
     // Round 7 / F1: `run()` takes the logger by value, so clone it and keep
     // this handle for the drop counter. Round 10 / M3: `finish_run` presents
     // the warning whether the run succeeded or failed — it prints before

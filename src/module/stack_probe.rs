@@ -25,7 +25,6 @@ pub const NAME: &str = super::MODULE_NAME_STACK;
 
 pub struct StackProbeModule {
     pub probe: ProbeConfig,
-    pub lib_path: String,
     /// Parsed hook points (from `-w`). Empty for `--symbol`/`--config` mode.
     pub hook_points: Vec<UprobeArgs>,
     /// Signal to send on uprobe hit (from --kill), 0 = none.
@@ -41,10 +40,9 @@ pub struct StackProbeModule {
 }
 
 impl StackProbeModule {
-    pub fn new(probe: ProbeConfig, lib_path: String) -> Self {
+    pub fn new(probe: ProbeConfig) -> Self {
         StackProbeModule {
             probe,
-            lib_path,
             hook_points: Vec::new(),
             kill_signal: 0,
             tkill_signal: 0,
@@ -639,7 +637,7 @@ mod tests {
             uid: 1000,
             ..Default::default()
         });
-        let module = StackProbeModule::new(probe, String::new());
+        let module = StackProbeModule::new(probe);
         assert_eq!(module.effective_stack_config().uid_whitelist, vec![1000]);
 
         let conf = StackConfig {
@@ -657,7 +655,7 @@ mod tests {
     /// otherwise, regardless of builder order.
     #[test]
     fn kill_signals_fall_back_to_with_signals() {
-        let module = StackProbeModule::new(dummy_probe(SConfig::default()), String::new());
+        let module = StackProbeModule::new(dummy_probe(SConfig::default()));
         assert_eq!(module.effective_kill_signal(), 0);
         assert_eq!(module.effective_tkill_signal(), 0);
 
@@ -676,7 +674,7 @@ mod tests {
         assert_eq!(module.effective_tkill_signal(), 6, "0 in config falls back");
 
         // Config first, then with_signals: config still wins.
-        let module = StackProbeModule::new(dummy_probe(SConfig::default()), String::new())
+        let module = StackProbeModule::new(dummy_probe(SConfig::default()))
             .with_stack_config(StackConfig {
                 kill_signal: 11,
                 tkill_signal: 6,
@@ -703,8 +701,8 @@ mod tests {
             tkill_signal: 6,
             ..Default::default()
         };
-        let module = StackProbeModule::new(dummy_probe(SConfig::default()), String::new())
-            .with_stack_config(conf.clone());
+        let module =
+            StackProbeModule::new(dummy_probe(SConfig::default())).with_stack_config(conf.clone());
 
         let effective = module.effective_stack_config();
         assert_eq!(

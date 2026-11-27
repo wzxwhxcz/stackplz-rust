@@ -108,10 +108,18 @@ pub fn render_syscall_event(
 
 /// Render one `UPROBE_ENTER` record against its resolved hook point.
 ///
-/// `dump_hex` is passed as `false`: the uprobe point parser already baked the
-/// global flag into every registered argtype (`at.dump_hex`).
-pub fn render_uprobe_event(e: &mut UprobeEnterEvent<'_>, point: &UprobeArgs) -> Result<String> {
-    let args = render_point_args(&point.point_args, &mut e.args, EBPF_UPROBE_ENTER, false)?;
+/// `dump_hex` is the global `--dumphex` flag, threaded from `StackConfig`
+/// exactly like the syscall side threads `SyscallConfig.dump_hex` (round 11
+/// / Q1). It used to be hard-coded `false` here on the claim that the uprobe
+/// point parser had baked the flag into every registered argtype — untrue:
+/// only `buf` args get `at.dump_hex` baked (`point_parser.rs`), so struct
+/// args silently rendered pretty instead of hex-dumping.
+pub fn render_uprobe_event(
+    e: &mut UprobeEnterEvent<'_>,
+    point: &UprobeArgs,
+    dump_hex: bool,
+) -> Result<String> {
+    let args = render_point_args(&point.point_args, &mut e.args, EBPF_UPROBE_ENTER, dump_hex)?;
     Ok(format!(
         "{} {}{} LR:0x{:x} PC:0x{:x} SP:0x{:x}",
         uuid(&e.context),
@@ -290,8 +298,96 @@ mod tests {
             get_arg_type_by_name("int").type_index,
             0,
         ));
-        let line = render_uprobe_event(&mut e, &point).unwrap();
+        let line = render_uprobe_event(&mut e, &point, false).unwrap();
         assert_eq!(line, "[40|30|app] myhook(arg_0=42) LR:0xa PC:0xc SP:0xb");
+    }
+
+    /// Round 11 / Q1: a struct argument without a formatter hits the
+    /// lossless fallback in `parse_struct`; on the uprobe path it must honour
+    /// `--dumphex` exactly like the syscall path does. Before this round
+    /// `render_uprobe_event` hard-coded `dump_hex=false`, so the struct
+    /// rendered pretty even with the flag on. `iovec_x2` is a registered
+    /// struct type with no formatter (unlike `dirent`/`iovec`/`msghdr`,
+    /// which have their own parse arms).
+    #[test]
+    fn uprobe_struct_fallback_honours_dump_hex() {
+        init_argtypes();
+        let ctx = header(458, 40, 30, "app");
+        let mut args = Vec::new();
+        args.extend_from_slice(&raw_u32(0, 3)); // point_key
+        args.extend_from_slice(&reg(1, 0xa)); // lr
+        args.extend_from_slice(&reg(2, 0xb)); // sp
+        args.extend_from_slice(&reg(3, 0xc)); // pc
+        args.extend_from_slice(&reg(4, 0x20)); // struct pointer
+        args.extend_from_slice(&prefixed(4, b"hi\x00x")); // struct payload
+        let raw = record(&ctx, &args);
+        let rec = decode_perf_record(&raw).unwrap();
+        let PerfRecord::UprobeEnter(mut e) = rec else {
+            panic!("expected UprobeEnter");
+        };
+        let mut point = UprobeArgs::new();
+        point.name = "myhook".to_string();
+        point.point_args.push(PointArg::new_uprobe(
+            "s",
+            get_arg_type_by_name("iovec_x2").type_index,
+            0,
+        ));
+        let line = render_uprobe_event(&mut e, &point, false).unwrap();
+        assert_eq!(
+            line,
+            "[40|30|app] myhook(s=0x20(hi\\x00x)) LR:0xa PC:0xc SP:0xb"
+        );
+        let rec = decode_perf_record(&raw).unwrap();
+        let PerfRecord::UprobeEnter(mut e) = rec else {
+            panic!("expected UprobeEnter");
+        };
+        let line = render_uprobe_event(&mut e, &point, true).unwrap();
+        assert_eq!(
+            line,
+            "[40|30|app] myhook(s=0x20(\n0000  68 69 00 78                                      |hi.x            |\n)) LR:0xa PC:0xc SP:0xb"
+        );
+    }
+
+    /// Round 11 / Q1 (control): a `buf` argument hex-dumps when the flag is
+    /// on and renders pretty when it is off, through the same uprobe path —
+    /// the flag must flow for every arg kind, not just the struct fallback.
+    #[test]
+    fn uprobe_buf_honours_dump_hex() {
+        init_argtypes();
+        let ctx = header(458, 40, 30, "app");
+        let mut args = Vec::new();
+        args.extend_from_slice(&raw_u32(0, 3)); // point_key
+        args.extend_from_slice(&reg(1, 0xa)); // lr
+        args.extend_from_slice(&reg(2, 0xb)); // sp
+        args.extend_from_slice(&reg(3, 0xc)); // pc
+        args.extend_from_slice(&reg(4, 0x20)); // buffer pointer
+        args.extend_from_slice(&prefixed(4, b"hi\x00x")); // buffer payload
+        let raw = record(&ctx, &args);
+        let rec = decode_perf_record(&raw).unwrap();
+        let PerfRecord::UprobeEnter(mut e) = rec else {
+            panic!("expected UprobeEnter");
+        };
+        let mut point = UprobeArgs::new();
+        point.name = "myhook".to_string();
+        point.point_args.push(PointArg::new_uprobe(
+            "b",
+            crate::argtype::r_buffer_len(256),
+            0,
+        ));
+        let line = render_uprobe_event(&mut e, &point, false).unwrap();
+        assert_eq!(
+            line,
+            "[40|30|app] myhook(b=0x20(hi\\x00x)) LR:0xa PC:0xc SP:0xb"
+        );
+        let rec = decode_perf_record(&raw).unwrap();
+        let PerfRecord::UprobeEnter(mut e) = rec else {
+            panic!("expected UprobeEnter");
+        };
+        let line = render_uprobe_event(&mut e, &point, true).unwrap();
+        assert_eq!(
+            line,
+            "[40|30|app] myhook(b=0x20(\n0000  68 69 00 78                                      |hi.x            |\n)) LR:0xa PC:0xc SP:0xb"
+        );
     }
 
     /// A cursor too short for the leading `Arg_reg` TLV must produce an Err

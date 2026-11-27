@@ -71,6 +71,13 @@ impl PointArg {
         self.group_type = group_type;
     }
 
+    /// `SetPointType(point_type)` — round 11 / P1: `UpdateSyscallPoint` clones
+    /// a bound `-w` point's args and re-types them (ALL when `exit_read`, else
+    /// ENTER), mirroring `set_group_type` one field over.
+    pub fn set_point_type(&mut self, point_type: u32) {
+        self.point_type = point_type;
+    }
+
     pub fn add_extra_op(&mut self, op_index: u32) {
         self.extra_op_list.push(op_index);
     }

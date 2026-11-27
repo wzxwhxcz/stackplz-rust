@@ -66,6 +66,12 @@ pub struct StackConfig {
     pub kill_signal: u32,
     /// `--tkill` signal written into `common_filter_t.tsignal`.
     pub tkill_signal: u32,
+    /// `--dumphex`: render argument payloads as hex dumps. Round 11 / Q1:
+    /// the uprobe side previously had no such field, so `render_uprobe_event`
+    /// hard-coded `dump_hex=false` and only `buf` args (whose type entry the
+    /// point parser bakes the flag into) ever hex-dumped. Mirrors
+    /// `SyscallConfig.dump_hex`.
+    pub dump_hex: bool,
 }
 
 impl Default for StackConfig {
@@ -90,6 +96,7 @@ impl Default for StackConfig {
             trace_mode: 0,
             kill_signal: 0,
             tkill_signal: 0,
+            dump_hex: false,
         }
     }
 }

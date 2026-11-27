@@ -32,7 +32,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
 
 use super::file_parser::{SyscallFileConfig, SyscallPointConfig};
-use super::point_arg::{PointArg, EBPF_SYS_ALL, EBPF_SYS_ENTER, EBPF_SYS_EXIT, REG_ARM64_MAX};
+use super::point_arg::{
+    PointArg, UprobeArgs, EBPF_SYS_ALL, EBPF_SYS_ENTER, EBPF_SYS_EXIT, REG_ARM64_MAX,
+};
+use crate::argtype::consts::INT;
 use crate::contract::MAX_OP_COUNT_SYSCALL;
 
 /// `user/config/config_syscall_aarch64.json` (upstream dev `62fc9e8`), 306 points.
@@ -297,6 +300,61 @@ impl SyscallPointTable {
         let index = *self.by_nr.get(&nr)?;
         self.points.get_mut(index)
     }
+
+    /// `SyscallConfig.UpdateSyscallPoint` (`config_module.go:483-515`, round 11
+    /// / P1): rebind one `-w ...]s` uprobe point onto the same-named syscall
+    /// point, replacing that point's enter/exit argument lists with the uprobe
+    /// point's arguments.
+    ///
+    /// Returns `Ok(false)` when the point does not bind (`bind_syscall` is
+    /// false) — the caller keeps it in the uprobe list. An unknown syscall
+    /// name is an error (Go panics with `unknown syscall name`; this crate
+    /// returns it so the CLI can fail loudly instead of hanging a probe that
+    /// goes nowhere).
+    ///
+    /// The replacement mirrors Go exactly: each argument is cloned twice
+    /// (`group_type` ENTER / EXIT, `point_type` ALL when `exit_read`, else
+    /// ENTER) and the exit list ends with a synthetic `ret` (`B("ret", INT)` —
+    /// no register, `REG_ARM64_MAX`, so it contributes no ops, exactly like
+    /// the `ret` that [`SyscallPoint::from_config`] builds for table points).
+    ///
+    /// Note the `]ss` suffix order: Go checks `]s` first, so its `]ss` branch
+    /// is unreachable (`config_module.go:344-351`); this crate checks `]ss`
+    /// first (`point_parser.rs`), so `exit_read` really is reachable here.
+    /// That is a deliberate fix of the upstream bug, not a divergence to
+    /// "align back".
+    pub fn update_syscall_point(&mut self, point: &UprobeArgs) -> Result<bool> {
+        if !point.bind_syscall {
+            return Ok(false);
+        }
+        let index = *self
+            .by_name
+            .get(point.name.as_str())
+            .ok_or_else(|| anyhow!("unknown syscall name:{}", point.name))?;
+        let point_type = if point.exit_read {
+            EBPF_SYS_ALL
+        } else {
+            EBPF_SYS_ENTER
+        };
+        let mut enter_point_args: Vec<PointArg> = Vec::with_capacity(point.point_args.len());
+        let mut exit_point_args: Vec<PointArg> = Vec::with_capacity(point.point_args.len() + 1);
+        for arg in &point.point_args {
+            let mut a_p = arg.clone();
+            a_p.set_group_type(EBPF_SYS_ENTER);
+            a_p.set_point_type(point_type);
+            enter_point_args.push(a_p);
+
+            let mut b_p = arg.clone();
+            b_p.set_group_type(EBPF_SYS_EXIT);
+            b_p.set_point_type(point_type);
+            exit_point_args.push(b_p);
+        }
+        exit_point_args.push(PointArg::new("ret", INT, EBPF_SYS_EXIT));
+        let target = &mut self.points[index];
+        target.enter_point_args = enter_point_args;
+        target.exit_point_args = exit_point_args;
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -476,5 +534,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Round 11 / P1: `-w 'write[int,buf:128,int]s'` replaces the builtin
+    /// `write` point's enter/exit argument lists with the user's three args
+    /// and appends a synthetic `ret` to the exit list.
+    #[test]
+    fn update_syscall_point_binds_write_args() {
+        init_argtypes();
+        let mut table = table();
+        let points = crate::config::point_parser::parse_hook_point(
+            &["write[int,buf:128,int]s".to_string()],
+            "/libtest.so",
+            false,
+        )
+        .unwrap();
+        assert_eq!(points.len(), 1);
+        assert!(table.update_syscall_point(&points[0]).unwrap());
+
+        let write = table.by_name("write").unwrap();
+        let enter_names: Vec<&str> = write
+            .enter_point_args
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(enter_names, ["arg_0", "arg_1", "arg_2"]);
+        assert!(
+            write
+                .enter_point_args
+                .iter()
+                .all(|a| { a.point_type == EBPF_SYS_ENTER && a.group_type == EBPF_SYS_ENTER }),
+            "bound enter args are ENTER/ENTER"
+        );
+        assert!(
+            write.enter_point_args[1].is_buffer(),
+            "buf:128 stays a buffer"
+        );
+
+        let exit_names: Vec<&str> = write
+            .exit_point_args
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(exit_names, ["arg_0", "arg_1", "arg_2", "ret"]);
+        let ret = write.exit_point_args.last().unwrap();
+        assert_eq!(ret.reg_index, REG_ARM64_MAX, "ret reads no register");
+        assert_eq!(ret.point_type, EBPF_SYS_EXIT, "ret is exit-only");
+        assert!(ret.get_op_list().is_empty(), "ret contributes no ops");
+    }
+
+    /// Round 11 / P1: `-w 'write[int]ss'` binds with `exit_read`, so both
+    /// clones of the argument get `point_type` ALL (Go's `]ss` branch is
+    /// unreachable upstream; this crate checks `]ss` first, so it works).
+    #[test]
+    fn update_syscall_point_ss_sets_all_point_type() {
+        init_argtypes();
+        let mut table = table();
+        let points = crate::config::point_parser::parse_hook_point(
+            &["write[int]ss".to_string()],
+            "/libtest.so",
+            false,
+        )
+        .unwrap();
+        assert!(table.update_syscall_point(&points[0]).unwrap());
+        let write = table.by_name("write").unwrap();
+        assert!(
+            write
+                .enter_point_args
+                .iter()
+                .chain(&write.exit_point_args)
+                .filter(|a| a.name != "ret")
+                .all(|a| a.point_type == EBPF_SYS_ALL),
+            "exit_read binds both clones as ALL"
+        );
+    }
+
+    /// Round 11 / P1: binding an unknown syscall name bails (Go panics with
+    /// `unknown syscall name`) instead of silently hanging an ordinary uprobe.
+    #[test]
+    fn update_syscall_point_unknown_name_bails() {
+        init_argtypes();
+        let mut table = table();
+        let points = crate::config::point_parser::parse_hook_point(
+            &["nosuchsyscall[int]s".to_string()],
+            "/libtest.so",
+            false,
+        )
+        .unwrap();
+        let err = table.update_syscall_point(&points[0]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unknown syscall name:nosuchsyscall"),
+            "{err:#}"
+        );
+    }
+
+    /// Round 11 / P1: without the `]s` suffix nothing is bound and the table
+    /// is untouched — the point stays in the uprobe list.
+    #[test]
+    fn update_syscall_point_unbound_returns_false_and_keeps_table() {
+        init_argtypes();
+        let mut table = table();
+        let before: Vec<String> = table
+            .by_name("write")
+            .unwrap()
+            .enter_point_args
+            .iter()
+            .map(|a| a.name.clone())
+            .collect();
+        let points = crate::config::point_parser::parse_hook_point(
+            &["write[int,buf:128,int]".to_string()],
+            "/libtest.so",
+            false,
+        )
+        .unwrap();
+        assert!(!table.update_syscall_point(&points[0]).unwrap());
+        let after: Vec<String> = table
+            .by_name("write")
+            .unwrap()
+            .enter_point_args
+            .iter()
+            .map(|a| a.name.clone())
+            .collect();
+        assert_eq!(before, after, "unbound point must not touch the table");
     }
 }

@@ -21,8 +21,9 @@
 //! ```
 
 use anyhow::{anyhow, Result};
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fmt;
 
 use super::base0::parse_base0_u64;
 use super::point_arg::{PointArg, EBPF_SYS_ALL, EBPF_SYS_ENTER, EBPF_SYS_EXIT, EBPF_UPROBE_ENTER};
@@ -74,7 +75,8 @@ pub struct PointConfig {
     /// Symbol or function name
     pub name: String,
 
-    /// Signal type: "enter", "exit", "all" (for syscalls)
+    /// Kill signal sent when this point fires, e.g. "SIGSTOP" (Go config_module.go:297-298);
+    /// empty means none. The enter/exit/all vocabulary belongs to ParamConfig.more, not to this field.
     #[serde(default)]
     pub signal: String,
 
@@ -85,13 +87,99 @@ pub struct PointConfig {
 
 /// Syscall-specific point with syscall number.
 /// Mirrors `SyscallPointConfig` in config_file.go:28-31.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Round 11 / N2: `Deserialize` is hand-written, not derived. The struct
+/// used to carry `#[serde(flatten)]` on `point`, and serde silently drops
+/// unknown keys that arrive through a flatten boundary — `deny_unknown_fields`
+/// on the inner `PointConfig` does not fire there (J1's protection had a
+/// hole: `{"nr":1,"name":"write","nrr":9}` parsed as `Ok`). The manual impl
+/// rejects any key outside `nr`/`name`/`signal`/`params`, for JSON and YAML
+/// alike (it is `MapAccess`-based, not JSON-specific).
+#[derive(Debug, Clone, Serialize)]
 pub struct SyscallPointConfig {
     /// Syscall number
     pub nr: u32,
 
-    #[serde(flatten)]
     pub point: PointConfig,
+}
+
+impl<'de> serde::de::Deserialize<'de> for SyscallPointConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "lowercase")]
+        enum Field {
+            Nr,
+            Name,
+            Signal,
+            Params,
+        }
+
+        struct SyscallPointConfigVisitor;
+
+        impl<'de> Visitor<'de> for SyscallPointConfigVisitor {
+            type Value = SyscallPointConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct SyscallPointConfig")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<SyscallPointConfig, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut nr = None;
+                let mut name = None;
+                let mut signal = None;
+                let mut params = None;
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Nr => {
+                            if nr.is_some() {
+                                return Err(de::Error::duplicate_field("nr"));
+                            }
+                            nr = Some(map.next_value()?);
+                        }
+                        Field::Name => {
+                            if name.is_some() {
+                                return Err(de::Error::duplicate_field("name"));
+                            }
+                            name = Some(map.next_value()?);
+                        }
+                        Field::Signal => {
+                            if signal.is_some() {
+                                return Err(de::Error::duplicate_field("signal"));
+                            }
+                            signal = Some(map.next_value()?);
+                        }
+                        Field::Params => {
+                            if params.is_some() {
+                                return Err(de::Error::duplicate_field("params"));
+                            }
+                            params = Some(map.next_value()?);
+                        }
+                    }
+                }
+                let nr = nr.ok_or_else(|| de::Error::missing_field("nr"))?;
+                let name = name.ok_or_else(|| de::Error::missing_field("name"))?;
+                let signal = signal.unwrap_or_default();
+                let params = params.unwrap_or_default();
+                Ok(SyscallPointConfig {
+                    nr,
+                    point: PointConfig {
+                        name,
+                        signal,
+                        params,
+                    },
+                })
+            }
+        }
+
+        const FIELDS: &[&str] = &["nr", "name", "signal", "params"];
+        deserializer.deserialize_struct("SyscallPointConfig", FIELDS, SyscallPointConfigVisitor)
+    }
 }
 
 /// File configuration base trait.
@@ -106,9 +194,13 @@ pub struct FileConfig {
 
 /// Uprobe configuration file.
 /// Mirrors `UprobeFileConfig` in config_file.go:212-216.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Round 11 / N2: `Deserialize` is hand-written for the same reason as
+/// [`SyscallPointConfig`]: the old `#[serde(flatten)]` on `base` let unknown
+/// top-level keys (e.g. `bogus_top`) through silently. Only
+/// `type`/`library`/`points` are accepted now.
+#[derive(Debug, Clone, Serialize)]
 pub struct UprobeFileConfig {
-    #[serde(flatten)]
     pub base: FileConfig,
 
     /// Library path
@@ -119,16 +211,143 @@ pub struct UprobeFileConfig {
     pub points: Vec<PointConfig>,
 }
 
+impl<'de> serde::de::Deserialize<'de> for UprobeFileConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "lowercase")]
+        enum Field {
+            Type,
+            Library,
+            Points,
+        }
+
+        struct UprobeFileConfigVisitor;
+
+        impl<'de> Visitor<'de> for UprobeFileConfigVisitor {
+            type Value = UprobeFileConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct UprobeFileConfig")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<UprobeFileConfig, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut config_type = None;
+                let mut library = None;
+                let mut points = None;
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Type => {
+                            if config_type.is_some() {
+                                return Err(de::Error::duplicate_field("type"));
+                            }
+                            config_type = Some(map.next_value()?);
+                        }
+                        Field::Library => {
+                            if library.is_some() {
+                                return Err(de::Error::duplicate_field("library"));
+                            }
+                            library = Some(map.next_value()?);
+                        }
+                        Field::Points => {
+                            if points.is_some() {
+                                return Err(de::Error::duplicate_field("points"));
+                            }
+                            points = Some(map.next_value()?);
+                        }
+                    }
+                }
+                let config_type = config_type.ok_or_else(|| de::Error::missing_field("type"))?;
+                let library = library.ok_or_else(|| de::Error::missing_field("library"))?;
+                let points = points.unwrap_or_default();
+                Ok(UprobeFileConfig {
+                    base: FileConfig { config_type },
+                    library,
+                    points,
+                })
+            }
+        }
+
+        const FIELDS: &[&str] = &["type", "library", "points"];
+        deserializer.deserialize_struct("UprobeFileConfig", FIELDS, UprobeFileConfigVisitor)
+    }
+}
+
 /// Syscall configuration file.
 /// Mirrors `SyscallFileConfig` in config_file.go:218-221.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Round 11 / N2: `Deserialize` is hand-written for the same reason as
+/// [`SyscallPointConfig`]: the old `#[serde(flatten)]` on `base` let unknown
+/// top-level keys through silently. Only `type`/`points` are accepted now.
+#[derive(Debug, Clone, Serialize)]
 pub struct SyscallFileConfig {
-    #[serde(flatten)]
     pub base: FileConfig,
 
     /// Syscall hook points
     #[serde(default)]
     pub points: Vec<SyscallPointConfig>,
+}
+
+impl<'de> serde::de::Deserialize<'de> for SyscallFileConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "lowercase")]
+        enum Field {
+            Type,
+            Points,
+        }
+
+        struct SyscallFileConfigVisitor;
+
+        impl<'de> Visitor<'de> for SyscallFileConfigVisitor {
+            type Value = SyscallFileConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct SyscallFileConfig")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<SyscallFileConfig, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut config_type = None;
+                let mut points = None;
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Type => {
+                            if config_type.is_some() {
+                                return Err(de::Error::duplicate_field("type"));
+                            }
+                            config_type = Some(map.next_value()?);
+                        }
+                        Field::Points => {
+                            if points.is_some() {
+                                return Err(de::Error::duplicate_field("points"));
+                            }
+                            points = Some(map.next_value()?);
+                        }
+                    }
+                }
+                let config_type = config_type.ok_or_else(|| de::Error::missing_field("type"))?;
+                let points = points.unwrap_or_default();
+                Ok(SyscallFileConfig {
+                    base: FileConfig { config_type },
+                    points,
+                })
+            }
+        }
+
+        const FIELDS: &[&str] = &["type", "points"];
+        deserializer.deserialize_struct("SyscallFileConfig", FIELDS, SyscallFileConfigVisitor)
+    }
 }
 
 impl ParamConfig {
@@ -478,30 +697,6 @@ fn arm_reg_index_64(name: &str) -> Option<u32> {
     Some(index)
 }
 
-/// Load syscall configuration from file.
-pub fn load_syscall_config(path: &str) -> Result<SyscallFileConfig> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| anyhow!("failed to read config file {}: {}", path, e))?;
-
-    if path.ends_with(".yaml") || path.ends_with(".yml") {
-        serde_yaml::from_str(&content).map_err(|e| anyhow!("failed to parse YAML: {}", e))
-    } else {
-        serde_json::from_str(&content).map_err(|e| anyhow!("failed to parse JSON: {}", e))
-    }
-}
-
-/// Load uprobe configuration from file.
-pub fn load_uprobe_config(path: &str) -> Result<UprobeFileConfig> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| anyhow!("failed to read config file {}: {}", path, e))?;
-
-    if path.ends_with(".yaml") || path.ends_with(".yml") {
-        serde_yaml::from_str(&content).map_err(|e| anyhow!("failed to parse YAML: {}", e))
-    } else {
-        serde_json::from_str(&content).map_err(|e| anyhow!("failed to parse JSON: {}", e))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,6 +882,33 @@ points:
         assert!(err.to_string().contains("extra"), "{err}");
     }
 
+    /// Round 11 / N2: J1's deny did not survive the flatten boundary —
+    /// `{"nr":1,"name":"write","nrr":9}` and `{"type":"syscall","points":[],
+    /// "bogus_top":1}` used to parse as `Ok` with the unknown key silently
+    /// dropped. The hand-written `Deserialize` impls reject them now, and the
+    /// error text names the offending key.
+    #[test]
+    fn unknown_fields_rejected_through_flatten_configs() {
+        let err = serde_json::from_str::<SyscallPointConfig>(r#"{"nr":1,"name":"write","nrr":9}"#)
+            .unwrap_err();
+        assert!(err.to_string().contains("nrr"), "{err}");
+        let err = serde_json::from_str::<SyscallFileConfig>(
+            r#"{"type":"syscall","points":[],"bogus_top":1}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("bogus_top"), "{err}");
+        let err = serde_json::from_str::<UprobeFileConfig>(
+            r#"{"type":"uprobe","library":"libc.so","points":[],"bogus_top":1}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("bogus_top"), "{err}");
+        // YAML takes the same path (the manual impls are `MapAccess`-based,
+        // not JSON-specific).
+        let err =
+            serde_yaml::from_str::<SyscallPointConfig>("nr: 1\nname: write\nnrr: 9\n").unwrap_err();
+        assert!(err.to_string().contains("nrr"), "{err}");
+    }
+
     /// J1: the shipped syscall tables only use known keys (top level
     /// `points`/`type`, point `name`/`nr`/`params`, param
     /// `name`/`type`/`more`/`format`/`size`), so they still load under
@@ -707,9 +929,9 @@ points:
     /// `reg`/`more`/`format`/`size`/`read_op`) loads under
     /// `deny_unknown_fields` — the key sets match the upstream Go test
     /// fixtures (`tests/config_uprobe_test*.json`, audited 2026-11-27).
-    /// Unknown keys inside a flattened struct are silently dropped by serde
-    /// (verified by probe: `bogus_top`/`nrr` parse as Ok), so the three
-    /// flatten structs stay loose by design — see `hook_json.rs`.
+    /// Round 11 / N2: the three formerly-flatten structs now reject unknown
+    /// keys too (hand-written `Deserialize`); see
+    /// `unknown_fields_rejected_through_flatten_configs`.
     #[test]
     fn shipped_uprobe_shape_loads_with_deny_unknown_fields() {
         let file: UprobeFileConfig = serde_json::from_str(

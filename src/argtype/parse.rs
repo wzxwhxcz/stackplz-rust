@@ -252,11 +252,13 @@ fn parse_struct(
                 // Go panics for a struct type without a formatter. We keep the
                 // event printable with a lossless-ish fallback instead.
                 // `format_buffer` already parenthesises its output, so just
-                // concatenate (C-s7: the fallback must honour `dump_hex`).
+                // concatenate (C-s7: the fallback must honour `dump_hex` —
+                // round 11 / Q1: the `at.dump_hex` half, matching the buffer
+                // path above, so a baked-in flag is not dropped either).
                 None => Ok(format!(
                     "{}{}",
                     render::format_ptr(ptr),
-                    render::format_buffer(payload, dump_hex)
+                    render::format_buffer(payload, dump_hex || at.dump_hex)
                 )),
             }
         }

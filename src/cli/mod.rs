@@ -113,28 +113,124 @@ pub fn start() -> i32 {
 
 /// `runFunc` (`root.go:373-455`): pick the module(s), start them, wait.
 fn run_func(global: &GlobalConfig, target: &TargetConfig) -> Result<(), RunError> {
+    // The `-w` parse resolves argument types, so the registry must be up
+    // before anything parses points (`stack_cmd::run` repeats the call; the
+    // OnceLock makes the second one a no-op).
+    crate::argtype::init_argtypes();
+
     // Load the syscall point table once (embedded, or `-c/--config` override —
     // report W16) and resolve `-s/--no-syscall` against it.
     let mut table =
         syscall_cmd::load_point_table(global).map_err(|e| RunError::Usage(e.to_string()))?;
+
+    // Round 11 / P1: parse `-w` points and dispatch `]s`/`]ss` bindings into
+    // the syscall table *before* selection — Go's order is `LoadConfig`,
+    // then `Parse_HookPoint` + `GetSyscall` (which appends the bound names
+    // to the syscall spec), then `Parse_Syscall` (`root.go:259-290`,
+    // `config_module.go:272-283`).
+    let dispatch = dispatch_w_points(global, target, &mut table)
+        .map_err(|e| RunError::Usage(e.to_string()))?;
+    let syscall_spec = merge_syscall_spec(&global.syscall, &dispatch.bound_names);
     let selection =
-        crate::config::syscall_select::select(&mut table, &global.syscall, &global.no_syscall)
+        crate::config::syscall_select::select(&mut table, &syscall_spec, &global.no_syscall)
             .map_err(|e| RunError::Usage(e.to_string()))?;
 
-    let has_uprobe_points = !global.hook_point.is_empty()
+    let has_uprobe_points = dispatch
+        .w_points
+        .as_ref()
+        .is_some_and(|(_, points)| !points.is_empty())
         || stack_cmd::has_uprobe_config(global).map_err(|e| RunError::Usage(e.to_string()))?;
 
-    // Dev order: syscall before stack, and a syscall run does not fall back to
-    // stack hook points.
-    let modules = if selection.enable {
-        vec![ModuleKind::Syscall]
-    } else if has_uprobe_points {
-        vec![ModuleKind::Stack]
-    } else {
+    // Dev order: syscall before stack. Without a binding the old either-or
+    // rule stands (a `-s` run does not fall back to stack hook points); when
+    // a `]s` binding exists the syscall module is enabled *in addition* to
+    // the stack module, because one run now genuinely needs both.
+    let mut modules = Vec::new();
+    if selection.enable {
+        modules.push(ModuleKind::Syscall);
+    }
+    if has_uprobe_points && (!selection.enable || !dispatch.bound_names.is_empty()) {
+        modules.push(ModuleKind::Stack);
+    }
+    if modules.is_empty() {
         return Err(RunError::NothingToHook);
-    };
+    }
 
-    run_modules(modules, global, target, table, selection)
+    run_modules(modules, global, target, table, selection, dispatch.w_points)
+}
+
+/// Outcome of `dispatch_w_points` (round 11 / P1): the `-w` points that
+/// remain for the stack module, and the syscall names bound into the table.
+/// A named struct (rather than a nested tuple) keeps the dispatch signature
+/// under clippy's `type_complexity` limit.
+#[derive(Debug)]
+struct WDispatch {
+    /// Remaining `-w` points for the stack module (`None` when there is no
+    /// `-w` input or nothing remains).
+    w_points: Option<(String, Vec<crate::config::UprobeArgs>)>,
+    /// Syscall names bound into the table, for the `-s` spec merge.
+    bound_names: Vec<String>,
+}
+
+/// Parse `-w/--point` and dispatch `]s`/`]ss` bindings into the syscall
+/// table (round 11 / P1, Go `GetSyscall`, `config_module.go:272-283`).
+///
+/// A bound point is removed from the uprobe list and its name is returned so
+/// the caller can merge it into the syscall spec before selection; an
+/// unknown bound name is an error (see `update_syscall_point`).
+///
+/// An exit companion (`get_exit_point`) carries `bind_syscall == false`, so
+/// it always stays in the uprobe list — Go's `GetExitPoint` does not copy
+/// `BindSyscall` either (`config_uprobe.go:26-43`).
+fn dispatch_w_points(
+    global: &GlobalConfig,
+    target: &TargetConfig,
+    table: &mut crate::config::SyscallPointTable,
+) -> anyhow::Result<WDispatch> {
+    if global.hook_point.is_empty() {
+        return Ok(WDispatch {
+            w_points: None,
+            bound_names: Vec::new(),
+        });
+    }
+    let library = crate::util::find_lib(&global.library, &target.library_dirs)?;
+    let points = crate::config::point_parser::parse_hook_point(
+        &global.hook_point,
+        &library,
+        global.dump_hex,
+    )?;
+    let mut bound_names = Vec::new();
+    let mut remaining = Vec::new();
+    for point in points {
+        if table.update_syscall_point(&point)? {
+            bound_names.push(point.name.clone());
+        } else {
+            remaining.push(point);
+        }
+    }
+    let w_points = if remaining.is_empty() {
+        None
+    } else {
+        Some((library, remaining))
+    };
+    Ok(WDispatch {
+        w_points,
+        bound_names,
+    })
+}
+
+/// Merge bound `-w ...]s` names into the `-s/--syscall` spec (round 11 / P1):
+/// Go appends `GetSyscall`'s return to `gconfig.SysCall` before
+/// `Parse_Syscall` (`root.go:281-284`), so a bare `-w 'write[...]s'` enables
+/// the syscall module with no `-s` at all. Empty parts are skipped so the
+/// merged spec never starts with a stray comma.
+fn merge_syscall_spec(base: &str, bound_names: &[String]) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if !base.is_empty() {
+        parts.push(base);
+    }
+    parts.extend(bound_names.iter().map(String::as_str));
+    parts.join(",")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +261,7 @@ fn run_modules(
     target: &TargetConfig,
     table: crate::config::SyscallPointTable,
     selection: crate::config::SyscallSelection,
+    w_points: Option<(String, Vec<crate::config::UprobeArgs>)>,
 ) -> Result<(), RunError> {
     install_signal_handler();
     let (tx, rx) = mpsc::channel::<(String, String)>();
@@ -176,13 +273,14 @@ fn run_modules(
         let target = target.clone();
         let table = table.clone();
         let selection = selection.clone();
+        let w_points = w_points.clone();
         let name = kind.name();
         std::thread::Builder::new()
             .name(name.to_string())
             .spawn(move || {
                 let result = match kind {
                     ModuleKind::Syscall => syscall_cmd::run(&global, &target, table, selection),
-                    ModuleKind::Stack => stack_cmd::run(&global, &target),
+                    ModuleKind::Stack => stack_cmd::run(&global, &target, w_points.clone()),
                 };
                 if let Err(e) = result {
                     if tx.send((name.to_string(), format!("{e:#}"))).is_err() {
@@ -292,5 +390,103 @@ mod tests {
     fn module_names_match_upstream_constants() {
         assert_eq!(ModuleKind::Syscall.name(), "SyscallMod");
         assert_eq!(ModuleKind::Stack.name(), "StackMod");
+    }
+
+    /// Round 11 / P1: `-w 'write[...]s'` binds `write` into the syscall
+    /// table (and is removed from the uprobe list) while an unbound point
+    /// rides along to the stack module.
+    #[test]
+    fn dispatch_w_points_binds_and_keeps_remainder() {
+        crate::argtype::init_argtypes();
+        let dir = std::env::temp_dir().join(format!("stackplz-w-binds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = dir.join("libtest.so");
+        std::fs::write(&lib, b"").unwrap();
+        let global = GlobalConfig {
+            hook_point: vec![
+                "write[int,buf:128,int]s".to_string(),
+                "openat[int]".to_string(),
+            ],
+            library: "libtest.so".to_string(),
+            ..Default::default()
+        };
+        let target = TargetConfig {
+            library_dirs: vec![dir.to_string_lossy().to_string()],
+            ..Default::default()
+        };
+        let mut table = crate::config::SyscallPointTable::embedded().unwrap();
+        let dispatch = dispatch_w_points(&global, &target, &mut table).unwrap();
+        assert_eq!(dispatch.bound_names, ["write"]);
+        let (lib_path, remaining) = dispatch.w_points.expect("unbound point must remain");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].name, "openat");
+        assert!(!remaining[0].bind_syscall);
+        assert!(lib_path.ends_with("libtest.so"));
+        let enter_names: Vec<&str> = table
+            .by_name("write")
+            .unwrap()
+            .enter_point_args
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(enter_names, ["arg_0", "arg_1", "arg_2"]);
+        std::fs::remove_file(&lib).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    /// Round 11 / P1: binding an unknown syscall name fails the dispatch
+    /// instead of silently hanging an ordinary uprobe.
+    #[test]
+    fn dispatch_w_points_unknown_bound_name_bails() {
+        crate::argtype::init_argtypes();
+        let dir = std::env::temp_dir().join(format!("stackplz-w-unknown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = dir.join("libtest.so");
+        std::fs::write(&lib, b"").unwrap();
+        let global = GlobalConfig {
+            hook_point: vec!["nosuchsyscall[int]s".to_string()],
+            library: "libtest.so".to_string(),
+            ..Default::default()
+        };
+        let target = TargetConfig {
+            library_dirs: vec![dir.to_string_lossy().to_string()],
+            ..Default::default()
+        };
+        let mut table = crate::config::SyscallPointTable::embedded().unwrap();
+        let err = dispatch_w_points(&global, &target, &mut table).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unknown syscall name:nosuchsyscall"),
+            "{err:#}"
+        );
+        std::fs::remove_file(&lib).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    /// Round 11 / P1: no `-w` input means no dispatch and no bound names.
+    #[test]
+    fn dispatch_w_points_empty_hook_point_is_noop() {
+        let mut table = crate::config::SyscallPointTable::empty();
+        let dispatch = dispatch_w_points(
+            &GlobalConfig::default(),
+            &TargetConfig::default(),
+            &mut table,
+        )
+        .unwrap();
+        assert!(dispatch.w_points.is_none());
+        assert!(dispatch.bound_names.is_empty());
+    }
+
+    /// Round 11 / P1: bound names append to the `-s` spec (Go's
+    /// `gconfig.SysCall += "," + u_syscall`); empty parts never leave a
+    /// stray leading comma.
+    #[test]
+    fn merge_syscall_spec_joins_and_skips_empty() {
+        assert_eq!(merge_syscall_spec("", &["write".to_string()]), "write");
+        assert_eq!(
+            merge_syscall_spec("read", &["write".to_string()]),
+            "read,write"
+        );
+        assert_eq!(merge_syscall_spec("", &[]), "");
+        assert_eq!(merge_syscall_spec("read", &[]), "read");
     }
 }

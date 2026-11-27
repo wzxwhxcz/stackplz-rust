@@ -55,15 +55,14 @@ pub struct LibHookConfig {
 /// (`origin/master:cli/cmd/stack.go:41-44`). Unknown fields are rejected, as
 /// for [`BaseHookConfig`] (H7).
 ///
-/// Policy boundary (H7/J1): the six deserialization structs in
+/// Policy boundary (H7/J1/N2): all six deserialization structs in
 /// `file_parser.rs` (`ParamConfig`, `PointConfig`, `SyscallPointConfig`,
-/// `FileConfig`, `UprobeFileConfig`, `SyscallFileConfig`) are not treated
-/// uniformly. The three non-flattening ones (`ParamConfig`, `PointConfig`,
-/// `FileConfig`) carry `#[serde(deny_unknown_fields)]`. The three
-/// flattening ones (`SyscallPointConfig`, `UprobeFileConfig`,
-/// `SyscallFileConfig`) stay loose on purpose: serde cannot combine
-/// `#[serde(flatten)]` with `deny_unknown_fields` (flatten absorbs unknown
-/// keys, so deny silently does nothing).
+/// `FileConfig`, `UprobeFileConfig`, `SyscallFileConfig`) reject unknown
+/// fields. The three non-flattening ones carry `#[serde(deny_unknown_fields)]`.
+/// The other three used to carry `#[serde(flatten)]`, which silently absorbs
+/// unknown keys (deny does nothing through a flatten boundary), so since
+/// round 11 they use hand-written `Deserialize` impls that reject unknown
+/// keys instead (`file_parser.rs`, N2).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookConfig {

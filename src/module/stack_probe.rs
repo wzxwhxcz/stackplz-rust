@@ -268,6 +268,9 @@ impl StackProbeModule {
         // We share them via Arc so the closure can read them.
         let hook_points = Arc::new(self.hook_points);
         let render_logger = logger.clone();
+        // Round 11 / Q1: the global `--dumphex` flag, copied out so the
+        // `move` callback below can carry it without moving `conf`.
+        let dump_hex = conf.dump_hex;
 
         let events_map = obj
             .maps()
@@ -291,7 +294,7 @@ impl StackProbeModule {
         let pb = libbpf_rs::PerfBufferBuilder::new(&events_map)
             .pages(pages)
             .sample_cb(move |_cpu: i32, data: &[u8]| {
-                match render_uprobe_event(data, &hook_points) {
+                match render_uprobe_event(data, &hook_points, dump_hex) {
                     Ok((line, pid)) => {
                         render_logger.println(&line);
                         {
@@ -390,9 +393,16 @@ fn join_ids(ids: &[u32]) -> String {
 /// event pid (`EventContext.pid`) for `--auto` resume (round 7 / F4).
 /// Non-uprobe records carry pid 0, which never resumes.
 ///
+/// `dump_hex` is the global `--dumphex` flag from `StackConfig` (round 11 /
+/// Q1); the caller reads it off `self.effective_stack_config()`.
+///
 /// Mirrors `UprobeEvent.ParseContext` + `String()` in Go.
 #[cfg(target_os = "linux")]
-fn render_uprobe_event(raw: &[u8], hook_points: &[UprobeArgs]) -> Result<(String, u32)> {
+fn render_uprobe_event(
+    raw: &[u8],
+    hook_points: &[UprobeArgs],
+    dump_hex: bool,
+) -> Result<(String, u32)> {
     use crate::contract::decode::{decode_perf_record, PerfRecord};
 
     let rec = decode_perf_record(raw)?;
@@ -402,7 +412,7 @@ fn render_uprobe_event(raw: &[u8], hook_points: &[UprobeArgs]) -> Result<(String
             let point = hook_points
                 .get(e.point_key as usize)
                 .ok_or_else(|| anyhow!("point_key {} out of range", e.point_key))?;
-            let line = crate::event::render::render_uprobe_event(&mut e, point)?;
+            let line = crate::event::render::render_uprobe_event(&mut e, point, dump_hex)?;
             Ok((line, pid))
         }
         _ => bail!(
@@ -705,7 +715,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn foreign_syscall_record_fails_in_uprobe_stream() {
         let raw = foreign_raw_record(456, 63); // SYSCALL_ENTER, sysno 63
-        let err = render_uprobe_event(&raw, &[]).unwrap_err();
+        let err = render_uprobe_event(&raw, &[], false).unwrap_err();
         assert!(format!("{err:#}").contains("non-uprobe event"), "{err:#}");
     }
 

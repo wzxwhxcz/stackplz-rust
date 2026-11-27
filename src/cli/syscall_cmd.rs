@@ -43,8 +43,10 @@ pub fn load_point_table(global: &GlobalConfig) -> Result<SyscallPointTable> {
         }
     }
 
-    // No YAML support here: dev only reads JSON config files; `load_syscall_config`
-    // (YAML-capable) is used by other paths, not this one.
+    // No YAML support here: dev only reads JSON config files (round 11 / O2:
+    // the YAML-capable `load_syscall_config` / `load_uprobe_config` loaders
+    // had no production caller and were deleted; both CLI paths parse JSON
+    // inline instead).
 
     SyscallPointTable::embedded()
 }
@@ -93,6 +95,7 @@ pub fn build_config(
     conf.kill_signal = crate::module::stack_probe::parse_signal_name(&global.kill_signal);
     conf.tkill_signal = crate::module::stack_probe::parse_signal_name(&global.tkill_signal);
 
+    conf.validate()?; // Round 11 / P2: zero buffer_mb fails here (K2 twin), not later at perf_pages.
     Ok(conf)
 }
 
@@ -134,7 +137,13 @@ mod tests {
     use crate::config::global::parse_id_list;
 
     fn global() -> GlobalConfig {
-        GlobalConfig::default()
+        // Round 11 / P2: `build_config` validates the buffer, so the helper
+        // carries the CLI default (8 MiB, `cli/args.rs`) instead of the struct
+        // Default's 0 — these tests are not about the buffer.
+        GlobalConfig {
+            buffer: 8,
+            ..Default::default()
+        }
     }
 
     fn selection(all: bool) -> SyscallSelection {
@@ -283,7 +292,10 @@ mod tests {
     /// "every uid".
     #[test]
     fn name_group_alone_disables_the_permissive_fallback() {
-        let global = GlobalConfig::default();
+        let global = GlobalConfig {
+            buffer: 8,
+            ..Default::default()
+        };
         let target = TargetConfig {
             trace_uid_group: crate::contract::TraceGroup::Root as u32,
             ..Default::default()
@@ -318,7 +330,10 @@ mod tests {
     /// instead of accidental.
     #[test]
     fn no_filters_at_all_keeps_the_round1_permissive_deviation() {
-        let global = GlobalConfig::default();
+        let global = GlobalConfig {
+            buffer: 8,
+            ..Default::default()
+        };
         let conf = build_config(
             &global,
             &TargetConfig::default(),
@@ -352,6 +367,27 @@ mod tests {
         .unwrap();
         assert_eq!(conf.buffer_mb, 16);
         assert_eq!(conf.buffer_mb as usize * 256, 4096, "16 MiB == 4096 pages");
+    }
+
+    /// Round 11 / P2 (K2 twin): syscall `-b 0` fails in `build_config`
+    /// with the "not set" message, instead of walking to `run()` and failing
+    /// there with `perf_pages`' generic text.
+    #[test]
+    fn zero_buffer_fails_early_with_not_set_message() {
+        let global = GlobalConfig {
+            buffer: 0,
+            ..Default::default()
+        };
+        let err = build_config(
+            &global,
+            &TargetConfig::default(),
+            SyscallPointTable::empty(),
+            selection(true),
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not set"), "{msg}");
+        assert!(!msg.contains("at least 1 MiB"), "{msg}");
     }
 
     /// Trace mode comes from `-s`, not from a hard-coded guess: `-s all` writes

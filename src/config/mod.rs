@@ -38,8 +38,7 @@ pub mod thread_blacklist;
 
 pub use crate::cli::root::{ResolvedFilters, TidBlacklist};
 pub use file_parser::{
-    load_syscall_config, load_uprobe_config, FileConfig, ParamConfig, PointConfig,
-    SyscallFileConfig, SyscallPointConfig, UprobeFileConfig,
+    FileConfig, ParamConfig, PointConfig, SyscallFileConfig, SyscallPointConfig, UprobeFileConfig,
 };
 pub use filter::{
     add_filter, get_filter_by_name, get_filter_index, get_filters, ArgFilter, EArgFilter,

@@ -2,6 +2,7 @@
 
 use super::syscall_points::SyscallPointTable;
 use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
+use anyhow::{bail, Result};
 
 /// Syscall tracepoint module configuration. Mirrors `ModuleConfig` + `SyscallConfig`.
 #[derive(Debug, Clone)]
@@ -46,6 +47,18 @@ pub struct SyscallConfig {
 }
 
 impl SyscallConfig {
+    /// Round 11 / P2: reject a config whose `buffer_mb` was never set (0) —
+    /// the `StackConfig::validate` twin (K2, round 10). Without it, syscall
+    /// `-b 0` walks all the way to `run()` and fails there with `perf_pages`'
+    /// generic "buffer size must be at least 1 MiB", far from the
+    /// construction point and without saying the buffer was never set.
+    pub fn validate(&self) -> Result<()> {
+        if self.buffer_mb == 0 {
+            bail!("buffer size is not set: pass -b/--buffer (MiB, default 8)");
+        }
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self::with_table(SyscallPointTable::empty())
     }

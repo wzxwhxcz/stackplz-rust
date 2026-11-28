@@ -21,7 +21,9 @@ pub fn find_lib(library: &str, library_dirs: &[String]) -> Result<String> {
         if !p.exists() {
             bail!("library not found: {}", library);
         }
-        return Ok(library.to_string());
+        // R18-C3: canonicalize so equivalent path spellings collapse to one
+        // dedup key; fall back to the original when that fails.
+        return Ok(canonicalize_or_original(&p));
     }
 
     let mut hits: Vec<String> = Vec::new();
@@ -37,9 +39,19 @@ pub fn find_lib(library: &str, library_dirs: &[String]) -> Result<String> {
     }
     match hits.len() {
         0 => bail!("library not found: {}", library),
-        1 => Ok(hits.remove(0)),
+        1 => Ok(canonicalize_or_original(std::path::Path::new(
+            &hits.remove(0),
+        ))),
         n => bail!("find {} libs with the same name", n),
     }
+}
+
+/// R18-C3: reduce a resolved path to its canonical form; on failure keep the
+/// original string (the file already exists, so this is only a fallback).
+fn canonicalize_or_original(path: &std::path::Path) -> String {
+    std::fs::canonicalize(path)
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
 }
 
 /// Read `/proc/{pid}/maps` as a UTF-8 string. Mirrors `ReadMapsByPid`
@@ -59,7 +71,11 @@ mod tests {
         // Existing absolute file.
         let p = env!("CARGO_MANIFEST_DIR").to_string() + "/Cargo.toml";
         let r = find_lib(&p, &[]).unwrap();
-        assert_eq!(r, p);
+        let want = std::fs::canonicalize(&p)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(r, want);
     }
 
     #[test]
@@ -95,6 +111,52 @@ mod tests {
         // cleanup so re-runs are clean
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// R18-C3: equivalent spellings of the same file (two symlinks to one real
+    /// file) yield one canonical path string, so dedup keys collapse. Hard
+    /// links share an inode but keep distinct directory entries, so they would
+    /// NOT collapse — symlinks are the right vehicle for "same file, two
+    /// spellings".
+    #[cfg(unix)]
+    #[test]
+    fn find_lib_canonicalizes_equivalent_spellings() {
+        let tmp =
+            std::env::temp_dir().join(format!("stackplz_find_lib_canon-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("real")).unwrap();
+        std::fs::write(tmp.join("real/libsame.so"), b"").unwrap();
+        std::fs::create_dir_all(tmp.join("spell-a")).unwrap();
+        std::fs::create_dir_all(tmp.join("spell-b")).unwrap();
+        std::os::unix::fs::symlink("../real/libsame.so", tmp.join("spell-a/libsame.so")).unwrap();
+        std::os::unix::fs::symlink("../real/libsame.so", tmp.join("spell-b/libsame.so")).unwrap();
+        let a = tmp.join("spell-a/libsame.so");
+        let b = tmp.join("spell-b/libsame.so");
+        let ra = find_lib(a.to_str().unwrap(), &[]).unwrap();
+        let rb = find_lib(b.to_str().unwrap(), &[]).unwrap();
+        assert_eq!(ra, rb, "equivalent spellings must yield one dedup key");
+        let want = std::fs::canonicalize(tmp.join("real/libsame.so"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(ra, want);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// R18-C3: canonicalization must not merge distinct files — two real
+    /// files still resolve to two distinct paths.
+    #[test]
+    fn find_lib_distinct_files_stay_distinct() {
+        let tmp =
+            std::env::temp_dir().join(format!("stackplz_find_lib_distinct-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("libone.so"), b"").unwrap();
+        std::fs::write(tmp.join("libtwo.so"), b"").unwrap();
+        let one = find_lib(tmp.join("libone.so").to_str().unwrap(), &[]).unwrap();
+        let two = find_lib(tmp.join("libtwo.so").to_str().unwrap(), &[]).unwrap();
+        assert_ne!(one, two);
+        assert!(one.ends_with("libone.so"), "{one}");
+        assert!(two.ends_with("libtwo.so"), "{two}");
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]

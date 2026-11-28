@@ -77,8 +77,10 @@ pub struct HookConfig {
 /// `0x` prefix then parse
 /// base-16. Invalid input yields 0 (matching Go's ignored error).
 pub fn hex2int(hex: &str) -> u64 {
-    let cleaned = hex.replace("0x", "").replace("0X", "");
-    u64::from_str_radix(&cleaned, 16).unwrap_or(0)
+    // R18-F1: strip the `0x`/`0X` prefix at most once — `replace` melted
+    // `"0x10x20"` into `"1020"` (a valid parse) instead of failing.
+    let cleaned = hex.strip_prefix("0x").or_else(|| hex.strip_prefix("0X"));
+    u64::from_str_radix(cleaned.unwrap_or(hex), 16).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -108,6 +110,17 @@ mod tests {
         assert_eq!(hex2int("F37C"), 0xF37C);
         assert_eq!(hex2int("0"), 0);
         assert_eq!(hex2int("garbage"), 0);
+    }
+
+    /// R18-F1: a repeated prefix must not be melted into a valid number — the
+    /// strip is single-prefix, so malformed offsets parse as 0 while genuine
+    /// bare hex (no prefix) still parses.
+    #[test]
+    fn hex2int_rejects_repeated_prefix() {
+        assert_eq!(hex2int("0x10x20"), 0);
+        assert_eq!(hex2int("0xAB0X12"), 0);
+        assert_eq!(hex2int("0xF37C"), 0xF37C);
+        assert_eq!(hex2int("F37C"), 0xF37C);
     }
 
     #[test]

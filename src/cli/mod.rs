@@ -295,29 +295,70 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// Join every module thread and fold the first panic into the outcome
-/// (R17-B1): a module that panicked before sending its completion only shows
-/// up at the join, and the generic Disconnected error would otherwise hide
-/// it. Only that generic error is replaced — an explicit module error or an
-/// interrupt keeps its own cause.
-fn finalize_module_outcome(
-    mut outcome: Result<(), RunError>,
+/// Join module handles and collect `(name, msg)` for every panic, in join
+/// order. Panics still go to stderr for live runs; the returned list is what
+/// gets folded into the outcome (R18-B1) or appended to a spawn error
+/// (R18-B2b), so it survives even when stderr is dropped.
+fn collect_joined_panics(
     handles: Vec<(String, std::thread::JoinHandle<()>)>,
-) -> Result<(), RunError> {
+) -> Vec<(String, String)> {
+    let mut panics = Vec::new();
     for (name, handle) in handles {
         if let Err(payload) = handle.join() {
             let msg = panic_message(payload);
             eprintln!("module {name} panicked: {msg}");
-            if matches!(
-                outcome,
-                Err(RunError::Module(ref m))
-                    if m.as_str() == "all modules stopped without a signal, [skip it]"
-            ) {
-                outcome = Err(RunError::Module(format!("module {name} panicked: {msg}")));
-            }
+            panics.push((name, msg));
         }
     }
+    panics
+}
+
+/// Format collected panics as `module {a} panicked: {x}; module {b} …`.
+fn format_panics(panics: &[(String, String)]) -> String {
+    panics
+        .iter()
+        .map(|(name, msg)| format!("module {name} panicked: {msg}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Join every module thread and fold all panics into the outcome (R18-B1):
+/// a module that panicked before sending its completion only shows up at the
+/// join, and the generic Disconnected error would otherwise hide it. Only
+/// that generic error is replaced — an explicit module error or an interrupt
+/// keeps its own cause.
+fn finalize_module_outcome(
+    mut outcome: Result<(), RunError>,
+    handles: Vec<(String, std::thread::JoinHandle<()>)>,
+) -> Result<(), RunError> {
+    let panics = collect_joined_panics(handles);
+    if !panics.is_empty()
+        && matches!(
+            outcome,
+            Err(RunError::Module(ref m))
+                if m.as_str() == "all modules stopped without a signal, [skip it]"
+        )
+    {
+        outcome = Err(RunError::Module(format_panics(&panics)));
+    }
     outcome
+}
+
+/// Build the spawn-failure error, appending any wind-down panic texts
+/// (R18-B2b); without panics the message is unchanged.
+fn spawn_failure_error(
+    name: &str,
+    e: impl std::fmt::Display,
+    panics: &[(String, String)],
+) -> RunError {
+    let mut msg = format!("failed to spawn {name} module: {e}");
+    if !panics.is_empty() {
+        msg.push_str(&format!(
+            "; also module(s) panicked: {}",
+            format_panics(panics)
+        ));
+    }
+    RunError::Module(msg)
 }
 
 /// Start every selected module and block until a signal or a module failure.
@@ -427,17 +468,11 @@ fn run_modules(
                 // module still setting up BPF when the flag flips sees it on
                 // its first poll.)
                 INTERRUPTED.store(true, Ordering::SeqCst);
-                for (name, handle) in handles {
-                    // R16-1: a module that panics while winding down must not
-                    // vanish silently — same as the post-loop join below.
-                    if let Err(payload) = handle.join() {
-                        eprintln!("module {name} panicked: {}", panic_message(payload));
-                    }
-                }
+                // R18-B2b: a wind-down panic must not vanish when stderr is
+                // dropped, so append it to the spawn error (like R18-B2).
+                let panics = collect_joined_panics(handles);
                 print_dropped_lines_warning(&warn_logger);
-                return Err(RunError::Module(format!(
-                    "failed to spawn {name} module: {e}"
-                )));
+                return Err(spawn_failure_error(name, e, &panics));
             }
         }
     }
@@ -765,5 +800,64 @@ mod tests {
         let msg = err.message();
         assert!(msg.contains("perf poll failed"), "{msg}");
         assert!(!msg.contains("panicked"), "{msg}");
+    }
+
+    /// Round 19 / R18-B1: both module panics replace the generic Disconnected
+    /// error — the second one must not be hidden behind the first.
+    #[test]
+    fn finalize_replaces_disconnected_with_all_panics() {
+        let disconnected = || {
+            Err(RunError::Module(
+                "all modules stopped without a signal, [skip it]".into(),
+            ))
+        };
+        let first = std::thread::Builder::new()
+            .name("StackMod".into())
+            .spawn(|| panic!("first module boom"))
+            .unwrap();
+        let second = std::thread::Builder::new()
+            .name("SyscallMod".into())
+            .spawn(|| panic!("second module boom"))
+            .unwrap();
+        let err = finalize_module_outcome(
+            disconnected(),
+            vec![
+                ("StackMod".to_string(), first),
+                ("SyscallMod".to_string(), second),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message(),
+            "module StackMod panicked: first module boom; module SyscallMod panicked: second module boom"
+        );
+    }
+
+    /// Round 19 / R18-B2b: a module panicking during wind-down after a spawn
+    /// failure appends its text to the spawn error; without a panic the
+    /// spawn error is unchanged.
+    #[test]
+    fn spawn_failure_appends_wind_down_panics() {
+        let first = std::thread::Builder::new()
+            .name("StackMod".into())
+            .spawn(|| panic!("wind-down boom"))
+            .unwrap();
+        let panics = collect_joined_panics(vec![("StackMod".to_string(), first)]);
+        let err = spawn_failure_error("SyscallMod", "spawn failed", &panics);
+        assert_eq!(
+            err.message(),
+            "failed to spawn SyscallMod module: spawn failed; also module(s) panicked: module StackMod panicked: wind-down boom"
+        );
+
+        let quiet = std::thread::Builder::new()
+            .name("StackMod".into())
+            .spawn(|| {})
+            .unwrap();
+        let panics = collect_joined_panics(vec![("StackMod".to_string(), quiet)]);
+        let err = spawn_failure_error("SyscallMod", "spawn failed", &panics);
+        assert_eq!(
+            err.message(),
+            "failed to spawn SyscallMod module: spawn failed"
+        );
     }
 }

@@ -380,13 +380,22 @@ impl SyscallPointTable {
     /// same semantics as Go's linear `GetSyscallPointByName`/
     /// `GetSyscallPointByNR` scans, which return the first match (R17-E1).
     pub(crate) fn merge_first_wins(&mut self, other: &SyscallPointTable) {
+        // R18-E1: first-wins applies per look-up key, not per point — insert
+        // the point unless *both* keys collide, and skip the map insertion for
+        // each key that is already taken.
         for point in &other.points {
-            if self.by_nr.contains_key(&point.nr) || self.by_name.contains_key(&point.name) {
+            let nr_taken = self.by_nr.contains_key(&point.nr);
+            let name_taken = self.by_name.contains_key(&point.name);
+            if nr_taken && name_taken {
                 continue;
             }
             let index = self.points.len();
-            self.by_nr.insert(point.nr, index);
-            self.by_name.insert(point.name.clone(), index);
+            if !nr_taken {
+                self.by_nr.insert(point.nr, index);
+            }
+            if !name_taken {
+                self.by_name.insert(point.name.clone(), index);
+            }
             self.points.push(point.clone());
         }
     }
@@ -396,6 +405,26 @@ impl SyscallPointTable {
 mod tests {
     use super::*;
     use crate::argtype::init_argtypes;
+
+    fn point(nr: u32, name: &str) -> SyscallPoint {
+        SyscallPoint {
+            nr,
+            name: name.to_string(),
+            enter_point_args: Vec::new(),
+            exit_point_args: Vec::new(),
+        }
+    }
+
+    fn table_with(points: Vec<SyscallPoint>) -> SyscallPointTable {
+        let mut t = SyscallPointTable::empty();
+        for p in points {
+            let index = t.points.len();
+            t.by_nr.insert(p.nr, index);
+            t.by_name.insert(p.name.clone(), index);
+            t.points.push(p);
+        }
+        t
+    }
 
     fn table() -> SyscallPointTable {
         init_argtypes();
@@ -711,5 +740,42 @@ mod tests {
             .map(|a| a.name.clone())
             .collect();
         assert_eq!(before, after, "unbound point must not touch the table");
+    }
+
+    /// R18-E1: an nr collision alone keeps the alias point — `{63,"read"}` +
+    /// `{63,"read_alias"}` yields both points, nr 63 still resolves to the
+    /// first, and `read_alias` is queryable by name.
+    #[test]
+    fn merge_first_wins_keeps_point_on_nr_collision() {
+        let mut base = table_with(vec![point(63, "read")]);
+        let other = table_with(vec![point(63, "read_alias")]);
+        base.merge_first_wins(&other);
+        assert_eq!(base.len(), 2);
+        assert_eq!(base.by_nr(63).map(|p| p.name.as_str()), Some("read"));
+        assert_eq!(base.by_name("read_alias").map(|p| p.nr), Some(63));
+    }
+
+    /// R18-E1: a name collision alone keeps the new nr — `{64,"read"}` +
+    /// `{63,"read"}` yields both points, nr 64 is queryable, and `read`
+    /// still resolves to the first point.
+    #[test]
+    fn merge_first_wins_keeps_point_on_name_collision() {
+        let mut base = table_with(vec![point(64, "read")]);
+        let other = table_with(vec![point(63, "read")]);
+        base.merge_first_wins(&other);
+        assert_eq!(base.len(), 2);
+        assert_eq!(base.by_nr(64).map(|p| p.name.as_str()), Some("read"));
+        assert_eq!(base.by_name("read").map(|p| p.nr), Some(64));
+    }
+
+    /// R18-E1: when both keys collide the second point is skipped entirely.
+    #[test]
+    fn merge_first_wins_skips_point_when_both_keys_collide() {
+        let mut base = table_with(vec![point(63, "read")]);
+        let other = table_with(vec![point(63, "read")]);
+        base.merge_first_wins(&other);
+        assert_eq!(base.len(), 1);
+        assert_eq!(base.by_nr(63).map(|p| p.name.as_str()), Some("read"));
+        assert_eq!(base.by_name("read").map(|p| p.nr), Some(63));
     }
 }

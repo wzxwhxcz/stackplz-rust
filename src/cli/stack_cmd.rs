@@ -459,13 +459,24 @@ where
                 // trace loops only exit on interrupted()/PROBE_ABORT, and this
                 // is not a user interrupt. The original error propagates as-is.
                 PROBE_ABORT.store(true, Ordering::SeqCst);
+                let mut panics: Vec<String> = Vec::new();
                 for handle in handles {
                     let name = handle.thread().name().unwrap_or("stack-probe").to_string();
                     if let Err(payload) = handle.join() {
-                        eprintln!("stack probe {name} panicked: {}", panic_message(payload));
+                        let msg = panic_message(payload);
+                        eprintln!("stack probe {name} panicked: {msg}");
+                        panics.push(msg);
                     }
                 }
-                return Err(e);
+                // R18-B2: append peer panic texts to the first error instead of
+                // leaving them only on stderr (matches the Disconnected arm).
+                if panics.is_empty() {
+                    return Err(e);
+                }
+                return Err(anyhow!(
+                    "{e:#}; also stack probe(s) panicked: {}",
+                    panics.join("; ")
+                ));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -658,6 +669,38 @@ mod tests {
             .collect();
         symbols.sort();
         assert_eq!(symbols, ["open", "read", "recv", "send"]);
+        std::fs::remove_file(&cfg).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// R18-F1 end-to-end: a malformed double-prefix offset must not silently
+    /// become address `0x1020` — `hex2int` yields 0 and `ProbeConfig::check`
+    /// bails on an empty symbol + zero offset.
+    #[test]
+    fn build_probes_master_double_prefix_offset_errors() {
+        crate::argtype::init_argtypes();
+        let dir = std::env::temp_dir().join(format!("stackplz-hexdup-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("bionic")).unwrap();
+        std::fs::write(dir.join("bionic/libc.so"), b"").unwrap();
+        let cfg = temp_cfg_path("hexdup");
+        std::fs::write(
+            &cfg,
+            format!(
+                r#"{{"library_dirs": [{}], "libs": [{{"library": "bionic/libc.so", "disable": false, "configs": [{{"symbols": [], "offsets": ["0x10x20"]}}]}}]}}"#,
+                serde_json::to_string(&dir.to_string_lossy()).unwrap()
+            ),
+        )
+        .unwrap();
+        let err = build_probes(
+            &global_with_configs(vec![cfg.clone()]),
+            &TargetConfig::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must set symbol or offset"),
+            "{err:#}"
+        );
         std::fs::remove_file(&cfg).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -958,6 +1001,36 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("probe boom panic"), "{msg}");
         assert!(msg.contains("probe bang panic"), "{msg}");
+    }
+
+    /// R18-B2: when the first job errors and a peer panics, the returned Err
+    /// carries both texts — the peer panic appends to the primary error.
+    #[test]
+    fn run_jobs_concurrently_first_error_appends_peer_panic() {
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
+            Box::new(move || -> Result<()> { Err(anyhow!("probe boom")) }),
+            Box::new(move || -> Result<()> { panic!("probe bang panic") }),
+        ];
+        let err = run_jobs_concurrently(jobs, || false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("probe boom"), "{msg}");
+        assert!(msg.contains("probe bang panic"), "{msg}");
+        // This path set PROBE_ABORT; reset it so sibling tests stay clean.
+        PROBE_ABORT.store(false, Ordering::Relaxed);
+    }
+
+    /// R18-B2: no peer panic leaves the first error text exactly as before.
+    #[test]
+    fn run_jobs_concurrently_first_error_without_panic_is_unchanged() {
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
+            Box::new(move || -> Result<()> { Err(anyhow!("probe boom")) }),
+            Box::new(sleep_job(50)),
+        ];
+        let err = run_jobs_concurrently(jobs, || false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("probe boom"), "{msg}");
+        assert!(!msg.contains("panicked"), "{msg}");
+        PROBE_ABORT.store(false, Ordering::Relaxed);
     }
 
     /// A panicking job under an immediate interrupt is still Ok (user interrupt

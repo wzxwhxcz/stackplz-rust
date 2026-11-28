@@ -370,29 +370,31 @@ pub fn parse_hook_point(
         // (the text just past the parsed point), never from the whole
         // string's last `]` — `rfind` took the LAST point's offset and
         // attached it to the first point (`foo[ptr]0x20,bar[ptr]0x30` gave
-        // foo 0x30 and dropped bar). A `,` in the remainder means the
-        // element holds more than one point, which this parser does not
-        // support — bail loudly instead of silently dropping the rest (Go
-        // drops them; this crate fails loud, per R11-3/R12-2). The first
-        // `]` in the element owns the offset, whether it closes an args group
-        // or is a stray `]` (round 15 / R14-1: `foo]0x20` regressed to 0
-        // when R13-4 gated this on an args group).
+        // foo 0x30 and dropped bar). A `,` in the remainder after the first
+        // point's closing `]` means a second point or trailing residue
+        // (`foo]0x20,bar`) — not something this parser supports, so bail
+        // loudly instead of silently dropping the rest (Go drops them; this
+        // crate fails loud, per R11-3/R12-2). The first `]` in the element
+        // owns the offset, whether it closes an args group or is a stray `]`
+        // (round 15 / R14-1: `foo]0x20` regressed to 0 when R13-4 gated
+        // this on an args group).
         let mut exit_offset: u64 = 0;
         let after = &config_str[end_pos..];
         if after.contains(',') {
             bail!(
-                "hook point {config_str:?} holds more than one point (`,` after the first point's `]`): \
-                 use one `-w` element per point"
+                "hook point {config_str:?}: `,` after the first point's closing `]` — a second point or \
+                 trailing residue — is not supported: use one `-w` element per point"
             );
         }
         // Stray `]` (no args group): the group parser leaves it in the
         // remainder, but it is still this point's closing `]`.
         let after = after.strip_prefix(']').unwrap_or(after);
         if !after.is_empty() {
-            exit_read = true;
-            // NOTE: a garbage offset after `]` is silently kept as 0
-            // (H22, out of scope for this round — Go panics here).
+            // Only a successful offset parse marks an exit read; a garbage
+            // remainder (`foo]]0x20]s` → `0x20]`) keeps exit_read false and
+            // offset 0, matching Go's Split (`config_module.go:362-372`).
             if let Ok(n) = parse_base0_u64(after) {
+                exit_read = true;
                 exit_offset = n;
             }
         }
@@ -826,6 +828,16 @@ mod tests {
             assert_eq!(points[0].exit_offset, exit_offset, "cfg={cfg}");
             assert_eq!(points[0].exit_read, exit_read, "cfg={cfg}");
         }
+        // R15-2: a garbage remainder after the stray `]` (`foo]]0x20]s` →
+        // strip `]s` → `foo]]0x20]` → parse `0x20]` fails) does NOT set
+        // exit_read, like Go's Split — the bind survives, offset stays 0,
+        // and no exit companion is cloned.
+        let points = hp("foo]]0x20]s");
+        assert_eq!(points.len(), 1);
+        assert!(points[0].bind_syscall);
+        assert!(!points[0].exit_read);
+        assert_eq!(points[0].exit_offset, 0);
+
         // No `]` at all → no exit offset.
         let points = hp("foo");
         assert_eq!(points.len(), 1);
@@ -848,7 +860,7 @@ mod tests {
         ] {
             let err = parse_hook_point(&[cfg.to_string()], "/lib/libc.so", false).unwrap_err();
             assert!(
-                format!("{err:#}").contains("more than one point"),
+                format!("{err:#}").contains("second point or trailing residue"),
                 "cfg={cfg}: {err:#}"
             );
         }

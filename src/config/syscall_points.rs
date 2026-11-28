@@ -318,11 +318,12 @@ impl SyscallPointTable {
     /// no register, `REG_ARM64_MAX`, so it contributes no ops, exactly like
     /// the `ret` that [`SyscallPoint::from_config`] builds for table points).
     ///
-    /// Note the `]ss` suffix order: Go checks `]s` first, so its `]ss` branch
-    /// is unreachable (`config_module.go:344-351`); this crate checks `]ss`
-    /// first (`point_parser.rs`), so `exit_read` really is reachable here.
-    /// That is a deliberate fix of the upstream bug, not a divergence to
-    /// "align back".
+    /// Note the `]ss` suffix order: Go's two suffix checks are independent
+    /// `if`s (`HasSuffix("]s")` / `HasSuffix("]ss")`, `config_module.go:344-
+    /// 351`), so `write[int]ss` takes the second branch and works; this crate
+    /// checks `]ss` first in an else-if chain (`point_parser.rs`). Both order
+    /// the four probe shapes identically — the implementations are equivalent,
+    /// not a deliberate divergence.
     pub fn update_syscall_point(&mut self, point: &UprobeArgs) -> Result<bool> {
         if !point.bind_syscall {
             return Ok(false);
@@ -334,8 +335,9 @@ impl SyscallPointTable {
         // registers its SAVE branch needs. Bail loudly instead of tracing
         // exit-time registers as if they were entry-time ones. (No CLI input
         // currently produces this combination — the `]s` suffix strip leaves
-        // the string ending in `]`, so the exit-offset parse always finds
-        // empty text after it — but the check guards the invariant.)
+        // the string ending in `]`, so the exit-offset parse sees trailing
+        // garbage like `0x40]`, fails, and leaves the offset at 0 — but the
+        // check guards the invariant.)
         if point.exit_offset != 0 {
             bail!(
                 "hook point '{}' has both an exit offset (0x{:x}) and a `]s`/`]ss` \
@@ -602,8 +604,8 @@ mod tests {
     }
 
     /// Round 11 / P1: `-w 'write[int]ss'` binds with `exit_read`, so both
-    /// clones of the argument get `point_type` ALL (Go's `]ss` branch is
-    /// unreachable upstream; this crate checks `]ss` first, so it works).
+    /// clones of the argument get `point_type` ALL (Go's independent `]ss`
+    /// branch and this crate's else-if chain agree on all four suffixes).
     #[test]
     fn update_syscall_point_ss_sets_all_point_type() {
         init_argtypes();

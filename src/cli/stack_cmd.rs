@@ -22,6 +22,7 @@ use crate::module::{StackProbeModule, MODULE_NAME_STACK};
 use crate::util::find_lib;
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// True when `-c/--config` names at least one uprobe config file.
@@ -211,9 +212,10 @@ fn renumber_probe_points(probes: &mut [(ProbeConfig, Vec<UprobeArgs>)]) {
 /// Build the uprobe probes. Mirrors `parseConfig` / `Parse_HookPoint`.
 ///
 /// `w_points` carries the `-w/--point` points already parsed (and dispatched)
-/// by `run_func` (round 11 / P1): `Some((library, points))` uses them directly
-/// and skips the `-w` parse. `None` falls back to parsing `global.hook_point`
-/// here (the pre-P1 path).
+/// by `run_func` (round 11 / P1): `Some((library, points))` uses them directly;
+/// `None` means no `-w` points remain (none given, or all were bound). Points
+/// from `-w` and `-c/--config` are merged into one list and renumbered once at
+/// the end (R15-5 / R15-7).
 fn build_probes(
     global: &GlobalConfig,
     target: &TargetConfig,
@@ -229,11 +231,13 @@ fn build_probes(
         tid_blacklist_mask: legacy_tid.tid_blacklist.legacy_mask,
     };
 
-    // 1. `-w/--point` mode: one library, one probe, many points.
+    // 1. `-w/--point` remaining points: one library, one probe, many points.
+    // They merge with the `-c/--config` probes below (R15-5 / R15-7); the
+    // whole list is renumbered once after the config loop.
     if let Some((library, points)) = w_points {
         if !points.is_empty() {
             let probe = ProbeConfig {
-                sconfig,
+                sconfig: sconfig.clone(),
                 lib_name: String::new(),
                 library,
                 symbol: String::new(),
@@ -245,26 +249,6 @@ fn build_probes(
             // carry the attach attributes.
             probes.push((probe, points));
         }
-        renumber_probe_points(&mut probes);
-        return Ok(probes);
-    }
-    if !global.hook_point.is_empty() {
-        let library = find_lib(&global.library, &target.library_dirs)?;
-        let points = crate::config::point_parser::parse_hook_point(
-            &global.hook_point,
-            &library,
-            global.dump_hex,
-        )?;
-        let probe = ProbeConfig {
-            sconfig,
-            lib_name: String::new(),
-            library,
-            symbol: String::new(),
-            offset: 0,
-        };
-        probes.push((probe, points));
-        renumber_probe_points(&mut probes);
-        return Ok(probes);
     }
 
     // 2. `-c/--config` uprobe files. Dispatch on the file's shape (round 11
@@ -385,6 +369,19 @@ fn build_probes(
     Ok(probes)
 }
 
+/// Abort flag scoped to this probe runner: set when one job errors so the
+/// remaining probes wind down through their poll loops and can be joined.
+/// Deliberately separate from `cli::INTERRUPTED` — a probe error must reach
+/// `run_modules` as Err, and setting INTERRUPTED would be swallowed as Ok by
+/// its wait loop's pre-check; Ctrl-C (the only writer of INTERRUPTED) keeps
+/// meaning "user interrupt → Ok".
+static PROBE_ABORT: AtomicBool = AtomicBool::new(false);
+
+/// Whether a sibling probe errored and asked the others to stop.
+pub(crate) fn probe_abort_requested() -> bool {
+    PROBE_ABORT.load(Ordering::SeqCst)
+}
+
 /// Run N jobs — one per probe module — concurrently until an interrupt, the
 /// first job error, or every job finishing cleanly. Mirrors `run_modules`'s
 /// completion semantics for one module family (round 12 / R11-7): a trace
@@ -397,28 +394,65 @@ where
     if jobs.is_empty() {
         return Err(anyhow!("no stack probes to run"));
     }
+    // R15-1: keep every probe thread's JoinHandle instead of dropping it, and
+    // join on every exit path. A probe prints its "shutting down"/"TotalLost"
+    // tail only at the very end of `run()`; returning earlier drops that
+    // output. Every join is safe: the error/spawn paths stop peer probes via
+    // PROBE_ABORT first, the interrupt path relies on the probes' own
+    // interrupted() poll checks, and Disconnected means every job already sent
+    // its message and returned.
     let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
+    let mut handles = Vec::new();
     for (i, job) in jobs.into_iter().enumerate() {
         let tx = tx.clone();
-        std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name(format!("stack-probe-{i}"))
             .spawn(move || {
                 let _ = tx.send(job());
-            })
-            .map_err(|e| anyhow!("failed to spawn stack probe thread: {e}"))?;
+            }) {
+            Ok(handle) => handles.push(handle),
+            Err(e) => {
+                // Stop the peers that already started (they sit in poll loops
+                // that check PROBE_ABORT), then join them, so no probe is left
+                // running after a spawn failure.
+                PROBE_ABORT.store(true, Ordering::SeqCst);
+                for handle in handles {
+                    let _ = handle.join();
+                }
+                return Err(anyhow!("failed to spawn stack probe thread: {e}"));
+            }
+        }
     }
     drop(tx);
     loop {
         if interrupted() {
+            // User interrupt: the probes exit through their own interrupted()
+            // poll checks (shared INTERRUPTED); nothing errored, so do NOT set
+            // PROBE_ABORT here — run_modules reports the interrupt as Ok.
+            for handle in handles {
+                let _ = handle.join();
+            }
             return Ok(());
         }
         match rx.recv_timeout(std::time::Duration::from_millis(200)) {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e),
+            Ok(Err(e)) => {
+                // First error: stop the peer probes before joining — their
+                // trace loops only exit on interrupted()/PROBE_ABORT, and this
+                // is not a user interrupt. The original error propagates as-is.
+                PROBE_ABORT.store(true, Ordering::SeqCst);
+                for handle in handles {
+                    let _ = handle.join();
+                }
+                return Err(e);
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 // Every thread sent exactly one message and is gone: all probes
-                // stopped without an interrupt.
+                // stopped without an interrupt; join is immediate.
+                for handle in handles {
+                    let _ = handle.join();
+                }
                 return Err(anyhow!("all stack probes stopped without a signal"));
             }
         }
@@ -705,22 +739,28 @@ mod tests {
         );
     }
 
-    /// The first job error returns immediately, without waiting for the other
-    /// (long-sleeping) jobs.
+    /// The first job error stops the peer probe and waits for it to finish
+    /// (join) before returning: the 800ms job completes, and the error text
+    /// survives.
     #[test]
     fn run_jobs_concurrently_short_circuits_on_first_error() {
         let start = std::time::Instant::now();
-        let jobs: Vec<_> = vec![
-            sleep_job(800),
+        let done = Arc::new(AtomicBool::new(false));
+        let done_flag = Arc::clone(&done);
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
+            Box::new(move || -> Result<()> {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                done_flag.store(true, Ordering::Relaxed);
+                Ok(())
+            }),
             Box::new(move || -> Result<()> { Err(anyhow!("probe boom")) }),
         ];
         let err = run_jobs_concurrently(jobs, || false).unwrap_err();
-        let elapsed = start.elapsed();
+        assert!(done.load(Ordering::Relaxed), "800ms job finished");
+        assert!(start.elapsed() >= std::time::Duration::from_millis(800));
         assert!(format!("{err:#}").contains("probe boom"), "{err:#}");
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "short-circuited before the 800ms job, took {elapsed:?}"
-        );
+        // This path set PROBE_ABORT; reset it so sibling tests stay clean.
+        PROBE_ABORT.store(false, Ordering::Relaxed);
     }
 
     /// All jobs finishing Ok without an interrupt is an error: a trace module
@@ -735,17 +775,30 @@ mod tests {
         );
     }
 
-    /// An interrupt returns Ok even while jobs are still running.
+    /// An interrupt returns Ok once the running jobs have finished (joined):
+    /// both 2s jobs complete before the call returns.
     #[test]
     fn run_jobs_concurrently_interrupt_returns_ok() {
         let start = std::time::Instant::now();
-        let jobs: Vec<_> = vec![sleep_job(2000), sleep_job(2000)];
+        let done = Arc::new(AtomicBool::new(false));
+        let done_a = Arc::clone(&done);
+        let done_b = Arc::clone(&done);
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
+            Box::new(move || -> Result<()> {
+                std::thread::sleep(std::time::Duration::from_millis(2000));
+                done_a.store(true, Ordering::Relaxed);
+                Ok(())
+            }),
+            Box::new(move || -> Result<()> {
+                std::thread::sleep(std::time::Duration::from_millis(2000));
+                done_b.store(true, Ordering::Relaxed);
+                Ok(())
+            }),
+        ];
         let result = run_jobs_concurrently(jobs, || true);
         assert!(result.is_ok(), "{result:?}");
-        assert!(
-            start.elapsed() < std::time::Duration::from_millis(500),
-            "interrupt returns before the 2s jobs finish"
-        );
+        assert!(done.load(Ordering::Relaxed), "both 2s jobs finished");
+        assert!(start.elapsed() >= std::time::Duration::from_millis(2000));
     }
 
     // ---- Round 12 / R11-8: probe point renumbering ----
@@ -924,6 +977,86 @@ mod tests {
         let keys: Vec<u32> = points.iter().map(|p| p.enter_key).collect();
         assert_eq!(idx, vec![0, 1, 2]);
         assert_eq!(keys, vec![0, 0, 0]);
+    }
+
+    /// R15-5 / R15-7: remaining `-w` points and `-c` dev uprobe points must
+    /// merge — the `-w` branch used to return early, silently dropping every
+    /// `-c` probe.
+    #[test]
+    fn build_probes_merges_w_points_with_dev_config() {
+        crate::argtype::init_argtypes();
+        let dir = std::env::temp_dir().join(format!("stackplz-merge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("libnative-lib.so"), b"").unwrap();
+        let cfg = temp_cfg_path("merge");
+        std::fs::write(
+            &cfg,
+            r#"{"type": "uprobe", "library": "libnative-lib.so", "points": [
+                {"name": "func1", "params": []},
+                {"name": "func2", "params": []}
+            ]}"#,
+        )
+        .unwrap();
+        let lib = "libtest.so";
+        let w_points = Some((
+            lib.to_string(),
+            crate::config::point_parser::parse_hook_point(&["foo[ptr]".to_string()], lib, false)
+                .unwrap(),
+        ));
+        let target = TargetConfig {
+            library_dirs: vec![dir.to_string_lossy().to_string()],
+            ..Default::default()
+        };
+        let probes =
+            build_probes(&global_with_configs(vec![cfg.clone()]), &target, w_points).unwrap();
+        assert_eq!(probes.len(), 3, "-w probe + one probe per dev point");
+        let mut names: Vec<String> = probes
+            .iter()
+            .flat_map(|(_, points)| points.iter().map(|p| p.name.clone()))
+            .collect();
+        names.sort();
+        assert_eq!(names, ["foo", "func1", "func2"]);
+        std::fs::remove_file(&cfg).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// R15-5: with no remaining `-w` points (all bound — `w_points` None plus
+    /// `global.hook_point` set), the pre-P1 fallback used to resurrect the
+    /// bound points via `hook_point`; it must now be ignored and only the
+    /// `-c` dev points survive, with no `bind_syscall` point anywhere.
+    #[test]
+    fn build_probes_none_no_resurrection_of_bound_hook_points() {
+        crate::argtype::init_argtypes();
+        let dir = std::env::temp_dir().join(format!("stackplz-none-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("libnative-lib.so"), b"").unwrap();
+        let cfg = temp_cfg_path("none");
+        std::fs::write(
+            &cfg,
+            r#"{"type": "uprobe", "library": "libnative-lib.so", "points": [
+                {"name": "func1", "params": []}
+            ]}"#,
+        )
+        .unwrap();
+        let global = GlobalConfig {
+            hook_point: vec!["write[int]s".to_string()],
+            ..global_with_configs(vec![cfg.clone()])
+        };
+        let target = TargetConfig {
+            library_dirs: vec![dir.to_string_lossy().to_string()],
+            ..Default::default()
+        };
+        let probes = build_probes(&global, &target, None).unwrap();
+        assert_eq!(probes.len(), 1, "only the -c probe survives");
+        let points: Vec<&UprobeArgs> = probes.iter().flat_map(|(_, ps)| ps.iter()).collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].name, "func1");
+        assert!(
+            points.iter().all(|p| !p.bind_syscall),
+            "no resurrected bound point"
+        );
+        std::fs::remove_file(&cfg).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Two dev files must not collide: every probe keeps the invariant

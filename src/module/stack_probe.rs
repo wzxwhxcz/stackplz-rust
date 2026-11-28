@@ -333,7 +333,9 @@ impl StackProbeModule {
             NAME,
             || pb.poll(std::time::Duration::from_millis(100)),
             &logger,
-            crate::cli::interrupted,
+            // R15-1: stop on a user interrupt OR when a sibling probe errored
+            // (PROBE_ABORT) so the probe runner can join this thread.
+            || crate::cli::interrupted() || crate::cli::stack_cmd::probe_abort_requested(),
         );
         logger.println(&format!("{NAME}\tshutting down"));
         // Round 14 / R13-1: the shutdown summary carries the module tag like

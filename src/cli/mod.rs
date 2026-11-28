@@ -190,8 +190,8 @@ struct WDispatch {
 /// branch needs — it would report exit-time registers as if they were
 /// entry-time ones. (No CLI input currently produces that combination — the
 /// `]s` suffix strip leaves the string ending in `]`, so the exit-offset
-/// parse always finds empty text after it — but the check guards the
-/// invariant if the parser ever changes.)
+/// parse sees trailing garbage like `0x40]` and fails, leaving the offset
+/// at 0 — but the check guards the invariant if the parser ever changes.)
 fn dispatch_w_points(
     global: &GlobalConfig,
     target: &TargetConfig,
@@ -281,6 +281,20 @@ fn handle_module_completion(
     }
 }
 
+/// Extract a panic payload's message text for diagnostics. Joining a module
+/// thread returns `Err(payload)` when it panicked; the default hook already
+/// printed it to stderr, so the join loop only labels it with the module
+/// name. `downcast_ref` must try both common shapes (`&str`, `String`).
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
 /// Start every selected module and block until a signal or a module failure.
 ///
 /// Upstream starts the modules from the main goroutine and `os.Exit(1)`s when
@@ -340,8 +354,8 @@ fn run_modules(
     //   - Spawn failure: see the spawn-error arm below (INTERRUPTED is stored
     //     before joining).
     // A module thread that panics before finishing is seen by join as Err;
-    // it is ignored so a broken module cannot panic the main thread during
-    // cleanup.
+    // its payload is printed as a diagnostic below, but a broken module can
+    // never panic the main thread during cleanup.
     let mut handles = Vec::new();
     // A clone owned by this frame: each loop iteration shadows `logger` with
     // a clone that moves into the closure, so the spawn-error arm could not
@@ -379,7 +393,7 @@ fn run_modules(
                     eprintln!("module {name} failed after shutdown: {e}");
                 }
             }) {
-            Ok(handle) => handles.push(handle),
+            Ok(handle) => handles.push((name.to_string(), handle)),
             Err(e) => {
                 // R14-6: stop the modules that already started before failing.
                 // They sit in 100ms poll loops that respect interrupted(), so
@@ -388,7 +402,7 @@ fn run_modules(
                 // module still setting up BPF when the flag flips sees it on
                 // its first poll.)
                 INTERRUPTED.store(true, Ordering::SeqCst);
-                for handle in handles {
+                for (_, handle) in handles {
                     let _ = handle.join();
                 }
                 print_dropped_lines_warning(&warn_logger);
@@ -445,8 +459,10 @@ fn run_modules(
     // above; join every module thread before the final warning so the dropped-
     // lines count (and the shutdown summaries) are final — see the path-by-
     // path argument at the `handles` collection above.
-    for handle in handles {
-        let _ = handle.join();
+    for (name, handle) in handles {
+        if let Err(payload) = handle.join() {
+            eprintln!("module {name} panicked: {}", panic_message(payload));
+        }
     }
     print_dropped_lines_warning(&logger);
     outcome
@@ -611,6 +627,20 @@ mod tests {
         .unwrap();
         assert!(dispatch.w_points.is_none());
         assert!(dispatch.bound_names.is_empty());
+    }
+
+    /// Round 16 / R15-3: join payloads preserve the panic text in both
+    /// common downcast shapes (`&str` and `String`), and fall back to a
+    /// placeholder for anything else.
+    #[test]
+    fn panic_message_recovers_text_from_str_and_string_payloads() {
+        use std::any::Any;
+        let from_str: Box<dyn Any + Send> = Box::new("boom");
+        assert_eq!(panic_message(from_str), "boom");
+        let from_string: Box<dyn Any + Send> = Box::new(String::from("boom"));
+        assert_eq!(panic_message(from_string), "boom");
+        let other: Box<dyn Any + Send> = Box::new(42u32);
+        assert_eq!(panic_message(other), "unknown panic payload");
     }
 
     /// Round 11 / P1: bound names append to the `-s` spec (Go's

@@ -569,20 +569,21 @@ pub(crate) fn account_lost(total: &AtomicU64, logger: &Logger, name: &str, cpu: 
     logger.println(&format!("{name}\tlost {count} samples on CPU {cpu}"));
 }
 
-/// Shared perf poll loop (Round 9 / H1): poll until Ctrl-C. A poll error is
-/// returned to the caller instead of exiting cleanly as `Ok(())` — the old
-/// syscall loop swallowed it with `break`. The caller decides what an error
-/// means; round 10 / K1 treats it as "stop this reader" (log + normal
-/// shutdown, [`poll_until_stop`]), never as fatal — so this helper keeps
-/// returning `Result` (H1's test depends on it).
+/// Shared perf poll loop (Round 9 / H1): poll until `stop` reports true. A
+/// poll error is returned to the caller instead of exiting cleanly as
+/// `Ok(())` — the old syscall loop swallowed it with `break`. The caller
+/// decides what an error means; round 10 / K1 treats it as "stop this reader"
+/// (log + normal shutdown, [`poll_until_stop`]), never as fatal — so this
+/// helper keeps returning `Result` (H1's test depends on it).
 pub(crate) fn poll_loop<T, E>(
     mut poll_once: impl FnMut() -> Result<T, E>,
     _logger: &Logger,
+    stop: impl Fn() -> bool,
 ) -> Result<()>
 where
     E: std::error::Error + Send + Sync + 'static,
 {
-    while !crate::cli::interrupted() {
+    while !stop() {
         poll_once().map_err(|e| anyhow::Error::new(e).context("perf poll failed"))?;
     }
     Ok(())
@@ -606,7 +607,7 @@ pub(crate) fn poll_until_stop<T, E>(
 ) where
     E: std::error::Error + Send + Sync + 'static,
 {
-    if let Err(e) = poll_loop(poll_once, logger) {
+    if let Err(e) = poll_loop(poll_once, logger, &shutdown_pending) {
         if !shutdown_pending() {
             logger.println(&format!("{name}\tpoll error, stopping reads: {e:#}"));
         }
@@ -808,8 +809,12 @@ mod tests {
     fn poll_failure_propagates_as_module_error() {
         let logger = crate::logger::Logger::new("", false);
         assert!(!crate::cli::interrupted(), "Ctrl-C must be clear in tests");
-        let err = poll_loop(|| Err::<(), FakePollError>(FakePollError), &logger)
-            .expect_err("poll failure must propagate as an error");
+        let err = poll_loop(
+            || Err::<(), FakePollError>(FakePollError),
+            &logger,
+            || false,
+        )
+        .expect_err("poll failure must propagate as an error");
         // anyhow's context wraps the source: `to_string()` shows only the
         // outer "perf poll failed", so assert on the full chain instead.
         assert!(format!("{err:#}").contains("fake ring failure"), "{err:#}");

@@ -324,22 +324,27 @@ fn format_panics(panics: &[(String, String)]) -> String {
 
 /// Join every module thread and fold all panics into the outcome (R18-B1):
 /// a module that panicked before sending its completion only shows up at the
-/// join, and the generic Disconnected error would otherwise hide it. Only
-/// that generic error is replaced — an explicit module error or an interrupt
-/// keeps its own cause.
+/// join, and the generic Disconnected error would otherwise hide it. That
+/// generic error is replaced — an explicit module error keeps its own cause
+/// with the panic texts appended (R21-M1).
 fn finalize_module_outcome(
     mut outcome: Result<(), RunError>,
     handles: Vec<(String, std::thread::JoinHandle<()>)>,
 ) -> Result<(), RunError> {
     let panics = collect_joined_panics(handles);
-    if !panics.is_empty()
-        && matches!(
+    if !panics.is_empty() {
+        if matches!(
             outcome,
             Err(RunError::Module(ref m))
                 if m.as_str() == "all modules stopped without a signal, [skip it]"
-        )
-    {
-        outcome = Err(RunError::Module(format_panics(&panics)));
+        ) {
+            outcome = Err(RunError::Module(format_panics(&panics)));
+        } else if let Err(RunError::Module(msg)) = &mut outcome {
+            msg.push_str(&format!(
+                "; also module(s) panicked: {}",
+                format_panics(&panics)
+            ));
+        }
     }
     outcome
 }
@@ -834,7 +839,8 @@ mod tests {
             "all modules stopped without a signal, [skip it]"
         );
 
-        // An explicit module error keeps its cause.
+        // An explicit module error keeps its cause, with the peer panic
+        // appended (R21-M1).
         let panicked = std::thread::Builder::new()
             .name("StackMod".into())
             .spawn(|| panic!("module boom"))
@@ -848,7 +854,46 @@ mod tests {
         .unwrap_err();
         let msg = err.message();
         assert!(msg.contains("perf poll failed"), "{msg}");
-        assert!(!msg.contains("panicked"), "{msg}");
+        assert!(
+            msg.contains("also module(s) panicked: module StackMod panicked: module boom"),
+            "{msg}"
+        );
+    }
+
+    /// Round 21 / R21-M1: an explicit module error appends peer panic texts;
+    /// with no panics it stays unchanged.
+    #[test]
+    fn finalize_appends_panics_to_explicit_module_error() {
+        let explicit = || {
+            Err(RunError::Module(
+                "SyscallMod\tmodule Run failed, [skip it]. error:perf poll failed".into(),
+            ))
+        };
+
+        let panicked = std::thread::Builder::new()
+            .name("StackMod".into())
+            .spawn(|| panic!("module boom"))
+            .unwrap();
+        let msg = finalize_module_outcome(explicit(), vec![("StackMod".to_string(), panicked)])
+            .unwrap_err()
+            .message();
+        assert!(msg.contains("perf poll failed"), "{msg}");
+        assert!(
+            msg.contains("also module(s) panicked: module StackMod panicked: module boom"),
+            "{msg}"
+        );
+
+        let quiet = std::thread::Builder::new()
+            .name("StackMod".into())
+            .spawn(|| {})
+            .unwrap();
+        let msg = finalize_module_outcome(explicit(), vec![("StackMod".to_string(), quiet)])
+            .unwrap_err()
+            .message();
+        assert_eq!(
+            msg,
+            "SyscallMod\tmodule Run failed, [skip it]. error:perf poll failed"
+        );
     }
 
     /// Round 19 / R18-B1: both module panics replace the generic Disconnected

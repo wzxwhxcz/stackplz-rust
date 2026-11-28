@@ -490,7 +490,20 @@ where
             return Ok(());
         }
         match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                // A probe ended cleanly on its own — never legitimate unless we were
+                // interrupted. Abort peers and surface it, mirroring the module-level
+                // "stopped without a signal" semantics (R11-7).
+                if interrupted() {
+                    continue;
+                }
+                PROBE_ABORT.store(true, Ordering::SeqCst);
+                let panics = collect_probe_panics(handles);
+                return Err(spawn_failure_error(
+                    Some("a stack probe stopped without a signal".to_string()),
+                    &panics,
+                ));
+            }
             Ok(Err(e)) => {
                 // First error: stop the peer probes before joining — their
                 // trace loops only exit on interrupted()/PROBE_ABORT, and this
@@ -533,6 +546,8 @@ where
                     continue;
                 }
                 PROBE_ABORT.store(true, Ordering::SeqCst);
+                let mut panics = panics;
+                panics.extend(collect_probe_panics(handles));
                 return Err(spawn_failure_error(None, &panics));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -982,7 +997,7 @@ mod tests {
         let jobs: Vec<_> = vec![sleep_job(1), sleep_job(1), sleep_job(1)];
         let err = run_jobs_concurrently(jobs, || false).unwrap_err();
         assert!(
-            format!("{err:#}").contains("all stack probes stopped without a signal"),
+            format!("{err:#}").contains("a stack probe stopped without a signal"),
             "{err:#}"
         );
     }
@@ -1116,16 +1131,25 @@ mod tests {
     #[test]
     fn run_jobs_concurrently_sweeps_panicked_probe() {
         let start = std::time::Instant::now();
+        let done = Arc::new(AtomicBool::new(false));
+        let done_flag = Arc::clone(&done);
         let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
             Box::new(move || -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 panic!("probe boom panic")
             }),
-            Box::new(sleep_job(2000)),
+            Box::new(move || -> Result<()> {
+                while !crate::cli::stack_cmd::probe_abort_requested() {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                done_flag.store(true, Ordering::Relaxed);
+                Ok(())
+            }),
         ];
         let err = run_jobs_concurrently(jobs, || false).unwrap_err();
         let elapsed = start.elapsed();
         let msg = format!("{err:#}");
+        assert!(done.load(Ordering::Relaxed), "sibling joined and exited");
         assert!(msg.contains("probe boom panic"), "{msg}");
         assert!(msg.contains("stack-probe-0"), "{msg}");
         assert!(
@@ -1133,6 +1157,52 @@ mod tests {
             "sweep took {elapsed:?}"
         );
         PROBE_ABORT.store(false, Ordering::Relaxed);
+    }
+
+    /// A probe ending cleanly on its own is an error: peers are aborted and
+    /// joined, and the error carries the "stopped without a signal" text.
+    #[test]
+    fn run_jobs_concurrently_clean_ok_errors_and_joins_peers() {
+        let start = std::time::Instant::now();
+        let done = Arc::new(AtomicBool::new(false));
+        let done_flag = Arc::clone(&done);
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
+            Box::new(move || -> Result<()> { Ok(()) }),
+            Box::new(move || -> Result<()> {
+                while !crate::cli::stack_cmd::probe_abort_requested() {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                done_flag.store(true, Ordering::Relaxed);
+                Ok(())
+            }),
+        ];
+        let err = run_jobs_concurrently(jobs, || false).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            format!("{err:#}").contains("stopped without a signal"),
+            "{err:#}"
+        );
+        assert!(done.load(Ordering::Relaxed), "sibling joined and exited");
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "took {elapsed:?}"
+        );
+        PROBE_ABORT.store(false, Ordering::Relaxed);
+    }
+
+    /// Control: an interrupt that fires as a job returns Ok keeps the result Ok.
+    #[test]
+    fn run_jobs_concurrently_interrupt_at_clean_ok_is_ok() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let job_flag = Arc::clone(&flag);
+        let interrupt_flag = Arc::clone(&flag);
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> =
+            vec![Box::new(move || -> Result<()> {
+                job_flag.store(true, Ordering::Relaxed);
+                Ok(())
+            })];
+        let result = run_jobs_concurrently(jobs, move || interrupt_flag.load(Ordering::Relaxed));
+        assert!(result.is_ok(), "{result:?}");
     }
 
     /// A panicking job under an immediate interrupt is still Ok (user interrupt

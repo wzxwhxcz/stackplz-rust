@@ -940,6 +940,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // Round 22: the runner tests share the process-global PROBE_ABORT flag,
+    // and run_jobs_concurrently resets it on entry — a parallel test can
+    // clear another test's abort signal while its coordinator is joining an
+    // abort-aware sibling, which then loops forever (CI hang, reproduced
+    // locally 4/10 runs). Hold this lock for the whole of every test that
+    // runs the runner.
+    static RUN_JOBS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // ---- Round 12 / R11-7: concurrent probe runner (no BPF needed) ----
 
     fn sleep_job(ms: u64) -> Box<dyn FnOnce() -> Result<()> + Send> {
@@ -952,6 +960,7 @@ mod tests {
     /// N jobs run concurrently: 3 × 60ms jobs finish in ~60ms, not ~180ms.
     #[test]
     fn run_jobs_concurrently_runs_jobs_in_parallel() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let start = std::time::Instant::now();
         let jobs: Vec<_> = vec![sleep_job(60), sleep_job(60), sleep_job(60)];
         let err = run_jobs_concurrently(jobs, || false).unwrap_err();
@@ -971,6 +980,7 @@ mod tests {
     /// survives.
     #[test]
     fn run_jobs_concurrently_short_circuits_on_first_error() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let start = std::time::Instant::now();
         let done = Arc::new(AtomicBool::new(false));
         let done_flag = Arc::clone(&done);
@@ -994,6 +1004,7 @@ mod tests {
     /// never legitimately ends on its own.
     #[test]
     fn run_jobs_concurrently_all_ok_without_interrupt_is_error() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jobs: Vec<_> = vec![sleep_job(1), sleep_job(1), sleep_job(1)];
         let err = run_jobs_concurrently(jobs, || false).unwrap_err();
         assert!(
@@ -1006,6 +1017,7 @@ mod tests {
     /// both 2s jobs complete before the call returns.
     #[test]
     fn run_jobs_concurrently_interrupt_returns_ok() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let start = std::time::Instant::now();
         let done = Arc::new(AtomicBool::new(false));
         let done_a = Arc::clone(&done);
@@ -1032,6 +1044,7 @@ mod tests {
     /// instead of the generic "all probes stopped" error (R16-1).
     #[test]
     fn run_jobs_concurrently_panic_job_reports_panic() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> =
             vec![Box::new(move || -> Result<()> {
                 panic!("probe boom panic")
@@ -1048,6 +1061,7 @@ mod tests {
     /// first — each panic's text appears in the returned error.
     #[test]
     fn run_jobs_concurrently_two_panics_both_reported() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
             Box::new(move || -> Result<()> { panic!("probe boom panic") }),
             Box::new(move || -> Result<()> { panic!("probe bang panic") }),
@@ -1062,6 +1076,7 @@ mod tests {
     /// carries both texts — the peer panic appends to the primary error.
     #[test]
     fn run_jobs_concurrently_first_error_appends_peer_panic() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
             Box::new(move || -> Result<()> { Err(anyhow!("probe boom")) }),
             Box::new(move || -> Result<()> { panic!("probe bang panic") }),
@@ -1114,6 +1129,7 @@ mod tests {
     /// R18-B2: no peer panic leaves the first error text exactly as before.
     #[test]
     fn run_jobs_concurrently_first_error_without_panic_is_unchanged() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
             Box::new(move || -> Result<()> { Err(anyhow!("probe boom")) }),
             Box::new(sleep_job(50)),
@@ -1130,6 +1146,7 @@ mod tests {
     /// panicking probe's name, and abort the surviving probe.
     #[test]
     fn run_jobs_concurrently_sweeps_panicked_probe() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let start = std::time::Instant::now();
         let done = Arc::new(AtomicBool::new(false));
         let done_flag = Arc::clone(&done);
@@ -1163,6 +1180,7 @@ mod tests {
     /// joined, and the error carries the "stopped without a signal" text.
     #[test]
     fn run_jobs_concurrently_clean_ok_errors_and_joins_peers() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let start = std::time::Instant::now();
         let done = Arc::new(AtomicBool::new(false));
         let done_flag = Arc::clone(&done);
@@ -1193,6 +1211,7 @@ mod tests {
     /// Control: an interrupt that fires as a job returns Ok keeps the result Ok.
     #[test]
     fn run_jobs_concurrently_interrupt_at_clean_ok_is_ok() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let flag = Arc::new(AtomicBool::new(false));
         let job_flag = Arc::clone(&flag);
         let interrupt_flag = Arc::clone(&flag);
@@ -1210,6 +1229,7 @@ mod tests {
     /// capture — this test asserts the Ok contract (R16-1).
     #[test]
     fn run_jobs_concurrently_panic_job_interrupt_still_ok() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> =
             vec![Box::new(move || -> Result<()> {
                 panic!("probe boom panic")

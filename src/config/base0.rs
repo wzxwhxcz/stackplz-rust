@@ -8,7 +8,7 @@
 /// Go's underscore rule for integer literals: `_` may appear between digits,
 /// or immediately after the base prefix, but never leading/trailing/
 /// consecutive.
-fn underscore_ok(s: &str) -> bool {
+pub(crate) fn underscore_ok(s: &str) -> bool {
     let b = s.as_bytes();
     let mut saw = b'^';
     let mut i = 0;

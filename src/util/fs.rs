@@ -34,14 +34,17 @@ pub fn find_lib(library: &str, library_dirs: &[String]) -> Result<String> {
         }
         let candidate = PathBuf::from(dir).join(library);
         if candidate.exists() {
-            hits.push(candidate.to_string_lossy().into_owned());
+            hits.push(canonicalize_or_original(&candidate));
         }
     }
+    // R19-C3b: dedup by canonical path, not raw dir spelling, so two
+    // spellings of the same directory (trailing slash, symlink) collapse to
+    // one hit instead of a false ambiguity.
+    hits.sort();
+    hits.dedup();
     match hits.len() {
         0 => bail!("library not found: {}", library),
-        1 => Ok(canonicalize_or_original(std::path::Path::new(
-            &hits.remove(0),
-        ))),
+        1 => Ok(hits.remove(0)),
         n => bail!("find {} libs with the same name", n),
     }
 }
@@ -165,5 +168,47 @@ mod tests {
         // Same dir twice should still resolve to one hit.
         let r = find_lib("Cargo.toml", &[dir.clone(), dir]).unwrap();
         assert!(r.ends_with("Cargo.toml"));
+    }
+
+    /// R19-C3b: two spellings of the same directory (with and without a
+    /// trailing slash) yield one canonical hit, not a false ambiguity.
+    #[test]
+    fn find_lib_same_dir_two_spellings_one_hit() {
+        let tmp =
+            std::env::temp_dir().join(format!("stackplz_find_lib_spell-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("libx.so"), b"").unwrap();
+        let dirs = [
+            tmp.to_string_lossy().into_owned(),
+            format!("{}/", tmp.display()),
+        ];
+        let r = find_lib("libx.so", &dirs).unwrap();
+        let want = std::fs::canonicalize(tmp.join("libx.so"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(r, want);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// R19-C3b: distinct files with the same name in two different dirs
+    /// still error as ambiguous — canonical dedup must not merge them.
+    #[test]
+    fn find_lib_distinct_dirs_same_name_still_ambiguous() {
+        let tmp =
+            std::env::temp_dir().join(format!("stackplz_find_lib_amb-{}", std::process::id()));
+        let a = tmp.join("a");
+        let b = tmp.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("libsame.so"), b"").unwrap();
+        std::fs::write(b.join("libsame.so"), b"").unwrap();
+        let dirs = [
+            a.to_string_lossy().into_owned(),
+            b.to_string_lossy().into_owned(),
+        ];
+        let r = find_lib("libsame.so", &dirs);
+        assert!(r.is_err(), "expected ambiguity error, got {:?}", r);
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

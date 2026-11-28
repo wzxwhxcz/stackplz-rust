@@ -391,6 +391,19 @@ pub(crate) fn probe_abort_requested() -> bool {
     PROBE_ABORT.load(Ordering::SeqCst)
 }
 
+/// Build the spawn-failure error, appending any peer panic texts
+/// (R19-B2c); without panics the message is unchanged.
+fn spawn_failure_error(e: impl std::fmt::Display, panics: &[String]) -> anyhow::Error {
+    let mut msg = format!("failed to spawn stack probe thread: {e}");
+    if !panics.is_empty() {
+        msg.push_str(&format!(
+            "; also stack probe(s) panicked: {}",
+            panics.join("; ")
+        ));
+    }
+    anyhow!(msg)
+}
+
 /// Run N jobs — one per probe module — concurrently until an interrupt, the
 /// first job error, or every job finishing cleanly. Mirrors `run_modules`'s
 /// completion semantics for one module family (round 12 / R11-7): a trace
@@ -428,13 +441,18 @@ where
                 // that check PROBE_ABORT), then join them, so no probe is left
                 // running after a spawn failure.
                 PROBE_ABORT.store(true, Ordering::SeqCst);
+                let mut panics: Vec<String> = Vec::new();
                 for handle in handles {
                     let name = handle.thread().name().unwrap_or("stack-probe").to_string();
                     if let Err(payload) = handle.join() {
-                        eprintln!("stack probe {name} panicked: {}", panic_message(payload));
+                        let msg = panic_message(payload);
+                        eprintln!("stack probe {name} panicked: {msg}");
+                        panics.push(msg);
                     }
                 }
-                return Err(anyhow!("failed to spawn stack probe thread: {e}"));
+                // R19-B2c: append peer panic texts to the spawn failure (same
+                // shape as the first-error arm's R18-B2 merge).
+                return Err(spawn_failure_error(e, &panics));
             }
         }
     }
@@ -1017,6 +1035,29 @@ mod tests {
         assert!(msg.contains("probe bang panic"), "{msg}");
         // This path set PROBE_ABORT; reset it so sibling tests stay clean.
         PROBE_ABORT.store(false, Ordering::Relaxed);
+    }
+
+    /// R19-B2c: the spawn-failure error merges peer panic texts; without
+    /// panics the message is exactly the existing one. (A real spawn failure
+    /// is impossible to force portably, so the formatting helper — used by
+    /// the spawn-failure arm — is unit-tested directly.)
+    #[test]
+    fn spawn_failure_error_merges_peer_panics() {
+        let err = spawn_failure_error("boom", &["probe boom panic".to_string()]);
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("failed to spawn stack probe thread: boom"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("also stack probe(s) panicked: probe boom panic"),
+            "{msg}"
+        );
+        let err = spawn_failure_error("boom", &[]);
+        assert_eq!(
+            format!("{err:#}"),
+            "failed to spawn stack probe thread: boom"
+        );
     }
 
     /// R18-B2: no peer panic leaves the first error text exactly as before.

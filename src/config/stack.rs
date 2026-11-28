@@ -243,9 +243,8 @@ pub struct ProbeConfig {
     pub lib_name: String,
     /// Resolved full library path on disk.
     pub library: String,
-    /// Target symbol name (may be a synthetic random string when only an
-    /// offset is supplied, because ebpfmanager requires a non-empty
-    /// `AttachToFuncName`).
+    /// Target symbol name. Offset-only probes keep this empty: libbpf-rs's
+    /// `attach_uprobe` takes a numeric offset and needs no name.
     pub symbol: String,
     /// Target file offset (0 if hooking by symbol).
     pub offset: u64,
@@ -258,8 +257,8 @@ impl ProbeConfig {
     /// Rules:
     /// - Library must exist on disk.
     /// - Exactly one of symbol / offset must be set (not both, not neither).
-    /// - When only an offset is provided, fill `symbol` with a random 8-char
-    ///   string (the manager still needs a non-empty `AttachToFuncName`).
+    /// - When only an offset is provided, `symbol` stays empty: libbpf-rs's
+    ///   `attach_uprobe` takes a numeric offset and needs no name.
     pub fn check(&mut self) -> Result<()> {
         if self.library.is_empty() {
             bail!("library path is empty");

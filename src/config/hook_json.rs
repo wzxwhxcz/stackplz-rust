@@ -21,6 +21,7 @@
 //! }
 //! ```
 
+use super::base0::underscore_ok;
 use serde::{Deserialize, Serialize};
 
 /// Symbols and offsets for one hook point. Unknown fields are rejected so an
@@ -77,10 +78,20 @@ pub struct HookConfig {
 /// `0x` prefix then parse
 /// base-16. Invalid input yields 0 (matching Go's ignored error).
 pub fn hex2int(hex: &str) -> u64 {
-    // R18-F1: strip the `0x`/`0X` prefix at most once — `replace` melted
-    // `"0x10x20"` into `"1020"` (a valid parse) instead of failing.
-    let cleaned = hex.strip_prefix("0x").or_else(|| hex.strip_prefix("0X"));
-    u64::from_str_radix(cleaned.unwrap_or(hex), 16).unwrap_or(0)
+    // R19-F1: Go-literal rules shared with parse_base0_u64 — '_' is only
+    // legal right after the base prefix or between digits, and a leading
+    // '+' is not a Go literal.
+    if let Some(rest) = hex.strip_prefix("0x").or_else(|| hex.strip_prefix("0X")) {
+        if !underscore_ok(hex) {
+            return 0;
+        }
+        u64::from_str_radix(&rest.replace('_', ""), 16).unwrap_or(0)
+    } else {
+        if hex.starts_with('+') {
+            return 0;
+        }
+        u64::from_str_radix(hex, 16).unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -121,6 +132,18 @@ mod tests {
         assert_eq!(hex2int("0xAB0X12"), 0);
         assert_eq!(hex2int("0xF37C"), 0xF37C);
         assert_eq!(hex2int("F37C"), 0xF37C);
+    }
+
+    /// R19-F1b/F1c: Go's underscore rule (shared with `parse_base0_u64`) and
+    /// rejection of a leading `+`.
+    #[test]
+    fn hex2int_go_literal_rules() {
+        assert_eq!(hex2int("0x1_0"), 0x10);
+        assert_eq!(hex2int("0x_10"), 0x10);
+        assert_eq!(hex2int("0x1__0"), 0);
+        assert_eq!(hex2int("0x10_"), 0);
+        assert_eq!(hex2int("0x+10"), 0);
+        assert_eq!(hex2int("+10"), 0);
     }
 
     #[test]

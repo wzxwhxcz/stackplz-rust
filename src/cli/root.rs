@@ -155,6 +155,8 @@ fn resolve_target(global: &mut GlobalConfig, target: &mut TargetConfig) -> Resul
         if target.uid == 0 {
             target.uid = u64::from(info.uid);
         }
+        // R25-K1: display-only; the last package in `-n` wins. Filtering
+        // uses uid/pid (first-wins above), never this field.
         target.name = name.clone();
         if let Some(dir) = info.library_dir {
             if !target.library_dirs.contains(&dir) {

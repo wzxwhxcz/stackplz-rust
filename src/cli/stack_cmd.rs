@@ -515,11 +515,21 @@ where
                 }
                 PROBE_ABORT.store(true, Ordering::SeqCst);
                 let panics = collect_probe_panics(handles);
-                // R22-A1: a peer may have queued its Err while the clean-Ok
-                // probe was finishing; drain it so the real failure is
-                // surfaced instead of the generic "stopped without a signal".
-                if let Some(first_err) = drain_peer_errors(&rx).into_iter().next() {
-                    return Err(anyhow!(first_err));
+                // R22-A1/R23-B1: peers may have queued their Errs while the
+                // clean-Ok probe was finishing; drain all of them so the real
+                // failures are surfaced instead of the generic "stopped
+                // without a signal", and panics (if any) are still included.
+                let errs = drain_peer_errors(&rx);
+                if let Some((first, rest)) = errs.split_first() {
+                    let mut msg = if panics.is_empty() {
+                        first.clone()
+                    } else {
+                        format!("{:#}", spawn_failure_error(Some(first.clone()), &panics))
+                    };
+                    if !rest.is_empty() {
+                        msg.push_str(&format!("; also peer probe(s) failed: {}", rest.join("; ")));
+                    }
+                    return Err(anyhow!(msg));
                 }
                 return Err(spawn_failure_error(
                     Some("a stack probe stopped without a signal".to_string()),
@@ -575,13 +585,9 @@ where
                 // that failure is also reported.
                 let errs = drain_peer_errors(&rx);
                 if !errs.is_empty() {
-                    let joined = panics
-                        .iter()
-                        .map(|(name, msg)| format!("{name}: {msg}"))
-                        .collect::<Vec<_>>()
-                        .join("; ");
+                    let base = spawn_failure_error(None, &panics);
                     return Err(anyhow!(format!(
-                        "stack probe(s) panicked: {joined}; also peer probe(s) failed: {}",
+                        "{base:#}; also peer probe(s) failed: {}",
                         errs.join("; ")
                     )));
                 }
@@ -1230,6 +1236,7 @@ mod tests {
         let err = run_jobs_concurrently(jobs, || false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("probe boom"), "{msg}");
+        assert!(!msg.contains("stopped without a signal"), "{msg}");
         PROBE_ABORT.store(false, Ordering::Relaxed);
     }
 
@@ -1250,6 +1257,32 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("probe boom panic"), "{msg}");
         assert!(msg.contains("setup failed"), "{msg}");
+        assert!(msg.starts_with("stack probe(s) panicked: "), "{msg}");
+        PROBE_ABORT.store(false, Ordering::Relaxed);
+    }
+
+    /// R23-B1: when a probe ends Ok and several peers error during
+    /// wind-down, all peer errors (first + rest) must be surfaced, and the
+    /// generic "stopped without a signal" text must not appear.
+    #[test]
+    fn run_jobs_concurrently_ok_drains_all_peer_errors() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
+            Box::new(move || -> Result<()> { Ok(()) }),
+            Box::new(move || -> Result<()> {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                Err(anyhow!("boom-A"))
+            }),
+            Box::new(move || -> Result<()> {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                Err(anyhow!("boom-C"))
+            }),
+        ];
+        let err = run_jobs_concurrently(jobs, || false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("boom-A"), "{msg}");
+        assert!(msg.contains("boom-C"), "{msg}");
+        assert!(!msg.contains("stopped without a signal"), "{msg}");
         PROBE_ABORT.store(false, Ordering::Relaxed);
     }
 

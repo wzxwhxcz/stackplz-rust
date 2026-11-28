@@ -22,7 +22,7 @@ use crate::config::{
 use crate::module::{StackProbeModule, MODULE_NAME_STACK};
 use crate::util::find_lib;
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -272,6 +272,11 @@ fn build_probes(
             hook_cfg
                 .library_dirs
                 .extend(target.library_dirs.iter().cloned());
+            // R17-C2: dedup keys span the whole `libs` list and carry the
+            // resolved library — a repeated `library` entry cannot rebuild
+            // probes, while same-named symbols in different libraries survive.
+            let mut seen_symbols: HashSet<(String, String)> = HashSet::new();
+            let mut seen_offsets: HashSet<(String, u64)> = HashSet::new();
             for lib_hook in &hook_cfg.libs {
                 if lib_hook.disable {
                     if global.debug {
@@ -280,15 +285,16 @@ fn build_probes(
                     continue;
                 }
                 let library = find_lib(&lib_hook.library, &hook_cfg.library_dirs)?;
-                let mut seen_symbols: Vec<String> = Vec::new();
-                let mut seen_offsets: Vec<String> = Vec::new();
                 for base in &lib_hook.configs {
                     for symbol in &base.symbols {
                         let symbol = symbol.trim();
-                        if symbol.is_empty() || seen_symbols.iter().any(|s| s == symbol) {
+                        // R17-C1/C2: dedup by resolved library + value, not by
+                        // the raw string (`0xAB` vs `0xab`, `0x10` vs `0x010`).
+                        if symbol.is_empty()
+                            || !seen_symbols.insert((library.clone(), symbol.to_string()))
+                        {
                             continue;
                         }
-                        seen_symbols.push(symbol.to_string());
                         let mut probe = ProbeConfig {
                             sconfig: sconfig.clone(),
                             lib_name: String::new(),
@@ -301,7 +307,7 @@ fn build_probes(
                     }
                     for offset in &base.offsets {
                         let offset = offset.trim();
-                        if offset.is_empty() || seen_offsets.iter().any(|s| s == offset) {
+                        if offset.is_empty() {
                             continue;
                         }
                         // R11-3: the gate and the converter must agree — a
@@ -312,16 +318,18 @@ fn build_probes(
                         if !is_offset_marker(offset) {
                             bail!("offset {offset} must start with 0x");
                         }
-                        seen_offsets.push(offset.to_string());
+                        let off = hex2int(offset);
+                        if !seen_offsets.insert((library.clone(), off)) {
+                            continue;
+                        }
                         let mut probe = ProbeConfig {
                             sconfig: sconfig.clone(),
                             lib_name: String::new(),
                             library: library.clone(),
                             symbol: String::new(),
-                            offset: hex2int(offset),
+                            offset: off,
                         };
                         probe.check()?;
-                        let off = probe.offset;
                         probes.push((probe, vec![uprobe_point(&library, "", off)]));
                     }
                 }
@@ -403,8 +411,8 @@ where
     // tail only at the very end of `run()`; returning earlier drops that
     // output. Every join is safe: the error/spawn paths stop peer probes via
     // PROBE_ABORT first, the interrupt path relies on the probes' own
-    // interrupted() poll checks, and Disconnected means every job already sent
-    // its message and returned.
+    // interrupted() poll checks, and Disconnected means every sender is gone —
+    // a panicked thread sends no message, so the joins below report its panic.
     let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
     let mut handles = Vec::new();
     for (i, job) in jobs.into_iter().enumerate() {
@@ -461,21 +469,23 @@ where
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                // Every thread sent exactly one message and is gone: all probes
-                // stopped without an interrupt; join is immediate.
-                let mut first_panic = None;
+                // every thread is gone (a panicked thread sent no message)
+                let mut panics: Vec<(String, String)> = Vec::new();
                 for handle in handles {
                     let name = handle.thread().name().unwrap_or("stack-probe").to_string();
                     if let Err(payload) = handle.join() {
                         let msg = panic_message(payload);
                         eprintln!("stack probe {name} panicked: {msg}");
-                        if first_panic.is_none() {
-                            first_panic = Some(msg);
-                        }
+                        panics.push((name, msg));
                     }
                 }
-                if let Some(msg) = first_panic {
-                    return Err(anyhow!("stack probe panicked: {msg}"));
+                if !panics.is_empty() {
+                    let joined = panics
+                        .iter()
+                        .map(|(name, msg)| format!("{name}: {msg}"))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(anyhow!("stack probe(s) panicked: {joined}"));
                 }
                 return Err(anyhow!("all stack probes stopped without a signal"));
             }
@@ -649,6 +659,101 @@ mod tests {
         symbols.sort();
         assert_eq!(symbols, ["open", "read", "recv", "send"]);
         std::fs::remove_file(&cfg).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// R17-C1: offset dedup compares values, not spellings — `0x10`/`0x010`
+    /// and `0xAB`/`0xab` collapse to one probe each, while distinct offsets
+    /// still both build.
+    #[test]
+    fn build_probes_master_config_dedups_offsets_by_value() {
+        crate::argtype::init_argtypes();
+        let dir = std::env::temp_dir().join(format!("stackplz-offdup-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("bionic")).unwrap();
+        std::fs::write(dir.join("bionic/libc.so"), b"").unwrap();
+        for (i, (offsets, want)) in [
+            (r#"["0x10", "0x010"]"#, 1),
+            (r#"["0xAB", "0xab"]"#, 1),
+            (r#"["0x10", "0x20"]"#, 2),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let cfg = temp_cfg_path(&format!("offdup{i}"));
+            std::fs::write(
+                &cfg,
+                format!(
+                    r#"{{"library_dirs": [{}], "libs": [{{"library": "bionic/libc.so", "disable": false, "configs": [{{"symbols": [], "offsets": {offsets}}}]}}]}}"#,
+                    serde_json::to_string(&dir.to_string_lossy()).unwrap()
+                ),
+            )
+            .unwrap();
+            let probes = build_probes(
+                &global_with_configs(vec![cfg.clone()]),
+                &TargetConfig::default(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(probes.len(), *want, "offsets {offsets}");
+            std::fs::remove_file(&cfg).unwrap();
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// R17-C2: dedup spans the whole `libs` list keyed by resolved library —
+    /// the same library listed twice builds one probe per symbol, while the
+    /// same symbol in two different libraries still builds two.
+    #[test]
+    fn build_probes_master_config_dedups_symbols_per_library() {
+        crate::argtype::init_argtypes();
+        let dir = std::env::temp_dir().join(format!("stackplz-symdup-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("bionic")).unwrap();
+        std::fs::write(dir.join("bionic/libc.so"), b"").unwrap();
+        std::fs::write(dir.join("libnative-lib.so"), b"").unwrap();
+
+        let same = temp_cfg_path("symdup-same");
+        std::fs::write(
+            &same,
+            format!(
+                r#"{{"library_dirs": [{}], "libs": [{{"library": "bionic/libc.so", "disable": false, "configs": [{{"symbols": ["write"], "offsets": []}}]}}, {{"library": "bionic/libc.so", "disable": false, "configs": [{{"symbols": ["write"], "offsets": []}}]}}]}}"#,
+                serde_json::to_string(&dir.to_string_lossy()).unwrap()
+            ),
+        )
+        .unwrap();
+        let probes = build_probes(
+            &global_with_configs(vec![same.clone()]),
+            &TargetConfig::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            probes.len(),
+            1,
+            "repeated library entry builds no duplicate probe"
+        );
+        std::fs::remove_file(&same).unwrap();
+
+        let diff = temp_cfg_path("symdup-diff");
+        std::fs::write(
+            &diff,
+            format!(
+                r#"{{"library_dirs": [{}], "libs": [{{"library": "bionic/libc.so", "disable": false, "configs": [{{"symbols": ["write"], "offsets": []}}]}}, {{"library": "libnative-lib.so", "disable": false, "configs": [{{"symbols": ["write"], "offsets": []}}]}}]}}"#,
+                serde_json::to_string(&dir.to_string_lossy()).unwrap()
+            ),
+        )
+        .unwrap();
+        let probes = build_probes(
+            &global_with_configs(vec![diff.clone()]),
+            &TargetConfig::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            probes.len(),
+            2,
+            "same symbol in different libraries builds two probes"
+        );
+        std::fs::remove_file(&diff).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -839,6 +944,20 @@ mod tests {
             !format!("{err:#}").contains("all stack probes stopped"),
             "{err:#}"
         );
+    }
+
+    /// R17-B2: the Disconnected arm surfaces every panicked job, not only the
+    /// first — each panic's text appears in the returned error.
+    #[test]
+    fn run_jobs_concurrently_two_panics_both_reported() {
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
+            Box::new(move || -> Result<()> { panic!("probe boom panic") }),
+            Box::new(move || -> Result<()> { panic!("probe bang panic") }),
+        ];
+        let err = run_jobs_concurrently(jobs, || false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("probe boom panic"), "{msg}");
+        assert!(msg.contains("probe bang panic"), "{msg}");
     }
 
     /// A panicking job under an immediate interrupt is still Ok (user interrupt

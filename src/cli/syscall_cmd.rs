@@ -21,14 +21,16 @@ use std::sync::Arc;
 /// Default: the table embedded from `config_syscall_aarch64.json` /
 /// `config_syscall_aarch32.json` (the ported dev tables).
 ///
-/// `-c/--config`: if any config file is a syscall table, it **replaces** the
-/// embedded one, mirroring `ModuleConfig.LoadConfig` (`config_module.go:876-923`)
-/// where "指定了 syscall 类型的配置 则不会采用内置配置". This is what makes the
-/// `--config` flag real (report W16: the old code stored the path and never
-/// loaded it).
+/// `-c/--config`: every syscall-table file contributes its points, merged in
+/// order with first-wins on duplicate nr/name (R17-E1) — mirroring
+/// `ModuleConfig.LoadConfig` (`config_module.go:876-923`) where each syscall
+/// config joins the table and `GetSyscallPointByName`/`GetSyscallPointByNR`
+/// return the first match. This is what makes the `--config` flag real
+/// (report W16: the old code stored the path and never loaded it).
 pub fn load_point_table(global: &GlobalConfig) -> Result<SyscallPointTable> {
     crate::argtype::init_argtypes();
 
+    let mut merged: Option<SyscallPointTable> = None;
     for path in &global.config_files {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file {path}"))?;
@@ -38,8 +40,12 @@ pub fn load_point_table(global: &GlobalConfig) -> Result<SyscallPointTable> {
             .with_context(|| format!("failed to parse {path} as JSON"))?;
         let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
         if kind == "syscall" {
-            return SyscallPointTable::from_json_str(&text)
-                .with_context(|| format!("failed to load syscall table {path}"));
+            let table = SyscallPointTable::from_json_str(&text)
+                .with_context(|| format!("failed to load syscall table {path}"))?;
+            match &mut merged {
+                Some(m) => m.merge_first_wins(&table),
+                None => merged = Some(table),
+            }
         }
     }
 
@@ -48,7 +54,10 @@ pub fn load_point_table(global: &GlobalConfig) -> Result<SyscallPointTable> {
     // had no production caller and were deleted; both CLI paths parse JSON
     // inline instead).
 
-    SyscallPointTable::embedded()
+    match merged {
+        Some(t) => Ok(t),
+        None => SyscallPointTable::embedded(),
+    }
 }
 
 /// Build the [`SyscallConfig`] for a run.
@@ -200,6 +209,64 @@ mod tests {
         let table = load_point_table(&global).unwrap();
         assert_eq!(table.len(), 1);
         assert_eq!(table.by_name("custom_call").map(|p| p.nr), Some(999));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Round 18 / R17-E1: multiple syscall config files are merged, first-wins
+    /// on duplicate nr/name (Go's linear point lookups take the first match).
+    #[test]
+    fn multiple_config_files_merge_first_wins() {
+        let dir = std::env::temp_dir().join("stackplz_syscall_cfg_merge_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let write_table = |name: &str, nr: u32, call: &str| {
+            let path = dir.join(name);
+            let json = format!(
+                r#"{{"type":"syscall","points":[{{"nr":{nr},"name":"{call}","params":[{{"name":"a","type":"int"}}]}}]}}"#
+            );
+            std::fs::write(&path, json).unwrap();
+            path
+        };
+        let p1 = write_table("one.json", 998, "call_one");
+        let p2 = write_table("two.json", 997, "call_two");
+        let mut global = global();
+        global.config_files = vec![
+            p1.to_string_lossy().into_owned(),
+            p2.to_string_lossy().into_owned(),
+        ];
+        let table = load_point_table(&global).unwrap();
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.by_name("call_one").map(|p| p.nr), Some(998));
+        assert_eq!(table.by_name("call_two").map(|p| p.nr), Some(997));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Round 18 / R17-E1: same nr and name across files keep the first file's
+    /// point (including its params) without erroring — the duplicate check is
+    /// per-file, cross-file duplicates are resolved by the first-wins merge.
+    #[test]
+    fn duplicate_points_across_files_keep_first() {
+        let dir = std::env::temp_dir().join("stackplz_syscall_cfg_dup_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let write_table = |name: &str, arg: &str| {
+            let path = dir.join(name);
+            let json = format!(
+                r#"{{"type":"syscall","points":[{{"nr":999,"name":"custom_call","params":[{{"name":"{arg}","type":"int"}}]}}]}}"#
+            );
+            std::fs::write(&path, json).unwrap();
+            path
+        };
+        let p1 = write_table("one.json", "first");
+        let p2 = write_table("two.json", "second");
+        let mut global = global();
+        global.config_files = vec![
+            p1.to_string_lossy().into_owned(),
+            p2.to_string_lossy().into_owned(),
+        ];
+        let table = load_point_table(&global).unwrap();
+        assert_eq!(table.len(), 1, "duplicate nr/name: first wins, no error");
+        let point = table.by_name("custom_call").unwrap();
+        assert_eq!(point.nr, 999);
+        assert_eq!(point.enter_point_args[0].name, "first");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -375,6 +375,21 @@ impl SyscallPointTable {
         target.exit_point_args = exit_point_args;
         Ok(true)
     }
+
+    /// Merge `other` into this table with first-wins on duplicate nr/name —
+    /// same semantics as Go's linear `GetSyscallPointByName`/
+    /// `GetSyscallPointByNR` scans, which return the first match (R17-E1).
+    pub(crate) fn merge_first_wins(&mut self, other: &SyscallPointTable) {
+        for point in &other.points {
+            if self.by_nr.contains_key(&point.nr) || self.by_name.contains_key(&point.name) {
+                continue;
+            }
+            let index = self.points.len();
+            self.by_nr.insert(point.nr, index);
+            self.by_name.insert(point.name.clone(), index);
+            self.points.push(point.clone());
+        }
+    }
 }
 
 #[cfg(test)]

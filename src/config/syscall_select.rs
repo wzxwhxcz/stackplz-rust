@@ -348,7 +348,9 @@ pub fn select(
 ///   to argument *i*.
 fn apply_filter_groups(point: &mut SyscallPoint, filter_groups: &[String]) -> Result<()> {
     if filter_groups.len() == 1 {
-        for filter_name in filter_groups[0].split('.').filter(|s| !s.is_empty()) {
+        // Empty names are kept so they fail like any unknown filter (R17-D1):
+        // Go's `GetFilterByName` panics "%s not match any filter" for them too.
+        for filter_name in filter_groups[0].split('.') {
             let filter = get_filter_by_name(filter_name)
                 .ok_or_else(|| anyhow!("{} not match any filter", filter_name))?;
             if filter.is_str() {
@@ -375,7 +377,7 @@ fn apply_filter_groups(point: &mut SyscallPoint, filter_groups: &[String]) -> Re
         if filter_group.is_empty() {
             continue;
         }
-        for filter_name in filter_group.split('.').filter(|s| !s.is_empty()) {
+        for filter_name in filter_group.split('.') {
             let filter = get_filter_by_name(filter_name)
                 .ok_or_else(|| anyhow!("{} not match any filter", filter_name))?;
             if let Some(arg) = point.enter_point_args.get_mut(group_index) {
@@ -553,6 +555,27 @@ mod tests {
         let token = format!("openat:{missing}");
         let err = select(&mut table, &token, "").unwrap_err();
         assert!(err.to_string().contains("not match any filter"), "{err}");
+    }
+
+    /// R17-D1: an empty filter name inside a group (`openat:`, `openat:f0.`,
+    /// `openat:.f0`) must fail like any unknown filter instead of being
+    /// silently dropped — Go's `GetFilterByName` panics for the empty name
+    /// too. Empty *groups* (`readlinkat:|f1`) stay legal placeholders.
+    #[test]
+    fn empty_filter_names_are_errors_group_placeholders_are_not() {
+        for spec in ["openat:", "openat:f0.", "openat:.f0"] {
+            let mut table = fresh_table();
+            let err = select(&mut table, spec, "").unwrap_err();
+            assert!(
+                err.to_string().contains("not match any filter"),
+                "{spec}: {err}"
+            );
+        }
+
+        let mut table = fresh_table();
+        let f1 = crate::config::add_filter("w:/apex").unwrap();
+        let token = format!("readlinkat:|{}", filter_name_of(f1));
+        assert!(select(&mut table, &token, "").is_ok());
     }
 
     /// M1: a string filter attaches to the **first** string arg whose

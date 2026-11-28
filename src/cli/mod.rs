@@ -295,6 +295,31 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// Join every module thread and fold the first panic into the outcome
+/// (R17-B1): a module that panicked before sending its completion only shows
+/// up at the join, and the generic Disconnected error would otherwise hide
+/// it. Only that generic error is replaced — an explicit module error or an
+/// interrupt keeps its own cause.
+fn finalize_module_outcome(
+    mut outcome: Result<(), RunError>,
+    handles: Vec<(String, std::thread::JoinHandle<()>)>,
+) -> Result<(), RunError> {
+    for (name, handle) in handles {
+        if let Err(payload) = handle.join() {
+            let msg = panic_message(payload);
+            eprintln!("module {name} panicked: {msg}");
+            if matches!(
+                outcome,
+                Err(RunError::Module(ref m))
+                    if m.as_str() == "all modules stopped without a signal, [skip it]"
+            ) {
+                outcome = Err(RunError::Module(format!("module {name} panicked: {msg}")));
+            }
+        }
+    }
+    outcome
+}
+
 /// Start every selected module and block until a signal or a module failure.
 ///
 /// Upstream starts the modules from the main goroutine and `os.Exit(1)`s when
@@ -431,7 +456,7 @@ fn run_modules(
     // The loop breaks with the outcome; the warning prints before returning
     // it, whether the run succeeded or failed (a failing run loses logs too,
     // and that is when the warning matters most).
-    let outcome = loop {
+    let mut outcome = loop {
         if INTERRUPTED.load(Ordering::SeqCst) {
             break Ok(());
         }
@@ -463,11 +488,7 @@ fn run_modules(
     // above; join every module thread before the final warning so the dropped-
     // lines count (and the shutdown summaries) are final — see the path-by-
     // path argument at the `handles` collection above.
-    for (name, handle) in handles {
-        if let Err(payload) = handle.join() {
-            eprintln!("module {name} panicked: {}", panic_message(payload));
-        }
-    }
+    outcome = finalize_module_outcome(outcome, handles);
     print_dropped_lines_warning(&logger);
     outcome
 }
@@ -690,5 +711,59 @@ mod tests {
     fn module_completion_after_interrupt_is_clean() {
         assert!(handle_module_completion("StackMod", None, true).is_none());
         assert!(handle_module_completion("StackMod", Some("x".into()), true).is_none());
+    }
+
+    /// Round 18 / R17-B1: a module that panicked before sending its completion
+    /// replaces the generic Disconnected error with the panic text; without a
+    /// panic the Disconnected outcome is unchanged, and an explicit module
+    /// error keeps its own cause even when another module panicked.
+    #[test]
+    fn finalize_replaces_disconnected_with_first_panic() {
+        let disconnected = || {
+            Err(RunError::Module(
+                "all modules stopped without a signal, [skip it]".into(),
+            ))
+        };
+
+        // Panic replaces the generic Disconnected error.
+        let panicked = std::thread::Builder::new()
+            .name("StackMod".into())
+            .spawn(|| panic!("module boom"))
+            .unwrap();
+        let err = finalize_module_outcome(disconnected(), vec![("StackMod".to_string(), panicked)])
+            .unwrap_err();
+        let msg = err.message();
+        assert!(msg.contains("StackMod"), "{msg}");
+        assert!(msg.contains("panicked"), "{msg}");
+        assert!(msg.contains("module boom"), "{msg}");
+        assert!(!msg.contains("stopped without a signal"), "{msg}");
+
+        // No panic: the Disconnected error stays as-is.
+        let quiet = std::thread::Builder::new()
+            .name("StackMod".into())
+            .spawn(|| {})
+            .unwrap();
+        let err = finalize_module_outcome(disconnected(), vec![("StackMod".to_string(), quiet)])
+            .unwrap_err();
+        assert_eq!(
+            err.message(),
+            "all modules stopped without a signal, [skip it]"
+        );
+
+        // An explicit module error keeps its cause.
+        let panicked = std::thread::Builder::new()
+            .name("StackMod".into())
+            .spawn(|| panic!("module boom"))
+            .unwrap();
+        let err = finalize_module_outcome(
+            Err(RunError::Module(
+                "SyscallMod\tmodule Run failed, [skip it]. error:perf poll failed".into(),
+            )),
+            vec![("StackMod".to_string(), panicked)],
+        )
+        .unwrap_err();
+        let msg = err.message();
+        assert!(msg.contains("perf poll failed"), "{msg}");
+        assert!(!msg.contains("panicked"), "{msg}");
     }
 }

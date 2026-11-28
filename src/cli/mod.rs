@@ -402,8 +402,12 @@ fn run_modules(
                 // module still setting up BPF when the flag flips sees it on
                 // its first poll.)
                 INTERRUPTED.store(true, Ordering::SeqCst);
-                for (_, handle) in handles {
-                    let _ = handle.join();
+                for (name, handle) in handles {
+                    // R16-1: a module that panics while winding down must not
+                    // vanish silently — same as the post-loop join below.
+                    if let Err(payload) = handle.join() {
+                        eprintln!("module {name} panicked: {}", panic_message(payload));
+                    }
                 }
                 print_dropped_lines_warning(&warn_logger);
                 return Err(RunError::Module(format!(

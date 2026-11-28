@@ -386,16 +386,24 @@ pub fn parse_hook_point(
                  trailing residue — is not supported: use one `-w` element per point"
             );
         }
-        // Stray `]` (no args group): the group parser leaves it in the
-        // remainder, but it is still this point's closing `]`.
-        let after = after.strip_prefix(']').unwrap_or(after);
-        if !after.is_empty() {
-            // Only a successful offset parse marks an exit read; a garbage
-            // remainder (`foo]]0x20]s` → `0x20]`) keeps exit_read false and
-            // offset 0, matching Go's Split (`config_module.go:362-372`).
-            if let Ok(n) = parse_base0_u64(after) {
-                exit_read = true;
-                exit_offset = n;
+        // Mirror Go's `strings.Split(element, "]")` (`config_module.go:361-368`):
+        // only an element with exactly one `]` (Split yields exactly 2 parts)
+        // carries an exit offset. That `]` is either this point's closing `]`,
+        // or a stray `]` the group parser left in the remainder — which is
+        // still this point's closing `]`.
+        if config_str.matches(']').count() == 1 {
+            let after = after.strip_prefix(']').unwrap_or(after);
+            if !after.is_empty() {
+                match parse_base0_u64(after) {
+                    Ok(n) => {
+                        exit_read = true;
+                        exit_offset = n;
+                    }
+                    // Go panics in `StrToNum64` here (`util/helper.go:36-42`);
+                    // bail loudly instead of silently tracking enter-only
+                    // (R11-3/R12-2 policy).
+                    Err(_) => bail!("hook point {config_str:?}: invalid exit offset {after:?}"),
+                }
             }
         }
 
@@ -843,6 +851,62 @@ mod tests {
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].exit_offset, 0);
         assert!(!points[0].exit_read);
+    }
+
+    /// Round 17 / R16-5: a stray extra `]` after the args group
+    /// (`foo[ptr]]0x20`) makes the element hold two `]` — Go's `Split` yields
+    /// 3 parts, so no exit offset: 1 point, exit_read=false, offset 0, no
+    /// companion point.
+    #[test]
+    fn stray_second_bracket_no_exit_offset() {
+        ensure_init();
+        let points = hp("foo[ptr]]0x20");
+        assert_eq!(points.len(), 1);
+        assert!(!points[0].exit_read);
+        assert_eq!(points[0].exit_offset, 0);
+    }
+
+    /// Round 17 / R16-4: exactly one `]` but an unparseable remainder is a
+    /// hard error (Go panics in `StrToNum64`); fail loud instead of silently
+    /// tracking enter-only.
+    #[test]
+    fn garbage_exit_offset_bails() {
+        ensure_init();
+        for cfg in ["foo]0x20garbage", "foo]garbage"] {
+            let err = parse_hook_point(&[cfg.to_string()], "/lib/libc.so", false).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid exit offset"),
+                "cfg={cfg}: {err}"
+            );
+        }
+    }
+
+    /// Round 17 regressions: one `]` keeps parsing an exit offset, two `]`
+    /// (after suffix strip) keep offset 0 and the syscall bind.
+    #[test]
+    fn exit_offset_single_bracket_regressions() {
+        ensure_init();
+        let points = hp("foo[ptr]0x20");
+        assert_eq!(points.len(), 2, "main + exit companion");
+        assert!(points[0].exit_read);
+        assert_eq!(points[0].exit_offset, 0x20);
+
+        let points = hp("foo]0x20]s");
+        assert_eq!(points.len(), 1);
+        assert!(!points[0].exit_read);
+        assert_eq!(points[0].exit_offset, 0);
+        assert!(points[0].bind_syscall);
+
+        let points = hp("foo]0x20");
+        assert_eq!(points.len(), 2, "main + exit companion");
+        assert!(points[0].exit_read);
+        assert_eq!(points[0].exit_offset, 0x20);
+
+        let points = hp("write[int]0x40]s");
+        assert_eq!(points.len(), 1);
+        assert!(!points[0].exit_read);
+        assert_eq!(points[0].exit_offset, 0);
+        assert!(points[0].bind_syscall);
     }
 
     /// Round 14 / R13-4: one `-w` element holding two points bails loudly

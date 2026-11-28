@@ -11,6 +11,7 @@
 //! lists, `child_parent_map`, `thread_filter`, `arg_filter`, and
 //! `common_filter.trace_uid_group` (the previous code hard-coded `0xFF`).
 
+use super::panic_message;
 use crate::config::base0::parse_base0_u64;
 use crate::config::global::GlobalConfig;
 use crate::config::hook_json::{hex2int, HookConfig};
@@ -391,6 +392,9 @@ fn run_jobs_concurrently<F>(jobs: Vec<F>, interrupted: impl Fn() -> bool) -> Res
 where
     F: FnOnce() -> Result<()> + Send + 'static,
 {
+    // R16-2: reset the abort flag on entry so a second run in the same
+    // process never reads a stale true left by a previous error.
+    PROBE_ABORT.store(false, Ordering::SeqCst);
     if jobs.is_empty() {
         return Err(anyhow!("no stack probes to run"));
     }
@@ -417,7 +421,10 @@ where
                 // running after a spawn failure.
                 PROBE_ABORT.store(true, Ordering::SeqCst);
                 for handle in handles {
-                    let _ = handle.join();
+                    let name = handle.thread().name().unwrap_or("stack-probe").to_string();
+                    if let Err(payload) = handle.join() {
+                        eprintln!("stack probe {name} panicked: {}", panic_message(payload));
+                    }
                 }
                 return Err(anyhow!("failed to spawn stack probe thread: {e}"));
             }
@@ -430,7 +437,10 @@ where
             // poll checks (shared INTERRUPTED); nothing errored, so do NOT set
             // PROBE_ABORT here — run_modules reports the interrupt as Ok.
             for handle in handles {
-                let _ = handle.join();
+                let name = handle.thread().name().unwrap_or("stack-probe").to_string();
+                if let Err(payload) = handle.join() {
+                    eprintln!("stack probe {name} panicked: {}", panic_message(payload));
+                }
             }
             return Ok(());
         }
@@ -442,7 +452,10 @@ where
                 // is not a user interrupt. The original error propagates as-is.
                 PROBE_ABORT.store(true, Ordering::SeqCst);
                 for handle in handles {
-                    let _ = handle.join();
+                    let name = handle.thread().name().unwrap_or("stack-probe").to_string();
+                    if let Err(payload) = handle.join() {
+                        eprintln!("stack probe {name} panicked: {}", panic_message(payload));
+                    }
                 }
                 return Err(e);
             }
@@ -450,8 +463,19 @@ where
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 // Every thread sent exactly one message and is gone: all probes
                 // stopped without an interrupt; join is immediate.
+                let mut first_panic = None;
                 for handle in handles {
-                    let _ = handle.join();
+                    let name = handle.thread().name().unwrap_or("stack-probe").to_string();
+                    if let Err(payload) = handle.join() {
+                        let msg = panic_message(payload);
+                        eprintln!("stack probe {name} panicked: {msg}");
+                        if first_panic.is_none() {
+                            first_panic = Some(msg);
+                        }
+                    }
+                }
+                if let Some(msg) = first_panic {
+                    return Err(anyhow!("stack probe panicked: {msg}"));
                 }
                 return Err(anyhow!("all stack probes stopped without a signal"));
             }
@@ -799,6 +823,35 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         assert!(done.load(Ordering::Relaxed), "both 2s jobs finished");
         assert!(start.elapsed() >= std::time::Duration::from_millis(2000));
+    }
+
+    /// A job that panics before sending its result must surface the panic text
+    /// instead of the generic "all probes stopped" error (R16-1).
+    #[test]
+    fn run_jobs_concurrently_panic_job_reports_panic() {
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> =
+            vec![Box::new(move || -> Result<()> {
+                panic!("probe boom panic")
+            })];
+        let err = run_jobs_concurrently(jobs, || false).unwrap_err();
+        assert!(format!("{err:#}").contains("probe boom panic"), "{err:#}");
+        assert!(
+            !format!("{err:#}").contains("all stack probes stopped"),
+            "{err:#}"
+        );
+    }
+
+    /// A panicking job under an immediate interrupt is still Ok (user interrupt
+    /// semantics); the panic is only logged to stderr, which unit tests cannot
+    /// capture — this test asserts the Ok contract (R16-1).
+    #[test]
+    fn run_jobs_concurrently_panic_job_interrupt_still_ok() {
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> =
+            vec![Box::new(move || -> Result<()> {
+                panic!("probe boom panic")
+            })];
+        let result = run_jobs_concurrently(jobs, || true);
+        assert!(result.is_ok(), "{result:?}");
     }
 
     // ---- Round 12 / R11-8: probe point renumbering ----

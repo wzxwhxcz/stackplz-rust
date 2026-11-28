@@ -322,6 +322,35 @@ fn format_panics(panics: &[(String, String)]) -> String {
         .join("; ")
 }
 
+/// Drain completions queued behind the first one received (R24-D1): when two
+/// modules fail nearly together, the second's Err sits in the channel and
+/// would be dropped once the wait loop breaks on the first. Returns the
+/// module-failure texts; clean stops (`(name, None)`) are ignored.
+fn drain_queued_completions(rx: &mpsc::Receiver<(String, Option<String>)>) -> Vec<String> {
+    let mut queued = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok((name, Some(e))) => {
+                queued.push(format!("{name}\tmodule Run failed, [skip it]. error:{e}"))
+            }
+            Ok((_, None)) => {}
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    queued
+}
+
+/// Append queued sibling-completion error texts to a module error (R24-D1),
+/// so a second failure is not silently dropped behind the first completion.
+fn append_queued_completions(mut err: RunError, queued: &[String]) -> RunError {
+    if !queued.is_empty() {
+        if let RunError::Module(msg) = &mut err {
+            msg.push_str(&format!("; {}", queued.join("; ")));
+        }
+    }
+    err
+}
+
 /// Join every module thread and fold all panics into the outcome (R18-B1):
 /// a module that panicked before sending its completion only shows up at the
 /// join, and the generic Disconnected error would otherwise hide it. That
@@ -393,8 +422,16 @@ fn wait_for_module_completions(
                     // module ends on its own only through an error or a poll
                     // failure, and neither is a success.
                     interrupted.store(true, Ordering::SeqCst);
-                    break Err(err);
+                    // R24-D1: modules can fail nearly together; drain the
+                    // queued completions so a second Err is not dropped
+                    // behind the first.
+                    let queued = drain_queued_completions(&rx);
+                    break Err(append_queued_completions(err, &queued));
                 }
+                // R24-D1: drain queued completions on the interrupt path too.
+                // Interrupt stays a clean stop, so any queued errors are
+                // dropped with the channel.
+                drain_queued_completions(&rx);
                 break Ok(());
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -428,7 +465,14 @@ fn wait_for_module_completions(
                     continue;
                 }
                 interrupted.store(true, Ordering::SeqCst);
-                break Err(RunError::Module(format_panics(&panics)));
+                // R24-D1: drained after the joins (no new completion can land
+                // afterwards); panics stay the primary error, queued
+                // completion errors append as secondary.
+                let queued = drain_queued_completions(&rx);
+                break Err(append_queued_completions(
+                    RunError::Module(format_panics(&panics)),
+                    &queued,
+                ));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 // Every module thread ended without sending a completion
@@ -552,8 +596,13 @@ fn run_modules(
                 // R18-B2b: a wind-down panic must not vanish when stderr is
                 // dropped, so append it to the spawn error (like R18-B2).
                 let panics = collect_joined_panics(handles);
+                // R24-D1: already-started modules may have queued a
+                // completion while this spawn failed; drain so a real
+                // failure is not dropped with the channel.
+                let queued = drain_queued_completions(&rx);
                 print_dropped_lines_warning(&warn_logger);
-                return Err(spawn_failure_error(name, e, &panics));
+                let err = spawn_failure_error(name, e, &panics);
+                return Err(append_queued_completions(err, &queued));
             }
         }
     }
@@ -999,5 +1048,73 @@ mod tests {
             err.message(),
             "failed to spawn SyscallMod module: spawn failed"
         );
+    }
+
+    /// Round 24 / R24-D1: two modules failing nearly together — the second
+    /// completion's Err is queued behind the first and must not be dropped.
+    /// The flag orders the sends so the second error is guaranteed queued by
+    /// the time the first is received (no timing window).
+    #[test]
+    fn wait_keeps_second_queued_completion_error() {
+        let (tx, rx) = mpsc::channel::<(String, Option<String>)>();
+        let second_sent = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&second_sent);
+        let tx_second = tx.clone();
+        let second = std::thread::Builder::new()
+            .name("SyscallMod".into())
+            .spawn(move || {
+                tx_second
+                    .send(("SyscallMod".to_string(), Some("boom-second".into())))
+                    .unwrap();
+                flag.store(true, Ordering::SeqCst);
+            })
+            .unwrap();
+        let first = std::thread::Builder::new()
+            .name("StackMod".into())
+            .spawn(move || {
+                while !flag.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                tx.send(("StackMod".to_string(), Some("boom-first".into())))
+                    .unwrap();
+            })
+            .unwrap();
+        // Each thread owns its sender and drops it on exit; no sender remains
+        // once both have sent, so no explicit drop is needed.
+        let mut handles = vec![
+            ("StackMod".to_string(), first),
+            ("SyscallMod".to_string(), second),
+        ];
+        let interrupted = AtomicBool::new(false);
+        let err = wait_for_module_completions(rx, &mut handles, &interrupted).unwrap_err();
+        let msg = err.message();
+        assert!(msg.contains("StackMod"), "{msg}");
+        assert!(msg.contains("SyscallMod"), "{msg}");
+        assert!(msg.contains("boom-first"), "{msg}");
+        assert!(msg.contains("boom-second"), "{msg}");
+    }
+
+    /// Round 24 / R24-D1: the spawn-failure arm (run_modules) drains
+    /// completions queued by already-started modules and appends them to the
+    /// spawn error — a queued Err must not vanish with the channel. The arm's
+    /// composition is exercised directly: drain the queue, build the spawn
+    /// error, append.
+    #[test]
+    fn spawn_failure_appends_queued_completion_error() {
+        let (tx, rx) = mpsc::channel::<(String, Option<String>)>();
+        tx.send(("SyscallMod".to_string(), Some("probe boom".into())))
+            .unwrap();
+        drop(tx);
+        let queued = drain_queued_completions(&rx);
+        let err = spawn_failure_error("StackMod", "spawn failed", &[]);
+        let err = append_queued_completions(err, &queued);
+        let msg = err.message();
+        assert!(
+            msg.contains("failed to spawn StackMod module: spawn failed"),
+            "{msg}"
+        );
+        assert!(msg.contains("SyscallMod"), "{msg}");
+        assert!(msg.contains("module Run failed, [skip it]"), "{msg}");
+        assert!(msg.contains("probe boom"), "{msg}");
     }
 }

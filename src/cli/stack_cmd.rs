@@ -531,8 +531,11 @@ where
                     }
                     return Err(anyhow!(msg));
                 }
+                // R24-C1: with several probes, the clean-Ok probe is never the
+                // only one that stopped cleanly, so “a” under-counts; the
+                // neutral plural matches the Disconnected arm's wording.
                 return Err(spawn_failure_error(
-                    Some("a stack probe stopped without a signal".to_string()),
+                    Some("one or more stack probes stopped without a signal".to_string()),
                     &panics,
                 ));
             }
@@ -1044,14 +1047,15 @@ mod tests {
     }
 
     /// All jobs finishing Ok without an interrupt is an error: a trace module
-    /// never legitimately ends on its own.
+    /// never legitimately ends on its own (R24-C1: with several clean stops
+    /// the neutral plural wording counts correctly).
     #[test]
     fn run_jobs_concurrently_all_ok_without_interrupt_is_error() {
         let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let jobs: Vec<_> = vec![sleep_job(1), sleep_job(1), sleep_job(1)];
+        let jobs: Vec<_> = vec![sleep_job(1), sleep_job(1)];
         let err = run_jobs_concurrently(jobs, || false).unwrap_err();
         assert!(
-            format!("{err:#}").contains("a stack probe stopped without a signal"),
+            format!("{err:#}").contains("one or more stack probes stopped without a signal"),
             "{err:#}"
         );
     }

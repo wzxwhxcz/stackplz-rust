@@ -118,7 +118,11 @@ impl Logger {
             }
             None => true,
         };
-        if !sink_ok(terminal) || !sink_ok(file) {
+        // Evaluate both sinks independently: the `||` short-circuit would skip
+        // the file write when the terminal fails (round 26 / R25-G1).
+        let t_ok = sink_ok(terminal);
+        let f_ok = sink_ok(file);
+        if !t_ok || !f_ok {
             *lines_failed += 1;
         }
     }
@@ -293,6 +297,27 @@ mod tests {
         let mut n = 0u64;
         Logger::write_line_sinks(None, None, b"line", &mut n);
         assert_eq!(n, 0, "no sink, nothing written, nothing lost");
+    }
+
+    /// Round 26 / R25-G1: a failing terminal must not short-circuit the file
+    /// sink — the file still receives the line, and the line counts once.
+    /// (Old code: `!sink_ok(terminal) || !sink_ok(file)` skipped the file
+    /// write on terminal failure, leaving the file empty.)
+    #[test]
+    fn terminal_failure_still_writes_file_sink() {
+        let mut file_sink: Vec<u8> = Vec::new();
+        let mut lines_failed = 0u64;
+        Logger::write_line_sinks(
+            Some(&mut FailingWriter),
+            Some(&mut file_sink),
+            b"line",
+            &mut lines_failed,
+        );
+        assert_eq!(
+            file_sink, b"line\n",
+            "file sink must still receive the line"
+        );
+        assert_eq!(lines_failed, 1, "one lost line counts once");
     }
 
     #[test]

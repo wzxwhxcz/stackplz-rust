@@ -15,7 +15,16 @@ struct MapSegment {
     path: String,
 }
 
-/// Parse `/proc/{pid}/maps` and resolve `value` to `"<path> + 0x<offset>"`.
+/// Go `helper.go:249-252` returns the maps-line basename (the last `/`
+/// element of the path), not the full path. `(deleted)` files drop their
+/// suffix first so the basename doesn't become `"(deleted)"` itself.
+fn segment_display_name(path: &str) -> &str {
+    let path = path.split_whitespace().next().unwrap_or(path);
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Parse `/proc/{pid}/maps` and resolve `value` to `"<name> + 0x<offset>"`
+/// where `name` is the segment's basename (mirroring Go, not the full path).
 ///
 /// Equivalent to Go's `fmt.Fscanf(reader, "%x-%x %s %x %s %d %s", ...)`.
 pub fn parse_reg(pid: u32, value: u64) -> Result<String> {
@@ -24,7 +33,9 @@ pub fn parse_reg(pid: u32, value: u64) -> Result<String> {
         if let Some(seg) = parse_maps_line(line) {
             if value >= seg.start && value < seg.end {
                 let off = seg.offset + (value - seg.start);
-                return Ok(format!("{} + 0x{:x}", seg.path, off));
+                // Go `helper.go:249-252` returns the maps-line basename, not
+                // the full path.
+                return Ok(format!("{} + 0x{:x}", segment_display_name(&seg.path), off));
             }
         }
     }
@@ -95,6 +106,20 @@ mod tests {
     fn parse_maps_line_garbage_returns_none() {
         assert!(parse_maps_line("garbage line").is_none());
         assert!(parse_maps_line("").is_none());
+    }
+
+    #[test]
+    fn segment_display_name_takes_basename() {
+        assert_eq!(segment_display_name("/apex/.../libc.so"), "libc.so");
+        assert_eq!(segment_display_name("libc.so"), "libc.so");
+        // `(deleted)` maps lines: strip the suffix before the basename so
+        // the result is the deleted library's name, not `"(deleted)"`.
+        assert_eq!(
+            segment_display_name("/apex/.../libfoo.so (deleted)"),
+            "libfoo.so"
+        );
+        // Paths with spaces are only the first token in the maps line.
+        assert_eq!(segment_display_name("/path/with space.so"), "with");
     }
 
     #[test]

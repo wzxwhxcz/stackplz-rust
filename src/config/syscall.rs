@@ -142,6 +142,11 @@ impl SyscallConfig {
     ///
     /// `default_thread_blacklist()` entries are deliberately NOT counted: they
     /// are applied unconditionally by the user side and are not a user choice.
+    ///
+    /// Keep the field set in sync with `StackConfig::has_no_user_filter`
+    /// (`src/config/stack.rs:218`) — the two predicates are mirrors
+    /// (round 14 / R14-4); adding a field to one side without the other turns
+    /// the twin predicate-matrix tests red.
     pub fn has_no_user_filter(&self) -> bool {
         self.uid_whitelist.is_empty()
             && self.uid_blacklist.is_empty()
@@ -253,37 +258,17 @@ mod tests {
         u32::from_ne_bytes(bytes[off..off + 4].try_into().unwrap())
     }
 
-    /// Regression test for report §4.2: a config with no uid/pid/tid/thread
-    /// filter must set `no_filter_allow = 1`, otherwise the eBPF
-    /// `should_trace()` default deny silently produces zero events while
-    /// master traced everything.
+    /// Round 14 / R14-4: `has_no_user_filter` is a 9-field predicate mirrored
+    /// between `SyscallConfig` and `StackConfig` (see `src/config/stack.rs`).
+    /// Every field must count; a future field added on one side only turns the
+    /// twin stack-side matrix red. The byte-level `no_filter_allow`
+    /// consequence is covered by `common_filter_bytes_keep_legacy_offsets`
+    /// and the CLI tests in `src/cli/syscall_cmd.rs`.
     #[test]
-    fn no_filter_config_requests_permissive_fallback() {
-        let conf = SyscallConfig::new();
-        assert!(conf.has_no_user_filter());
+    fn has_no_user_filter_predicate_matrix() {
+        // All-empty → true (no filter flags, R13-5 fallback).
+        assert!(SyscallConfig::new().has_no_user_filter());
 
-        let bytes = conf.to_common_filter_bytes();
-        assert_eq!(bytes.len(), 24);
-        assert_eq!(
-            u32_at(&bytes, 20),
-            1,
-            "no_filter_allow must be 1 when nothing is filtered"
-        );
-    }
-
-    /// The default thread blacklist is applied unconditionally by the user side
-    /// and is not a user filter, so it must not disable the fallback.
-    #[test]
-    fn default_thread_blacklist_does_not_count_as_a_filter() {
-        let conf = SyscallConfig::new();
-        assert!(!conf.default_thread_blacklist().is_empty());
-        assert!(conf.has_no_user_filter());
-    }
-
-    /// Any explicitly configured filter must keep the upstream whitelist-style
-    /// default deny (`no_filter_allow = 0`), so filtering behaviour is unchanged.
-    #[test]
-    fn any_explicit_filter_disables_permissive_fallback() {
         let mutators: Vec<fn(&mut SyscallConfig)> = vec![
             |c| c.uid_whitelist.push(1000),
             |c| c.uid_blacklist.push(0),
@@ -293,6 +278,7 @@ mod tests {
             |c| c.tid_blacklist.push(2),
             |c| c.tname_whitelist.push("RenderThread".to_string()),
             |c| c.tname_blacklist.push("android.bg".to_string()),
+            |c| c.trace_uid_group = 0b10010,
         ];
 
         for mutate in mutators {
@@ -302,8 +288,16 @@ mod tests {
                 !conf.has_no_user_filter(),
                 "a configured filter must disable the permissive fallback"
             );
-            assert_eq!(u32_at(&conf.to_common_filter_bytes(), 20), 0);
         }
+    }
+
+    /// The default thread blacklist is applied unconditionally by the user side
+    /// and is not a user filter, so it must not disable the fallback.
+    #[test]
+    fn default_thread_blacklist_does_not_count_as_a_filter() {
+        let conf = SyscallConfig::new();
+        assert!(!conf.default_thread_blacklist().is_empty());
+        assert!(conf.has_no_user_filter());
     }
 
     /// Byte layout contract with `common_filter_t` in ebpf/types.h: the five

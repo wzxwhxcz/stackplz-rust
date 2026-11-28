@@ -12,5 +12,9 @@ use stackplz::cli;
 
 fn main() {
     let code = cli::start();
+    // Safe: `run_modules` joins every module thread before returning
+    // (R14-5), so the "shutting down"/"TotalLost" tails and the dropped-lines
+    // warning are complete before the exit — no shutdown output is lost under
+    // load, and `process::exit` only tears down the process itself.
     std::process::exit(code);
 }

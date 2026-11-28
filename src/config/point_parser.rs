@@ -373,24 +373,27 @@ pub fn parse_hook_point(
         // foo 0x30 and dropped bar). A `,` in the remainder means the
         // element holds more than one point, which this parser does not
         // support — bail loudly instead of silently dropping the rest (Go
-        // drops them; this crate fails loud, per R11-3/R12-2). No args group
-        // means no `]` belongs to this point, so no exit offset.
+        // drops them; this crate fails loud, per R11-3/R12-2). The first
+        // `]` in the element owns the offset, whether it closes an args group
+        // or is a stray `]` (round 15 / R14-1: `foo]0x20` regressed to 0
+        // when R13-4 gated this on an args group).
         let mut exit_offset: u64 = 0;
-        if args_str.is_some() {
-            let after = &config_str[end_pos..];
-            if after.contains(',') {
-                bail!(
-                    "hook point {config_str:?} holds more than one point (`,` after the first point's `]`): \
-                     use one `-w` element per point"
-                );
-            }
-            if !after.is_empty() {
-                exit_read = true;
-                // NOTE: a garbage offset after `]` is silently kept as 0
-                // (H22, out of scope for this round — Go panics here).
-                if let Ok(n) = parse_base0_u64(after) {
-                    exit_offset = n;
-                }
+        let after = &config_str[end_pos..];
+        if after.contains(',') {
+            bail!(
+                "hook point {config_str:?} holds more than one point (`,` after the first point's `]`): \
+                 use one `-w` element per point"
+            );
+        }
+        // Stray `]` (no args group): the group parser leaves it in the
+        // remainder, but it is still this point's closing `]`.
+        let after = after.strip_prefix(']').unwrap_or(after);
+        if !after.is_empty() {
+            exit_read = true;
+            // NOTE: a garbage offset after `]` is silently kept as 0
+            // (H22, out of scope for this round — Go panics here).
+            if let Ok(n) = parse_base0_u64(after) {
+                exit_offset = n;
             }
         }
 
@@ -427,11 +430,15 @@ pub fn parse_hook_point(
         // Parse args
         if let Some(args) = args_str {
             hook_point.args_str = args.clone();
-            for (arg_index, arg_str) in args.split(',').enumerate() {
-                let arg_name = format!("arg_{arg_index}");
-                let mut pa = PointArg::new_uprobe(&arg_name, POINTER, arg_index as u32);
-                parse_arg_type(arg_str, &mut pa, dump_hex)?;
-                hook_point.point_args.push(pa);
+            // Empty `[]` means no args — Go yields none for an empty inner
+            // string (`parse_arg_type("")` would fail a type lookup).
+            if !args.is_empty() {
+                for (arg_index, arg_str) in args.split(',').enumerate() {
+                    let arg_name = format!("arg_{arg_index}");
+                    let mut pa = PointArg::new_uprobe(&arg_name, POINTER, arg_index as u32);
+                    parse_arg_type(arg_str, &mut pa, dump_hex)?;
+                    hook_point.point_args.push(pa);
+                }
             }
         }
 
@@ -796,6 +803,34 @@ mod tests {
         let points = hp("write[int,int,int]");
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].enter_key, 0);
+    }
+
+    /// Round 15 / R14-1: an exit offset after a stray `]` (no args group) is
+    /// still THIS point's own offset — `foo]0x20` must give 0x20 again
+    /// (R13-4 regressed it to 0 by gating the exit-offset read on an args
+    /// group). The first `]` in the element owns the offset, whether it
+    /// closes an args group or not; `foo[]0x20` (empty args) keeps working.
+    #[test]
+    fn exit_offset_after_stray_bracket() {
+        ensure_init();
+        // (cfg, main offset, exit_offset, exit_read)
+        for (cfg, offset, exit_offset, exit_read) in [
+            ("foo]0x20", 0, 0x20, true),
+            ("foo+0x10]0x20", 0x10, 0x20, true),
+            ("foo[]0x20", 0, 0x20, true),
+            ("foo[ptr]0x20", 0, 0x20, true),
+        ] {
+            let points = hp(cfg);
+            assert_eq!(points.len(), 2, "cfg={cfg}: main + exit companion");
+            assert_eq!(points[0].offset, offset, "cfg={cfg}");
+            assert_eq!(points[0].exit_offset, exit_offset, "cfg={cfg}");
+            assert_eq!(points[0].exit_read, exit_read, "cfg={cfg}");
+        }
+        // No `]` at all → no exit offset.
+        let points = hp("foo");
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].exit_offset, 0);
+        assert!(!points[0].exit_read);
     }
 
     /// Round 14 / R13-4: one `-w` element holding two points bails loudly

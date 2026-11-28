@@ -81,19 +81,6 @@ impl ResolvedFilters {
             tname_blacklist,
         })
     }
-
-    /// True when the user configured no inclusion/admission filter at all.
-    /// Used by the syscall side's `no_filter_allow` fallback (round-1 fix ②).
-    pub fn is_empty(&self) -> bool {
-        self.uid_whitelist.is_empty()
-            && self.uid_blacklist.is_empty()
-            && self.pid_whitelist.is_empty()
-            && self.pid_blacklist.is_empty()
-            && self.tid_whitelist.is_empty()
-            && self.tid_blacklist.all.is_empty()
-            && self.tname_whitelist.is_empty()
-            && self.tname_blacklist.is_empty()
-    }
 }
 
 /// The persistent pre-run. Returns usage-class errors (the caller maps them to
@@ -352,13 +339,6 @@ mod tests {
             filters.tname_blacklist,
             vec!["beta".to_string(), "gamma".to_string()]
         );
-        assert!(!filters.is_empty());
-    }
-
-    #[test]
-    fn no_filter_flags_means_empty_filters() {
-        let filters = ResolvedFilters::from_globals(&GlobalConfig::default()).unwrap();
-        assert!(filters.is_empty());
     }
 
     /// A thread name longer than the 16-byte key is rejected during the pre-run,

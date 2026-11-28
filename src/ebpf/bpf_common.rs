@@ -145,6 +145,29 @@ pub fn common_list_keys(items: &[u32], offset: u32) -> Result<Vec<u32>> {
         .collect()
 }
 
+/// Pure `common_filter_t` value construction, shared by the live write path
+/// ([`linux::write_common_filter`]) and its tests so the R13-5
+/// `no_filter_allow` fallback can never silently regress (round 14 /
+/// R14-3). `is_32bit` is the legacy field; the C side decides register width
+/// per target task, so the callers pass `false` (intentional, report §6.2).
+pub fn common_filter_value(
+    is_32bit: bool,
+    trace_mode: u32,
+    trace_uid_group: u32,
+    signal: u32,
+    tsignal: u32,
+    no_filter_allow: bool,
+) -> crate::contract::types::CommonFilter {
+    crate::contract::types::CommonFilter {
+        is_32bit: if is_32bit { 1 } else { 0 },
+        trace_mode,
+        trace_uid_group,
+        signal,
+        tsignal,
+        no_filter_allow: if no_filter_allow { 1 } else { 0 },
+    }
+}
+
 // ---- Linux-only libbpf-rs glue -------------------------------------------
 
 #[cfg(target_os = "linux")]
@@ -280,15 +303,14 @@ pub mod linux {
         tsignal: u32,
         no_filter_allow: bool,
     ) -> Result<()> {
-        use crate::contract::types::CommonFilter;
-        let filter = CommonFilter {
-            is_32bit: if is_32bit { 1 } else { 0 },
+        let filter = super::common_filter_value(
+            is_32bit,
             trace_mode,
             trace_uid_group,
             signal,
             tsignal,
-            no_filter_allow: if no_filter_allow { 1 } else { 0 },
-        };
+            no_filter_allow,
+        );
         write_map(obj, "common_filter", &0u32, &filter)
     }
 
@@ -405,6 +427,58 @@ mod tests {
         // Parse this Cargo.toml as a stand-in non-ELF file; should error.
         let bytes = b"not an elf";
         assert!(resolve_symbol_offset(bytes, "anything").is_err());
+    }
+
+    /// Round 14 / R14-3: the live stack write path builds `common_filter_t`
+    /// from [`super::common_filter_value`] — the old test-only
+    /// `StackConfig::common_filter()` dead method is gone, so the R13-5
+    /// `no_filter_allow` fallback is pinned on the *live* writer.
+    #[test]
+    fn common_filter_value_maps_fields_and_the_no_filter_allow_flag() {
+        use crate::contract::consts::{TRACE_ALL, TRACE_COMMON};
+
+        assert_eq!(
+            common_filter_value(false, TRACE_COMMON, 0, 0, 0, true),
+            crate::contract::types::CommonFilter {
+                is_32bit: 0,
+                trace_mode: TRACE_COMMON,
+                trace_uid_group: 0,
+                signal: 0,
+                tsignal: 0,
+                no_filter_allow: 1,
+            }
+        );
+
+        assert_eq!(
+            common_filter_value(true, TRACE_ALL, 0b10010, 19, 6, false),
+            crate::contract::types::CommonFilter {
+                is_32bit: 1,
+                trace_mode: TRACE_ALL,
+                trace_uid_group: 0b10010,
+                signal: 19,
+                tsignal: 6,
+                no_filter_allow: 0,
+            }
+        );
+    }
+
+    /// The wire layout written by `write_common_filter` (the same struct via
+    /// `bytemuck::bytes_of`) matches C `common_filter_t`: five legacy `u32`s
+    /// at 0..20, `no_filter_allow` appended at 20.
+    #[test]
+    fn common_filter_value_wire_layout_matches_the_c_header() {
+        use crate::contract::consts::TRACE_ALL;
+
+        let filter = common_filter_value(true, TRACE_ALL, 7, 11, 22, true);
+        let bytes = bytemuck::bytes_of(&filter);
+        assert_eq!(bytes.len(), 24);
+        let u32_at = |off: usize| u32::from_ne_bytes(bytes[off..off + 4].try_into().unwrap());
+        assert_eq!(u32_at(0), 1, "is_32bit");
+        assert_eq!(u32_at(4), TRACE_ALL, "trace_mode");
+        assert_eq!(u32_at(8), 7, "trace_uid_group");
+        assert_eq!(u32_at(12), 11, "signal");
+        assert_eq!(u32_at(16), 22, "tsignal");
+        assert_eq!(u32_at(20), 1, "no_filter_allow");
     }
 
     /// `child_parent_map` seeding: upstream writes each pid whitelist entry as

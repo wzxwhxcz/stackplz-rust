@@ -146,14 +146,16 @@ impl StackProbeModule {
         //    alongside them. See `ebpf/common/filtering.h:109-115`: only
         //    `no_filter_allow == 1` falls back; writing 0 means no fallback
         //    → default deny.
+        let (is_32bit, trace_mode, trace_uid_group, signal, tsignal, no_filter_allow) =
+            common_filter_write_args(&conf, kill_signal, tkill_signal);
         bpf_common::linux::write_common_filter(
             &obj,
-            false,
-            conf.trace_mode,
-            conf.trace_uid_group,
-            kill_signal,
-            tkill_signal,
-            conf.has_no_user_filter(),
+            is_32bit,
+            trace_mode,
+            trace_uid_group,
+            signal,
+            tsignal,
+            no_filter_allow,
         )?;
         logger.println(&format!(
             "{NAME}\tcommon_filter written (trace_mode={}, trace_uid_group=0x{:x}, signal={kill_signal}, tsignal={tkill_signal})",
@@ -377,6 +379,25 @@ pub fn legacy_stack_config(sconfig: &SConfig) -> StackConfig {
         }
     }
     conf
+}
+
+/// The exact `write_common_filter` argument tuple for a config — extracted
+/// from the Linux `run` loop so the R13-5 `has_no_user_filter` wiring
+/// (round 14 / R14-3) is unit-testable instead of being buried inside the
+/// BPF-loading path.
+fn common_filter_write_args(
+    conf: &StackConfig,
+    kill_signal: u32,
+    tkill_signal: u32,
+) -> (bool, u32, u32, u32, u32, bool) {
+    (
+        false,
+        conf.trace_mode,
+        conf.trace_uid_group,
+        kill_signal,
+        tkill_signal,
+        conf.has_no_user_filter(),
+    )
 }
 
 /// `1,2,3` rendering of an id list, mirroring `MStack.list2string()`.
@@ -712,17 +733,13 @@ mod tests {
                 thread_whitelist: 1,
             }
         );
-        assert_eq!(
-            effective.common_filter(false, 19, 6),
-            crate::contract::types::CommonFilter {
-                is_32bit: 0,
-                trace_mode: crate::contract::consts::TRACE_COMMON,
-                trace_uid_group: 0,
-                signal: 19,
-                tsignal: 6,
-                no_filter_allow: 0,
-            }
-        );
+        assert_eq!(effective.trace_mode, crate::contract::consts::TRACE_COMMON);
+        assert_eq!(effective.trace_uid_group, 0);
+        assert_eq!(effective.kill_signal, 19);
+        assert_eq!(effective.tkill_signal, 6);
+        assert!(!effective.has_no_user_filter()); // uid/pid/tid/tname filters set
+                                                  // The `has_no_user_filter` → `no_filter_allow` bool wiring is pinned by
+                                                  // `common_filter_write_args_pin_the_has_no_user_filter_wiring`.
         assert_eq!(
             effective.common_list_segments()[2],
             (crate::contract::consts::PID_WHITELIST_START, &[42u32][..])
@@ -732,6 +749,42 @@ mod tests {
         let entries = effective.thread_filter_entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1, crate::contract::consts::THREAD_NAME_WHITELIST);
+    }
+
+    /// Round 14 / R14-3: the `has_no_user_filter()` result must reach
+    /// `write_common_filter`'s `no_filter_allow` argument. A future hard-coded
+    /// `false` at the call site would silently re-break the bare `-w`
+    /// fallback (R13-5) with every test green.
+    #[test]
+    fn common_filter_write_args_pin_the_has_no_user_filter_wiring() {
+        // Bare default config → fallback on; legacy fields pass through.
+        let args = common_filter_write_args(&StackConfig::default(), 0, 0);
+        assert_eq!(
+            args,
+            (false, crate::contract::consts::TRACE_COMMON, 0, 0, 0, true)
+        );
+
+        // A configured filter (any field) → fallback off; signals/mode forward.
+        let conf = StackConfig {
+            uid_whitelist: vec![1000],
+            trace_mode: crate::contract::consts::TRACE_ALL,
+            trace_uid_group: 0b10010,
+            kill_signal: 19,
+            tkill_signal: 6,
+            ..Default::default()
+        };
+        let args = common_filter_write_args(&conf, 19, 6);
+        assert_eq!(
+            args,
+            (
+                false,
+                crate::contract::consts::TRACE_ALL,
+                0b10010,
+                19,
+                6,
+                false
+            )
+        );
     }
 
     /// Round 9 / H4 helpers: a minimal raw perf record (`EventContext` +

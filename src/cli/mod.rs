@@ -294,6 +294,11 @@ fn handle_module_completion(
 /// (R11-5: a single stdin `c` resumes both modules), and every module exit —
 /// Ok or Err — is reported to the wait loop (R11-4: a poll-error Ok exit
 /// used to vanish until the other module finished too).
+///
+/// Round 14 (R14-5/R14-6/R14-2): module thread JoinHandles are collected and
+/// joined before returning — `main()` exits via `process::exit`, so a thread
+/// still printing its shutdown tail would otherwise lose its `TotalLost`
+/// line, and the dropped-lines warning is only final after the join.
 fn run_modules(
     modules: Vec<ModuleKind>,
     global: &GlobalConfig,
@@ -315,6 +320,33 @@ fn run_modules(
     let (tx, rx) = mpsc::channel::<(String, Option<String>)>();
     let module_count = modules.len();
 
+    // Round 14 (R14-5/R14-6/R14-2): keep every module thread's JoinHandle
+    // instead of dropping it. `main()` calls `process::exit` right after
+    // `run()` returns, so a module thread still printing its shutdown summary
+    // when we returned would lose its "TotalLost" line. Joining all handles
+    // before returning makes the summaries and the dropped-lines warning
+    // final. None of the joins below can hang:
+    //   - Interrupt (path 1): the moment the wait loop sees INTERRUPTED it
+    //     breaks; each module's poll loop (100ms interval) also sees
+    //     `interrupted()` and exits, prints its "shutting down"/"TotalLost"
+    //     tail, and returns — join returns as soon as that tail is done.
+    //   - First completion with an error (path 2): storing INTERRUPTED before
+    //     breaking (below) makes any other module stop through the same
+    //     interrupted() exit.
+    //   - Disconnected (path 3): `recv_timeout` only reports Disconnected once
+    //     every sender — one per module thread, all cloned from `tx` — has
+    //     been dropped, i.e. every module thread has already returned, so
+    //     join is immediate.
+    //   - Spawn failure: see the spawn-error arm below (INTERRUPTED is stored
+    //     before joining).
+    // A module thread that panics before finishing is seen by join as Err;
+    // it is ignored so a broken module cannot panic the main thread during
+    // cleanup.
+    let mut handles = Vec::new();
+    // A clone owned by this frame: each loop iteration shadows `logger` with
+    // a clone that moves into the closure, so the spawn-error arm could not
+    // read `logger` after a failed spawn (use-of-moved-value).
+    let warn_logger = Arc::clone(&logger);
     for kind in modules {
         let tx = tx.clone();
         let global = global.clone();
@@ -325,7 +357,7 @@ fn run_modules(
         let logger = Arc::clone(&logger);
         let resume = Arc::clone(&resume);
         let name = kind.name();
-        std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name(name.to_string())
             .spawn(move || {
                 let result = match kind {
@@ -346,8 +378,25 @@ fn run_modules(
                     // reachable once the receiver is dropped.
                     eprintln!("module {name} failed after shutdown: {e}");
                 }
-            })
-            .map_err(|e| RunError::Module(format!("failed to spawn {name} module: {e}")))?;
+            }) {
+            Ok(handle) => handles.push(handle),
+            Err(e) => {
+                // R14-6: stop the modules that already started before failing.
+                // They sit in 100ms poll loops that respect interrupted(), so
+                // they wind down, print their tails, and exit on their own;
+                // joining them guarantees the teardown output is complete. (A
+                // module still setting up BPF when the flag flips sees it on
+                // its first poll.)
+                INTERRUPTED.store(true, Ordering::SeqCst);
+                for handle in handles {
+                    let _ = handle.join();
+                }
+                print_dropped_lines_warning(&warn_logger);
+                return Err(RunError::Module(format!(
+                    "failed to spawn {name} module: {e}"
+                )));
+            }
+        }
     }
     drop(tx);
 
@@ -392,10 +441,24 @@ fn run_modules(
             }
         }
     };
+    // Round 14 (R14-5/R14-2): the loop broke on one of the three outcomes
+    // above; join every module thread before the final warning so the dropped-
+    // lines count (and the shutdown summaries) are final — see the path-by-
+    // path argument at the `handles` collection above.
+    for handle in handles {
+        let _ = handle.join();
+    }
+    print_dropped_lines_warning(&logger);
+    outcome
+}
+
+/// Print the shared dropped-lines warning exactly once, after every module
+/// thread has been joined (R14-2), on every exit path — run success, run
+/// failure, or spawn failure. The count is only final after the join.
+fn print_dropped_lines_warning(logger: &crate::logger::Logger) {
     if let Some(warning) = crate::logger::Logger::dropped_lines_warning(logger.failed_lines()) {
         eprintln!("{warning}");
     }
-    outcome
 }
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);

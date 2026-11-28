@@ -70,7 +70,7 @@ impl SignalManager {
 
     /// Resume all stopped processes
     #[cfg(target_os = "linux")]
-    pub fn resume_all(&mut self) -> Result<()> {
+    pub fn resume_all(&mut self) {
         println!("------LetItRun------");
         let pids: Vec<u32> = self.stopped_pids.iter().copied().collect();
 
@@ -90,14 +90,12 @@ impl SignalManager {
                 }
             }
         }
-        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub fn resume_all(&mut self) -> Result<()> {
+    pub fn resume_all(&mut self) {
         println!("Signal control not supported on this platform");
         self.stopped_pids.clear();
-        Ok(())
     }
 
     /// Get count of stopped processes
@@ -170,7 +168,7 @@ impl ConsoleResume {
         let managers = self.managers.lock().unwrap_or_else(|p| p.into_inner());
         for mgr in managers.iter() {
             let mut g = mgr.lock().unwrap_or_else(|p| p.into_inner());
-            let _ = g.resume_all();
+            g.resume_all();
         }
     }
 }
@@ -187,7 +185,7 @@ impl Default for ConsoleResume {
 /// stdin thread. Returns true iff the line triggered a resume.
 pub fn handle_console_line(line: &str, mgr: &mut SignalManager) -> bool {
     if line.trim() == "c" {
-        let _ = mgr.resume_all();
+        mgr.resume_all();
         true
     } else {
         false
@@ -416,7 +414,7 @@ mod tests {
         }
         assert_eq!(mgr.stopped_count(), 2);
 
-        mgr.resume_all().expect("resume_all");
+        mgr.resume_all();
         assert_eq!(mgr.stopped_count(), 0);
         for &pid in &pids {
             wait_for_proc_state(pid, |st| st == 'R' || st == 'S');

@@ -1057,8 +1057,12 @@ mod tests {
     #[test]
     fn wait_keeps_second_queued_completion_error() {
         let (tx, rx) = mpsc::channel::<(String, Option<String>)>();
+        // Two flags close the race: second's send happens-before `second_sent`,
+        // first waits on it before sending, and the test waits for `first_sent`
+        // so both messages are guaranteed queued before the wait loop reads.
         let second_sent = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&second_sent);
+        let first_sent = Arc::new(AtomicBool::new(false));
+        let second_flag = Arc::clone(&second_sent);
         let tx_second = tx.clone();
         let second = std::thread::Builder::new()
             .name("SyscallMod".into())
@@ -1066,19 +1070,26 @@ mod tests {
                 tx_second
                     .send(("SyscallMod".to_string(), Some("boom-second".into())))
                     .unwrap();
-                flag.store(true, Ordering::SeqCst);
+                second_flag.store(true, Ordering::SeqCst);
             })
             .unwrap();
+        let first_wait = Arc::clone(&second_sent);
+        let first_done = Arc::clone(&first_sent);
         let first = std::thread::Builder::new()
             .name("StackMod".into())
             .spawn(move || {
-                while !flag.load(Ordering::SeqCst) {
+                while !first_wait.load(Ordering::SeqCst) {
                     std::thread::yield_now();
                 }
                 tx.send(("StackMod".to_string(), Some("boom-first".into())))
                     .unwrap();
+                first_done.store(true, Ordering::SeqCst);
             })
             .unwrap();
+        // Both sends are queued once first_sent is observed.
+        while !first_sent.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
         // Each thread owns its sender and drops it on exit; no sender remains
         // once both have sent, so no explicit drop is needed.
         let mut handles = vec![

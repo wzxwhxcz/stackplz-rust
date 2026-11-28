@@ -31,6 +31,8 @@ use crate::config::{GlobalConfig, TargetConfig};
 use args::Cli;
 use clap::Parser;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 use std::sync::{mpsc, Arc};
 
 /// Exit codes. Upstream dev has two failure classes:
@@ -411,6 +413,15 @@ fn module_spawn_failure_error(
 /// so recv_timeout would otherwise spin forever. Joined handles are removed
 /// from `handles` (a JoinHandle can only be joined once), so the sweep never
 /// re-joins an already-joined handle.
+///
+/// R25-E2 test hook: number of queued completions the loop-top interrupt
+/// path has reported on stderr. libtest's output capture intercepts
+/// `eprintln!` at the std level, so an fd-2 pipe redirect cannot observe
+/// it (verified: the pipe test passes under `--nocapture` and fails under
+/// default capture); the counter is the observable instead.
+#[cfg(test)]
+static INTERRUPT_DRAIN_REPORTED: AtomicU64 = AtomicU64::new(0);
+
 fn wait_for_module_completions(
     rx: mpsc::Receiver<(String, Option<String>)>,
     handles: &mut Vec<(String, std::thread::JoinHandle<()>)>,
@@ -422,6 +433,8 @@ fn wait_for_module_completions(
             // dropped with the channel; report them (diagnostic only —
             // interrupt stays a clean stop).
             let queued = drain_queued_completions(&rx);
+            #[cfg(test)]
+            INTERRUPT_DRAIN_REPORTED.fetch_add(queued.len() as u64, Ordering::SeqCst);
             for text in queued {
                 eprintln!("{text}");
             }
@@ -1144,87 +1157,28 @@ mod tests {
 
     /// R25-E2: a completion queued before an interrupt was silently dropped
     /// with the channel. The loop-top interrupt path now drains and reports
-    /// it on stderr; assert the observable output (asserting only `Ok`
-    /// would pass on the old code too).
+    /// it; assert the observable counter (asserting only `Ok` would pass
+    /// on the old code too). NOTE: fd-2 redirection cannot observe the
+    /// eprintln here — libtest's output capture intercepts it at the std
+    /// level, so a pipe on fd 2 stays empty under default capture
+    /// (verified: passes under `--nocapture`, fails under capture).
+    /// Only this test enters the wait with `interrupted=true`, so the
+    /// counter delta is exact despite parallel test threads.
     #[test]
-    #[cfg(target_os = "linux")]
-    fn interrupt_reports_queued_completions_on_stderr() {
+    fn interrupt_reports_queued_completions() {
         let (tx, rx) = mpsc::channel::<(String, Option<String>)>();
         tx.send(("SyscallMod".to_string(), Some("probe boom".into())))
             .unwrap();
         drop(tx);
         let interrupted = AtomicBool::new(true);
         let mut handles = Vec::new();
-        let cap = StdErrCapture::new();
+        let before = INTERRUPT_DRAIN_REPORTED.load(Ordering::SeqCst);
         let result = wait_for_module_completions(rx, &mut handles, &interrupted);
         assert!(result.is_ok());
-        let err = cap.take();
-        assert!(err.contains("probe boom"), "stderr was: {err}");
-    }
-
-    /// R25-E2 stderr-capture harness (Linux-only): redirect fd 2 to a pipe
-    /// so eprintln output is observable in a test; restores on take/drop.
-    #[cfg(target_os = "linux")]
-    struct StdErrCapture {
-        saved: i32,
-        read_fd: i32,
-    }
-
-    #[cfg(target_os = "linux")]
-    impl StdErrCapture {
-        fn new() -> Self {
-            unsafe {
-                let mut fds = [0i32; 2];
-                assert!(libc::pipe(fds.as_mut_ptr()) == 0);
-                let saved = libc::dup(2);
-                assert!(saved >= 0);
-                assert!(libc::dup2(fds[1], 2) == 2);
-                libc::close(fds[1]);
-                // Non-blocking read: if the drain ever regresses, the test
-                // fails instead of hanging on an empty pipe.
-                let flags = libc::fcntl(fds[0], libc::F_GETFL);
-                libc::fcntl(fds[0], libc::F_SETFL, flags | libc::O_NONBLOCK);
-                StdErrCapture {
-                    saved,
-                    read_fd: fds[0],
-                }
-            }
-        }
-
-        fn take(mut self) -> String {
-            unsafe {
-                let mut buf = [0u8; 8192];
-                let n = libc::read(
-                    self.read_fd,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                );
-                libc::close(self.read_fd);
-                libc::dup2(self.saved, 2);
-                libc::close(self.saved);
-                self.read_fd = -1;
-                self.saved = -1;
-                String::from_utf8_lossy(&buf[..n.max(0) as usize]).to_string()
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    impl Drop for StdErrCapture {
-        fn drop(&mut self) {
-            unsafe {
-                // Restore stderr whenever the guard goes away (including a
-                // failing assert) so later tests still see the real stderr.
-                if self.saved >= 0 {
-                    libc::dup2(self.saved, 2);
-                    libc::close(self.saved);
-                    self.saved = -1;
-                }
-                if self.read_fd >= 0 {
-                    libc::close(self.read_fd);
-                    self.read_fd = -1;
-                }
-            }
-        }
+        assert_eq!(
+            INTERRUPT_DRAIN_REPORTED.load(Ordering::SeqCst) - before,
+            1,
+            "loop-top interrupt path must report the one queued completion"
+        );
     }
 }

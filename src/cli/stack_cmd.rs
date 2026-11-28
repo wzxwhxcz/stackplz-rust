@@ -391,16 +391,40 @@ pub(crate) fn probe_abort_requested() -> bool {
     PROBE_ABORT.load(Ordering::SeqCst)
 }
 
-/// Build the spawn-failure error, appending any peer panic texts
-/// (R19-B2c); without panics the message is unchanged.
-fn spawn_failure_error(e: impl std::fmt::Display, panics: &[String]) -> anyhow::Error {
-    let mut msg = format!("failed to spawn stack probe thread: {e}");
-    if !panics.is_empty() {
-        msg.push_str(&format!(
-            "; also stack probe(s) panicked: {}",
-            panics.join("; ")
-        ));
+/// Join probe handles and collect `(name, msg)` for every panic, in join
+/// order. Panics still go to stderr; the returned list carries the names so
+/// every error arm can report which probe died (R19-B2c / R20-J1).
+fn collect_probe_panics(handles: Vec<std::thread::JoinHandle<()>>) -> Vec<(String, String)> {
+    let mut panics = Vec::new();
+    for handle in handles {
+        let name = handle.thread().name().unwrap_or("stack-probe").to_string();
+        if let Err(payload) = handle.join() {
+            let msg = panic_message(payload);
+            eprintln!("stack probe {name} panicked: {msg}");
+            panics.push((name, msg));
+        }
     }
+    panics
+}
+
+/// Build an error carrying peer panic names and texts (R19-B2c). `prefix`
+/// is the leading message for the spawn/first-error arms (`None` for the
+/// Disconnected/timeout-sweep shape, where the panics are the whole error).
+/// Panics format as `name: msg`, joined by `; ` (matches
+/// `cli::format_panics`). Without panics the message is unchanged (spawn /
+/// first-error) or the generic Disconnected text.
+fn spawn_failure_error(prefix: Option<String>, panics: &[(String, String)]) -> anyhow::Error {
+    let joined = panics
+        .iter()
+        .map(|(name, msg)| format!("{name}: {msg}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let msg = match prefix {
+        Some(p) if !panics.is_empty() => format!("{p}; also stack probe(s) panicked: {joined}"),
+        Some(p) => p,
+        None if !panics.is_empty() => format!("stack probe(s) panicked: {joined}"),
+        None => "all stack probes stopped without a signal".to_string(),
+    };
     anyhow!(msg)
 }
 
@@ -441,18 +465,13 @@ where
                 // that check PROBE_ABORT), then join them, so no probe is left
                 // running after a spawn failure.
                 PROBE_ABORT.store(true, Ordering::SeqCst);
-                let mut panics: Vec<String> = Vec::new();
-                for handle in handles {
-                    let name = handle.thread().name().unwrap_or("stack-probe").to_string();
-                    if let Err(payload) = handle.join() {
-                        let msg = panic_message(payload);
-                        eprintln!("stack probe {name} panicked: {msg}");
-                        panics.push(msg);
-                    }
-                }
-                // R19-B2c: append peer panic texts to the spawn failure (same
-                // shape as the first-error arm's R18-B2 merge).
-                return Err(spawn_failure_error(e, &panics));
+                let panics = collect_probe_panics(handles);
+                // R19-B2c: append peer panic texts (with names) to the spawn
+                // failure, same shape as the other arms.
+                return Err(spawn_failure_error(
+                    Some(format!("failed to spawn stack probe thread: {e}")),
+                    &panics,
+                ));
             }
         }
     }
@@ -477,46 +496,49 @@ where
                 // trace loops only exit on interrupted()/PROBE_ABORT, and this
                 // is not a user interrupt. The original error propagates as-is.
                 PROBE_ABORT.store(true, Ordering::SeqCst);
-                let mut panics: Vec<String> = Vec::new();
-                for handle in handles {
-                    let name = handle.thread().name().unwrap_or("stack-probe").to_string();
-                    if let Err(payload) = handle.join() {
-                        let msg = panic_message(payload);
-                        eprintln!("stack probe {name} panicked: {msg}");
-                        panics.push(msg);
-                    }
-                }
-                // R18-B2: append peer panic texts to the first error instead of
-                // leaving them only on stderr (matches the Disconnected arm).
+                let panics = collect_probe_panics(handles);
+                // R18-B2: append peer panic texts (with names) to the first
+                // error instead of leaving them only on stderr (matches the
+                // Disconnected arm).
                 if panics.is_empty() {
                     return Err(e);
                 }
-                return Err(anyhow!(
-                    "{e:#}; also stack probe(s) panicked: {}",
-                    panics.join("; ")
-                ));
+                return Err(spawn_failure_error(Some(format!("{e:#}")), &panics));
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                // every thread is gone (a panicked thread sent no message)
-                let mut panics: Vec<(String, String)> = Vec::new();
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // R20-J1: a probe can panic (its tx drops, no message) while
+                // a sibling still runs, so recv_timeout would spin forever.
+                // Sweep for finished handles; if any panicked, report it
+                // immediately and abort the surviving probes. Joined handles
+                // are removed so a later arm cannot re-join them (JoinHandle
+                // is consumed by join).
+                let mut finished = Vec::new();
+                let mut remaining = Vec::new();
                 for handle in handles {
-                    let name = handle.thread().name().unwrap_or("stack-probe").to_string();
-                    if let Err(payload) = handle.join() {
-                        let msg = panic_message(payload);
-                        eprintln!("stack probe {name} panicked: {msg}");
-                        panics.push((name, msg));
+                    if handle.is_finished() {
+                        finished.push(handle);
+                    } else {
+                        remaining.push(handle);
                     }
                 }
-                if !panics.is_empty() {
-                    let joined = panics
-                        .iter()
-                        .map(|(name, msg)| format!("{name}: {msg}"))
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    return Err(anyhow!("stack probe(s) panicked: {joined}"));
+                handles = remaining;
+                if finished.is_empty() {
+                    continue;
                 }
-                return Err(anyhow!("all stack probes stopped without a signal"));
+                let panics = collect_probe_panics(finished);
+                if panics.is_empty() {
+                    // A probe finished cleanly without sending, e.g. it
+                    // exited Ok but its tx clone was dropped; keep waiting
+                    // for the rest.
+                    continue;
+                }
+                PROBE_ABORT.store(true, Ordering::SeqCst);
+                return Err(spawn_failure_error(None, &panics));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // every thread is gone (a panicked thread sent no message)
+                let panics = collect_probe_panics(handles);
+                return Err(spawn_failure_error(None, &panics));
             }
         }
     }
@@ -1037,23 +1059,37 @@ mod tests {
         PROBE_ABORT.store(false, Ordering::Relaxed);
     }
 
-    /// R19-B2c: the spawn-failure error merges peer panic texts; without
-    /// panics the message is exactly the existing one. (A real spawn failure
-    /// is impossible to force portably, so the formatting helper — used by
-    /// the spawn-failure arm — is unit-tested directly.)
+    /// R19-B2c: the spawn-failure error merges peer panic texts, carrying
+    /// each probe's name (R20-B2c-2); without panics the message is exactly
+    /// the existing one. (A real spawn failure is impossible to force
+    /// portably, so the formatting helper — used by the spawn-failure arm —
+    /// is unit-tested directly.)
     #[test]
     fn spawn_failure_error_merges_peer_panics() {
-        let err = spawn_failure_error("boom", &["probe boom panic".to_string()]);
+        let err = spawn_failure_error(
+            Some("failed to spawn stack probe thread: boom".to_string()),
+            &[
+                ("stack-probe-0".to_string(), "probe boom panic".to_string()),
+                ("stack-probe-1".to_string(), "probe bang panic".to_string()),
+            ],
+        );
         let msg = format!("{err:#}");
         assert!(
             msg.contains("failed to spawn stack probe thread: boom"),
             "{msg}"
         );
         assert!(
-            msg.contains("also stack probe(s) panicked: probe boom panic"),
+            msg.contains("also stack probe(s) panicked: stack-probe-0: probe boom panic; stack-probe-1: probe bang panic"),
             "{msg}"
         );
-        let err = spawn_failure_error("boom", &[]);
+        assert!(msg.contains("stack-probe-0"), "{msg}");
+        assert!(msg.contains("stack-probe-1"), "{msg}");
+        assert!(msg.contains("probe boom panic"), "{msg}");
+        assert!(msg.contains("probe bang panic"), "{msg}");
+        let err = spawn_failure_error(
+            Some("failed to spawn stack probe thread: boom".to_string()),
+            &[],
+        );
         assert_eq!(
             format!("{err:#}"),
             "failed to spawn stack probe thread: boom"
@@ -1071,6 +1107,31 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("probe boom"), "{msg}");
         assert!(!msg.contains("panicked"), "{msg}");
+        PROBE_ABORT.store(false, Ordering::Relaxed);
+    }
+
+    /// Round 21 / R20-J1: a probe that panics while a sibling still runs must
+    /// surface promptly via the Timeout sweep (not spin forever), carrying the
+    /// panicking probe's name, and abort the surviving probe.
+    #[test]
+    fn run_jobs_concurrently_sweeps_panicked_probe() {
+        let start = std::time::Instant::now();
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
+            Box::new(move || -> Result<()> {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                panic!("probe boom panic")
+            }),
+            Box::new(sleep_job(2000)),
+        ];
+        let err = run_jobs_concurrently(jobs, || false).unwrap_err();
+        let elapsed = start.elapsed();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("probe boom panic"), "{msg}");
+        assert!(msg.contains("stack-probe-0"), "{msg}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "sweep took {elapsed:?}"
+        );
         PROBE_ABORT.store(false, Ordering::Relaxed);
     }
 

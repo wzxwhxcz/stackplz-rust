@@ -361,6 +361,82 @@ fn spawn_failure_error(
     RunError::Module(msg)
 }
 
+/// Wait for module completions until an interrupt, a completion, or every
+/// sender dropping. Returns the raw outcome; the caller still joins `handles`
+/// via [`finalize_module_outcome`].
+///
+/// R20-J2: the Timeout arm sweeps finished module handles — a module can
+/// panic before its send (tx drops, no message) while a sibling still runs,
+/// so recv_timeout would otherwise spin forever. Joined handles are removed
+/// from `handles` (a JoinHandle can only be joined once), so the sweep never
+/// re-joins an already-joined handle.
+fn wait_for_module_completions(
+    rx: mpsc::Receiver<(String, Option<String>)>,
+    handles: &mut Vec<(String, std::thread::JoinHandle<()>)>,
+    interrupted: &AtomicBool,
+) -> Result<(), RunError> {
+    loop {
+        if interrupted.load(Ordering::SeqCst) {
+            break Ok(());
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok((name, error)) => {
+                if let Some(err) =
+                    handle_module_completion(&name, error, interrupted.load(Ordering::SeqCst))
+                {
+                    // Stop the other module before returning (R11-4): a trace
+                    // module ends on its own only through an error or a poll
+                    // failure, and neither is a success.
+                    interrupted.store(true, Ordering::SeqCst);
+                    break Err(err);
+                }
+                break Ok(());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Sweep finished handles (see the R20-J2 note above).
+                let mut finished = Vec::new();
+                let mut remaining = Vec::new();
+                for (name, handle) in std::mem::take(handles) {
+                    if handle.is_finished() {
+                        finished.push((name, handle));
+                    } else {
+                        remaining.push((name, handle));
+                    }
+                }
+                *handles = remaining;
+                if finished.is_empty() {
+                    continue;
+                }
+                let panics = finished
+                    .into_iter()
+                    .filter_map(|(name, handle)| {
+                        handle.join().err().map(|payload| {
+                            let msg = panic_message(payload);
+                            eprintln!("module {name} panicked: {msg}");
+                            (name, msg)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if panics.is_empty() {
+                    // A module finished cleanly without sending — keep waiting
+                    // for the rest.
+                    continue;
+                }
+                interrupted.store(true, Ordering::SeqCst);
+                break Err(RunError::Module(format_panics(&panics)));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // Every module thread ended without sending a completion
+                // (panicked before the send) — not a success: a trace loop
+                // only ends on a signal or a module failure.
+                break Err(RunError::Module(
+                    "all modules stopped without a signal, [skip it]".into(),
+                ));
+            }
+        }
+    }
+}
+
 /// Start every selected module and block until a signal or a module failure.
 ///
 /// Upstream starts the modules from the main goroutine and `os.Exit(1)`s when
@@ -491,34 +567,7 @@ fn run_modules(
     // The loop breaks with the outcome; the warning prints before returning
     // it, whether the run succeeded or failed (a failing run loses logs too,
     // and that is when the warning matters most).
-    let mut outcome = loop {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            break Ok(());
-        }
-        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-            Ok((name, error)) => {
-                if let Some(err) =
-                    handle_module_completion(&name, error, INTERRUPTED.load(Ordering::SeqCst))
-                {
-                    // Stop the other module before returning (R11-4): a trace
-                    // module ends on its own only through an error or a poll
-                    // failure, and neither is a success.
-                    INTERRUPTED.store(true, Ordering::SeqCst);
-                    break Err(err);
-                }
-                break Ok(());
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // Every module thread ended without sending a completion
-                // (panicked before the send) — not a success: a trace loop
-                // only ends on a signal or a module failure.
-                break Err(RunError::Module(
-                    "all modules stopped without a signal, [skip it]".into(),
-                ));
-            }
-        }
-    };
+    let mut outcome = wait_for_module_completions(rx, &mut handles, &INTERRUPTED);
     // Round 14 (R14-5/R14-2): the loop broke on one of the three outcomes
     // above; join every module thread before the final warning so the dropped-
     // lines count (and the shutdown summaries) are final — see the path-by-
@@ -830,6 +879,52 @@ mod tests {
         assert_eq!(
             err.message(),
             "module StackMod panicked: first module boom; module SyscallMod panicked: second module boom"
+        );
+    }
+
+    /// Round 21 / R20-J2: a module that panics while a sibling still runs
+    /// must surface promptly via the Timeout sweep (not spin forever),
+    /// carrying the panicking module's name, and set the interrupt flag so
+    /// the surviving module stops. (`run_modules` needs full BPF module
+    /// infra; the sweep lives in `wait_for_module_completions`, so that is
+    /// what is exercised.)
+    #[test]
+    fn wait_sweeps_panicked_module() {
+        let (tx, rx) = mpsc::channel::<(String, Option<String>)>();
+        let mut handles = Vec::new();
+        for (name, delay, panic_text) in [
+            ("StackMod", 50u64, Some("module boom")),
+            ("SyscallMod", 2000, None),
+        ] {
+            let tx = tx.clone();
+            let handle = std::thread::Builder::new()
+                .name(name.to_string())
+                .spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    if let Some(text) = panic_text {
+                        panic!("{text}");
+                    }
+                    let _ = tx.send((name.to_string(), None));
+                })
+                .unwrap();
+            handles.push((name.to_string(), handle));
+        }
+        drop(tx);
+        let interrupted = AtomicBool::new(false);
+        let start = std::time::Instant::now();
+        let outcome = wait_for_module_completions(rx, &mut handles, &interrupted);
+        let elapsed = start.elapsed();
+        let err = outcome.unwrap_err();
+        let msg = err.message();
+        assert!(msg.contains("StackMod"), "{msg}");
+        assert!(msg.contains("module boom"), "{msg}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "sweep took {elapsed:?}"
+        );
+        assert!(
+            interrupted.load(Ordering::SeqCst),
+            "surviving module aborted"
         );
     }
 

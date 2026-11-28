@@ -75,8 +75,9 @@ pub struct HookConfig {
 
 /// Decode a hex offset string like `"0xF37C"` / `"0xf37c"` to a u64.
 /// Master-era `hex2int` (`origin/master:cli/cmd/stack.go:46-50`): strip the
-/// `0x` prefix then parse
-/// base-16. Invalid input yields 0 (matching Go's ignored error).
+/// `0x` prefix then parse base-16.
+/// Underscores follow Go integer-literal rules (shared `underscore_ok` with
+/// `parse_base0_u64`); a leading `+` is rejected; invalid input yields 0.
 pub fn hex2int(hex: &str) -> u64 {
     // R19-F1: Go-literal rules shared with parse_base0_u64 — '_' is only
     // legal right after the base prefix or between digits, and a leading

@@ -407,6 +407,22 @@ fn collect_probe_panics(handles: Vec<std::thread::JoinHandle<()>>) -> Vec<(Strin
     panics
 }
 
+/// Drain the channel after joining; return Err texts from peers that exited
+/// during wind-down (R22-A1/A2). The channel is dead after join, so this
+/// never blocks.
+fn drain_peer_errors(rx: &std::sync::mpsc::Receiver<Result<()>>) -> Vec<String> {
+    let mut errs = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(Err(e)) => errs.push(format!("{e:#}")),
+            Ok(Ok(())) => {}
+            Err(std::sync::mpsc::TryRecvError::Empty)
+            | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    errs
+}
+
 /// Build an error carrying peer panic names and texts (R19-B2c). `prefix`
 /// is the leading message for the spawn/first-error arms (`None` for the
 /// Disconnected/timeout-sweep shape, where the panics are the whole error).
@@ -499,6 +515,12 @@ where
                 }
                 PROBE_ABORT.store(true, Ordering::SeqCst);
                 let panics = collect_probe_panics(handles);
+                // R22-A1: a peer may have queued its Err while the clean-Ok
+                // probe was finishing; drain it so the real failure is
+                // surfaced instead of the generic "stopped without a signal".
+                if let Some(first_err) = drain_peer_errors(&rx).into_iter().next() {
+                    return Err(anyhow!(first_err));
+                }
                 return Err(spawn_failure_error(
                     Some("a stack probe stopped without a signal".to_string()),
                     &panics,
@@ -548,6 +570,21 @@ where
                 PROBE_ABORT.store(true, Ordering::SeqCst);
                 let mut panics = panics;
                 panics.extend(collect_probe_panics(handles));
+                // R22-A2: a peer can exit during wind-down and queue its Err
+                // (e.g. a setup-stage `?`) without panicking; drain it so
+                // that failure is also reported.
+                let errs = drain_peer_errors(&rx);
+                if !errs.is_empty() {
+                    let joined = panics
+                        .iter()
+                        .map(|(name, msg)| format!("{name}: {msg}"))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(anyhow!(format!(
+                        "stack probe(s) panicked: {joined}; also peer probe(s) failed: {}",
+                        errs.join("; ")
+                    )));
+                }
                 return Err(spawn_failure_error(None, &panics));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -1173,6 +1210,46 @@ mod tests {
             elapsed < std::time::Duration::from_millis(500),
             "sweep took {elapsed:?}"
         );
+        PROBE_ABORT.store(false, Ordering::Relaxed);
+    }
+
+    /// R22-A1: when one probe ends Ok and a peer errored just before
+    /// wind-down, the peer's Err must be surfaced instead of the generic
+    /// "stopped without a signal" text (it was previously dropped with the
+    /// channel).
+    #[test]
+    fn run_jobs_concurrently_clean_ok_drains_peer_error() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
+            Box::new(move || -> Result<()> {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                Err(anyhow!("probe boom"))
+            }),
+            Box::new(move || -> Result<()> { Ok(()) }),
+        ];
+        let err = run_jobs_concurrently(jobs, || false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("probe boom"), "{msg}");
+        PROBE_ABORT.store(false, Ordering::Relaxed);
+    }
+
+    /// R22-A2: when a probe panics first (sweep arm) and a peer exits during
+    /// wind-down with an Err, both the panic text and the peer error must
+    /// appear in the returned error.
+    #[test]
+    fn run_jobs_concurrently_sweep_appends_peer_error() {
+        let _guard = RUN_JOBS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jobs: Vec<Box<dyn FnOnce() -> Result<()> + Send>> = vec![
+            Box::new(move || -> Result<()> { panic!("probe boom panic") }),
+            Box::new(move || -> Result<()> {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                Err(anyhow!("setup failed"))
+            }),
+        ];
+        let err = run_jobs_concurrently(jobs, || false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("probe boom panic"), "{msg}");
+        assert!(msg.contains("setup failed"), "{msg}");
         PROBE_ABORT.store(false, Ordering::Relaxed);
     }
 

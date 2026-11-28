@@ -346,6 +346,11 @@ fn append_queued_completions(mut err: RunError, queued: &[String]) -> RunError {
     if !queued.is_empty() {
         if let RunError::Module(msg) = &mut err {
             msg.push_str(&format!("; {}", queued.join("; ")));
+        } else {
+            // R25-E3: every production call site passes a Module error, so
+            // this branch is unreachable; assert it so a future caller that
+            // passes Usage/NothingToHook fails loudly.
+            debug_assert!(false, "append_queued_completions: non-Module RunError");
         }
     }
     err
@@ -379,8 +384,10 @@ fn finalize_module_outcome(
 }
 
 /// Build the spawn-failure error, appending any wind-down panic texts
-/// (R18-B2b); without panics the message is unchanged.
-fn spawn_failure_error(
+/// (R18-B2b); without panics the message is unchanged. Named distinctly from
+/// the probe-layer `spawn_failure_error` (stack_cmd.rs) — same intent,
+/// different shape (R25-H1).
+fn module_spawn_failure_error(
     name: &str,
     e: impl std::fmt::Display,
     panics: &[(String, String)],
@@ -411,6 +418,13 @@ fn wait_for_module_completions(
 ) -> Result<(), RunError> {
     loop {
         if interrupted.load(Ordering::SeqCst) {
+            // R25-E2: completions queued before the interrupt were silently
+            // dropped with the channel; report them (diagnostic only —
+            // interrupt stays a clean stop).
+            let queued = drain_queued_completions(&rx);
+            for text in queued {
+                eprintln!("{text}");
+            }
             break Ok(());
         }
         match rx.recv_timeout(std::time::Duration::from_millis(200)) {
@@ -428,10 +442,9 @@ fn wait_for_module_completions(
                     let queued = drain_queued_completions(&rx);
                     break Err(append_queued_completions(err, &queued));
                 }
-                // R24-D1: drain queued completions on the interrupt path too.
-                // Interrupt stays a clean stop, so any queued errors are
-                // dropped with the channel.
-                drain_queued_completions(&rx);
+                // R25-E1: the loop-top interrupt check above drains queued
+                // completions; this arm's drain is dead (its result is
+                // discarded and rx drops at return) — removed.
                 break Ok(());
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -601,7 +614,7 @@ fn run_modules(
                 // failure is not dropped with the channel.
                 let queued = drain_queued_completions(&rx);
                 print_dropped_lines_warning(&warn_logger);
-                let err = spawn_failure_error(name, e, &panics);
+                let err = module_spawn_failure_error(name, e, &panics);
                 return Err(append_queued_completions(err, &queued));
             }
         }
@@ -1032,7 +1045,7 @@ mod tests {
             .spawn(|| panic!("wind-down boom"))
             .unwrap();
         let panics = collect_joined_panics(vec![("StackMod".to_string(), first)]);
-        let err = spawn_failure_error("SyscallMod", "spawn failed", &panics);
+        let err = module_spawn_failure_error("SyscallMod", "spawn failed", &panics);
         assert_eq!(
             err.message(),
             "failed to spawn SyscallMod module: spawn failed; also module(s) panicked: module StackMod panicked: wind-down boom"
@@ -1043,7 +1056,7 @@ mod tests {
             .spawn(|| {})
             .unwrap();
         let panics = collect_joined_panics(vec![("StackMod".to_string(), quiet)]);
-        let err = spawn_failure_error("SyscallMod", "spawn failed", &panics);
+        let err = module_spawn_failure_error("SyscallMod", "spawn failed", &panics);
         assert_eq!(
             err.message(),
             "failed to spawn SyscallMod module: spawn failed"
@@ -1117,7 +1130,7 @@ mod tests {
             .unwrap();
         drop(tx);
         let queued = drain_queued_completions(&rx);
-        let err = spawn_failure_error("StackMod", "spawn failed", &[]);
+        let err = module_spawn_failure_error("StackMod", "spawn failed", &[]);
         let err = append_queued_completions(err, &queued);
         let msg = err.message();
         assert!(
@@ -1127,5 +1140,91 @@ mod tests {
         assert!(msg.contains("SyscallMod"), "{msg}");
         assert!(msg.contains("module Run failed, [skip it]"), "{msg}");
         assert!(msg.contains("probe boom"), "{msg}");
+    }
+
+    /// R25-E2: a completion queued before an interrupt was silently dropped
+    /// with the channel. The loop-top interrupt path now drains and reports
+    /// it on stderr; assert the observable output (asserting only `Ok`
+    /// would pass on the old code too).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn interrupt_reports_queued_completions_on_stderr() {
+        let (tx, rx) = mpsc::channel::<(String, Option<String>)>();
+        tx.send(("SyscallMod".to_string(), Some("probe boom".into())))
+            .unwrap();
+        drop(tx);
+        let interrupted = AtomicBool::new(true);
+        let mut handles = Vec::new();
+        let cap = StdErrCapture::new();
+        let result = wait_for_module_completions(rx, &mut handles, &interrupted);
+        assert!(result.is_ok());
+        let err = cap.take();
+        assert!(err.contains("probe boom"), "stderr was: {err}");
+    }
+
+    /// R25-E2 stderr-capture harness (Linux-only): redirect fd 2 to a pipe
+    /// so eprintln output is observable in a test; restores on take/drop.
+    #[cfg(target_os = "linux")]
+    struct StdErrCapture {
+        saved: i32,
+        read_fd: i32,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl StdErrCapture {
+        fn new() -> Self {
+            unsafe {
+                let mut fds = [0i32; 2];
+                assert!(libc::pipe(fds.as_mut_ptr()) == 0);
+                let saved = libc::dup(2);
+                assert!(saved >= 0);
+                assert!(libc::dup2(fds[1], 2) == 2);
+                libc::close(fds[1]);
+                // Non-blocking read: if the drain ever regresses, the test
+                // fails instead of hanging on an empty pipe.
+                let flags = libc::fcntl(fds[0], libc::F_GETFL);
+                libc::fcntl(fds[0], libc::F_SETFL, flags | libc::O_NONBLOCK);
+                StdErrCapture {
+                    saved,
+                    read_fd: fds[0],
+                }
+            }
+        }
+
+        fn take(mut self) -> String {
+            unsafe {
+                let mut buf = [0u8; 8192];
+                let n = libc::read(
+                    self.read_fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                );
+                libc::close(self.read_fd);
+                libc::dup2(self.saved, 2);
+                libc::close(self.saved);
+                self.read_fd = -1;
+                self.saved = -1;
+                String::from_utf8_lossy(&buf[..n.max(0) as usize]).to_string()
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for StdErrCapture {
+        fn drop(&mut self) {
+            unsafe {
+                // Restore stderr whenever the guard goes away (including a
+                // failing assert) so later tests still see the real stderr.
+                if self.saved >= 0 {
+                    libc::dup2(self.saved, 2);
+                    libc::close(self.saved);
+                    self.saved = -1;
+                }
+                if self.read_fd >= 0 {
+                    libc::close(self.read_fd);
+                    self.read_fd = -1;
+                }
+            }
+        }
     }
 }

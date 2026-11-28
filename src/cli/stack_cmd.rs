@@ -503,6 +503,11 @@ where
                     eprintln!("stack probe {name} panicked: {}", panic_message(payload));
                 }
             }
+            // R25-E2: completions queued before the interrupt were silently
+            // dropped with the channel; report them (diagnostic only).
+            for err in drain_peer_errors(&rx) {
+                eprintln!("{err}");
+            }
             return Ok(());
         }
         match rx.recv_timeout(std::time::Duration::from_millis(200)) {
